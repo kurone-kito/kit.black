@@ -1,0 +1,30 @@
+{
+  "defaultSeverity": "error",
+  "extends": [
+    "tslint:all",
+    "tslint-config-airbnb",
+    "tslint-react"
+  ],
+  "rules": {
+    "file-name-casing": false,
+    "import-name": false,
+    "no-default-export": false,
+    "no-implicit-dependencies": [
+      true,
+      [
+        "src",
+        "~"
+      ]
+    ],
+    "no-import-side-effect": [
+      true,
+      {
+        "ignore-module": "(\\.html|\\.css)$"
+      }
+    ],
+    "no-submodule-imports": false
+  },
+  "rulesDirectory": [
+    "node_modules/tslint-config-airbnb"
+  ]
+}
