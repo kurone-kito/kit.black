@@ -19,6 +19,9 @@
     "paths": {
       "~/*": [
         "src/*"
+      ],
+      "~assets/*": [
+        "assets/*"
       ]
     },
     "typeRoots": [
