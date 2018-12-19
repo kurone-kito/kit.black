@@ -1,11 +1,8 @@
+import ExtractTextPlugin from 'extract-text-webpack-plugin';
 import fetch from 'node-fetch';
 import path from 'path';
 
-// Paths Aliases defined through tsconfig.json
-const typescriptWebpackPaths = require('./webpack.config.js');
-
-/** Load extract-text-webpack-plugin for proper implement as the example shows: {@link https://github.com/webpack-contrib/extract-text-webpack-plugin#usage} */
-const ExtractTextPlugin = require('extract-text-webpack-plugin')
+import TypescriptWebpackPaths from './webpack.config.js';
 
 export default {
   entry: path.join(__dirname, 'src', 'index.tsx'),
@@ -36,7 +33,7 @@ export default {
 
     // Add TypeScript Path Mappings (from tsconfig via webpack.config.js)
     // To react-statics alias resolution
-    config.resolve.alias = typescriptWebpackPaths.resolve.alias;
+    config.resolve.alias = TypescriptWebpackPaths.resolve.alias;
 
     // We replace the existing JS rule with one, that allows us to use
     // Both TypeScript and JavaScript interchangeably
@@ -53,7 +50,7 @@ export default {
           },
           {
             test: /\.css$/,
-            use: ExtractTextPlugin.extract({ fallback: 'style-loader', use: 'css-loader' })
+            use: ExtractTextPlugin.extract({ fallback: 'style-loader', use: 'css-loader' }),
           },
           defaultLoaders.fileLoader,
         ],
@@ -61,6 +58,7 @@ export default {
     ];
     // FIXME: You might need to make the file name universal
     config.plugins.push(new ExtractTextPlugin('app.css'));
+
     return config;
   },
 };
