@@ -5,6 +5,21 @@
     "tslint-config-airbnb",
     "tslint-react"
   ],
+  "jsRules": {
+    "no-default-export": false,
+    "no-implicit-dependencies": [
+      true,
+      "dev"
+    ],
+    "no-require-imports": false,
+    "quotemark": [
+      true,
+      "single",
+      "jsx-double",
+      "avoid-template",
+      "avoid-escape"
+    ]
+  },
   "rules": {
     "file-name-casing": false,
     "import-name": false,
@@ -19,7 +34,7 @@
     "no-import-side-effect": [
       true,
       {
-        "ignore-module": "(\\.html|\\.css)$"
+        "ignore-module": "(\\.html|\\.s?css)$"
       }
     ],
     "no-submodule-imports": false
