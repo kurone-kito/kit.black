@@ -26,8 +26,28 @@ export default {
       { component: 'src/containers/404', is404: true },
     ];
   },
-  getSiteData: () => ({ title: 'React Static' }),
-  webpack: (config, { defaultLoaders }) => {
+  getSiteData: () => ({ title: 'Kurone Kito (黒音キト)' }),
+  webpack: (config, { defaultLoaders, stage }) => {
+    const loaders = (() => {
+      const defaultCssSettings = {
+        loader: 'css-loader',
+        options: { importLoaders: 1, minimize: stage === 'prod', sourceMap: false },
+      };
+      const defaultSassSettings = { loader: 'sass-loader', options: { includePath: ['src/'] } };
+      switch (stage) {
+        case 'dev':
+          return ['style-loader', 'css-loader', 'sass-loader'].map((loader) => ({ loader }));
+        case 'node':
+        case 'prod':
+          return [defaultCssSettings, defaultSassSettings];
+        default:
+          return ExtractTextPlugin.extract({
+            fallback: { loader: 'style-loader', options: { sourceMap: false, hmr: false } },
+            use: [defaultCssSettings, defaultSassSettings],
+          });
+      }
+    })();
+
     // Add .ts and .tsx extension to resolver
     config.resolve.extensions.push('.ts', '.tsx');
 
@@ -48,16 +68,13 @@ export default {
               { loader: require.resolve('ts-loader'), options: { transpileOnly: true } },
             ],
           },
-          {
-            test: /\.css$/,
-            use: ExtractTextPlugin.extract({ fallback: 'style-loader', use: 'css-loader' }),
-          },
+          { test: /\.s(a|c)ss$/, use: loaders },
+          defaultLoaders.cssLoader,
+          defaultLoaders.jsLoader,
           defaultLoaders.fileLoader,
         ],
       },
     ];
-    // FIXME: You might need to make the file name universal
-    config.plugins.push(new ExtractTextPlugin('app.css'));
 
     return config;
   },
