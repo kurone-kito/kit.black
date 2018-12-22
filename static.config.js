@@ -34,18 +34,14 @@ export default {
         options: { importLoaders: 1, minimize: stage === 'prod', sourceMap: false },
       };
       const defaultSassSettings = { loader: 'sass-loader', options: { includePath: ['src/'] } };
-      switch (stage) {
-        case 'dev':
-          return ['style-loader', 'css-loader', 'sass-loader'].map((loader) => ({ loader }));
-        case 'node':
-        case 'prod':
-          return [defaultCssSettings, defaultSassSettings];
-        default:
-          return ExtractTextPlugin.extract({
-            fallback: { loader: 'style-loader', options: { sourceMap: false, hmr: false } },
-            use: [defaultCssSettings, defaultSassSettings],
-          });
+      if (stage === 'dev') {
+        return ['style-loader', 'css-loader', 'sass-loader'].map((loader) => ({ loader }));
       }
+
+      return ExtractTextPlugin.extract({
+        fallback: { loader: 'style-loader', options: { sourceMap: false, hmr: false } },
+        use: [defaultCssSettings, defaultSassSettings],
+      });
     })();
 
     // Add .ts and .tsx extension to resolver
@@ -75,6 +71,8 @@ export default {
         ],
       },
     ];
+    // FIXME: You might need to make the file name universal
+    config.plugins.push(new ExtractTextPlugin('app.scss'));
 
     return config;
   },
