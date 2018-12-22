@@ -7,6 +7,7 @@
   ],
   "jsRules": {
     "no-default-export": false,
+    "no-default-import": false,
     "no-implicit-dependencies": [
       true,
       "dev"
@@ -24,6 +25,7 @@
     "file-name-casing": false,
     "import-name": false,
     "no-default-export": false,
+    "no-default-import": false,
     "no-implicit-dependencies": [
       true,
       [
