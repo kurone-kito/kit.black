@@ -12,17 +12,6 @@ export default {
 
     return [
       { component: 'src/containers/Home', path: '/' },
-      { component: 'src/containers/About', path: '/about' },
-      {
-        children: posts.map((post) => ({
-          component: 'src/containers/Post',
-          getData: () => ({ post }),
-          path: `/post/${post.id}`,
-        })),
-        component: 'src/containers/Blog',
-        getData: () => ({ posts }),
-        path: '/blog',
-      },
       { component: 'src/containers/404', is404: true },
     ];
   },
