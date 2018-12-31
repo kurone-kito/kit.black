@@ -12,6 +12,8 @@
     "tslint": "tslint"
   },
   "dependencies": {
+    "bloomer": "^0.6.5",
+    "bulma": "^0.7.2",
     "node-fetch": "^2.3.0",
     "react": "^16.7.0",
     "react-dom": "^16.7.0",
@@ -37,10 +39,5 @@
     "tslint-config-airbnb": "^5.11.1",
     "tslint-react": "^3.6.0",
     "typescript": "^3.2.2"
-  },
-  "prettier": {
-    "semi": false,
-    "singleQuote": true,
-    "trailingComma": "all"
   }
 }
