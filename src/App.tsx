@@ -11,8 +11,7 @@ const app: (() => React.ReactElement<{}>) = (): React.ReactElement<{}> => (
   <Router>
     <div>
       <Head>
-        <title>kurone-kito</title>
-        <meta http-equiv="x-ua-compatible" content="ie=Edge" />
+        <title>黒音キト -Kurone Kito- :: official site</title>
         <meta name="author" content="kurone-kito" />
         <meta name="description" content="Kurone Kito's official site." />
         <meta name="keywords" content="Kito Kurone,黒音キト,VTuber" />
