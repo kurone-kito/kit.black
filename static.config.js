@@ -1,10 +1,14 @@
 import ExtractTextPlugin from 'extract-text-webpack-plugin';
 import fetch from 'node-fetch';
 import path from 'path';
+import React from 'react';
+
+import Root from './src/atoms/Root';
 
 import TypescriptWebpackPaths from './webpack.config.js';
 
 export default {
+  Document: ({ Body, children, Head, Html }) => <Root {...{ Body, Head, Html }}>{children}</Root>,
   entry: path.join(__dirname, 'src', 'index.tsx'),
   getRoutes: async () => {
     const response = await fetch('https://jsonplaceholder.typicode.com/posts');
@@ -54,6 +58,7 @@ export default {
             ],
           },
           { test: /\.s(a|c)ss$/, use: loaders },
+          { test: /favicon\.ico$/, loader: 'file-loader?name=[name].[ext]' },
           defaultLoaders.cssLoader,
           defaultLoaders.jsLoader,
           defaultLoaders.fileLoader,
