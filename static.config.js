@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 import path from 'path';
 import React from 'react';
 
-import Root from './src/atoms/Root';
+import Root from './src/templates/Root';
 
 import TypescriptWebpackPaths from './webpack.config.js';
 
@@ -15,8 +15,8 @@ export default {
     const posts = await response.json();
 
     return [
-      { component: 'src/containers/Home', path: '/' },
-      { component: 'src/containers/404', is404: true },
+      { component: 'src/pages/Home', path: '/' },
+      { component: 'src/pages/404', is404: true },
     ];
   },
   getSiteData: () => ({ title: 'Kurone Kito (黒音キト)' }),
