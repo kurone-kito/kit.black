@@ -10,15 +10,11 @@ import TypescriptWebpackPaths from './webpack.config.js';
 export default {
   Document: ({ Body, children, Head, Html }) => <Root {...{ Body, Head, Html }}>{children}</Root>,
   entry: path.join(__dirname, 'src', 'index.tsx'),
-  getRoutes: async () => {
-    const response = await fetch('https://jsonplaceholder.typicode.com/posts');
-    const posts = await response.json();
-
-    return [
+  getRoutes: async () =>
+    [
       { component: 'src/pages/Home', path: '/' },
       { component: 'src/pages/404', is404: true },
-    ];
-  },
+    ],
   getSiteData: () => ({ title: 'Kurone Kito (黒音キト)' }),
   webpack: (config, { defaultLoaders, stage }) => {
     const loaders = (() => {
