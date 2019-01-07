@@ -1,5 +1,4 @@
 import ExtractTextPlugin from 'extract-text-webpack-plugin';
-import fetch from 'node-fetch';
 import path from 'path';
 import React from 'react';
 
