@@ -5,7 +5,7 @@ import Routes from 'react-static-routes';
 
 import Favicons from '~/atoms/Favicons';
 
-import './app.scss';
+import './styles/index.scss';
 
 const app: (() => React.ReactElement<{}>) = (): React.ReactElement<{}> => (
   <Router>
