@@ -9,7 +9,7 @@ import '~/styles/index.scss';
 
 const component: React.FC = () => (
   <Router>
-    <div>
+    <React.Fragment>
       <Head>
         <title>黒音キト -Kurone Kito- :: official site</title>
         <meta name="author" content="kurone-kito" />
@@ -28,10 +28,8 @@ const component: React.FC = () => (
         />
       </Head>
       <Favicons />
-      <div className="content">
-        <Routes />
-      </div>
-    </div>
+      <Routes />
+    </React.Fragment>
   </Router>
 );
 
