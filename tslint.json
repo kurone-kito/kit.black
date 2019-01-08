@@ -47,7 +47,9 @@
         "ignore-module": "(\\.html|\\.s?css)$"
       }
     ],
-    "no-submodule-imports": false
+    "no-magic-numbers": false,
+    "no-submodule-imports": false,
+    "typedef": false
   },
   "rulesDirectory": [
     "node_modules/tslint-config-airbnb"
