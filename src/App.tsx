@@ -7,7 +7,7 @@ import Favicons from '~/atoms/Favicons';
 
 import '~/styles/index.scss';
 
-const app: (() => React.ReactElement<{}>) = (): React.ReactElement<{}> => (
+const component: React.FC = () => (
   <Router>
     <div>
       <Head>
@@ -35,4 +35,6 @@ const app: (() => React.ReactElement<{}>) = (): React.ReactElement<{}> => (
   </Router>
 );
 
-export default hot(module)(app);
+component.displayName = 'App';
+
+export default hot(module)(component);

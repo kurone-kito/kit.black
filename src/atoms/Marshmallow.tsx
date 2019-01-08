@@ -1,6 +1,6 @@
 import React from 'react';
 
-const component: React.FC = (): React.ReactElement<{}> => (
+const component: React.FC = () => (
   <svg
     width="480px"
     height="480px"

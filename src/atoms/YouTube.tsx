@@ -6,7 +6,7 @@ interface IProps {
   id: string;
 }
 
-const component: React.FC<IProps> = ({ id }: IProps): React.ReactElement<IProps> => (
+const component: React.FC<IProps> = ({ id }) => (
   <div className="kit-youtube">
     <iframe
       allowFullScreen={true}

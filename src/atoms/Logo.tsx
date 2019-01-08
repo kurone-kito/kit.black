@@ -3,7 +3,7 @@ import React from 'react';
 
 import imgKito from '~/images/kito.png';
 
-const component: React.FC = (): React.ReactElement<{}> => (
+const component: React.FC = () => (
   <Hero tag="header">
     <HeroBody className="kit-hero">
       <img className="kit-kito" alt="" src={imgKito} />

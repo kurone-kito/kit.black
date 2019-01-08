@@ -13,7 +13,7 @@ interface IProps {
 }
 
 const component: React.FC<IProps> =
-  ({ className, root, size }: IProps): React.ReactElement<IProps> => (
+  ({ className, root, size }) => (
     <Subtitle className={className} hasTextAlign="centered" isSize={size} tag={root}>
       “黒音キト”はIT系ブラック企業で働く、Webプログラマーな
     <ruby>

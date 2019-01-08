@@ -4,7 +4,7 @@ import { withSiteData } from 'react-static';
 import imgKito from '~/images/kito.png';
 import imgMarshmallow from '~/images/marshmallow.svg';
 
-export default withSiteData((): React.ReactElement<{}> => (
+const component: React.FC = () => (
   <div>
     <nav>
       <ul>
@@ -42,4 +42,8 @@ export default withSiteData((): React.ReactElement<{}> => (
       <img alt="" src={imgKito} />
     </header>
   </div>
-));
+);
+
+component.displayName = 'Home';
+
+export default withSiteData(component);

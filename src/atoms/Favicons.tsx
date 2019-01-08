@@ -24,7 +24,7 @@ import F256 from '~/images/favicons/256.png';
 import F384 from '~/images/favicons/384.png';
 import FaviconImage from '~/images/favicons/favicon.ico';
 
-const component: React.FC = (): React.ReactElement<{}> => (
+const component: React.FC = () => (
   <Head>
     <meta name="msapplication-TileColor" content="#ffffff" />
     <meta name="msapplication-TileImage" content={F144} />
