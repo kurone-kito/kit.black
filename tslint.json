@@ -49,6 +49,12 @@
     ],
     "no-magic-numbers": false,
     "no-submodule-imports": false,
+    "prefer-array-literal": [
+      true,
+      {
+        "allow-type-parameters": true
+      }
+    ],
     "typedef": false
   },
   "rulesDirectory": [
