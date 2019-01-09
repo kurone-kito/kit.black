@@ -1,9 +1,11 @@
+import { Provider } from 'mobx-react';
 import React from 'react';
 import { hot } from 'react-hot-loader';
 import { Head, Router } from 'react-static';
 import Routes from 'react-static-routes';
 
 import Favicons from '~/atoms/Favicons';
+import stores from '~/stores';
 
 import '~/styles/index.scss';
 
@@ -28,7 +30,9 @@ const component: React.FC = () => (
         />
       </Head>
       <Favicons />
-      <Routes />
+      <Provider {...stores}>
+        <Routes />
+      </Provider>
     </React.Fragment>
   </Router>
 );
