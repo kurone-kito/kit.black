@@ -1,11 +1,18 @@
+import { inject, observer } from 'mobx-react';
 import React from 'react';
 
 import SubTitle from '~/atoms/SubTitle';
+import ViewStore from '~/stores/view';
+import { ViewportType } from '~/utils/state';
 
-const component: React.FC = () => (
+interface IProps {
+  viewStore: ViewStore;
+}
+
+const component: React.FC<Partial<IProps>> = ({ viewStore: { viewportType } }) => (
   <main className="section">
     <section className="container">
-      <SubTitle />
+      {viewportType !== ViewportType.tablet && <SubTitle />}
       <p>
         独立系SIer会社に所属してWebフロントエンド開発に携わっています。<wbr />
         現場でのにゃーんなお話、ブラックあるあるなお話をしつつ、ゲーム実況など様々な活動をしています。
@@ -40,4 +47,4 @@ const component: React.FC = () => (
 
 component.displayName = 'About';
 
-export default component;
+export default inject(({ viewStore }): IProps => ({ viewStore }))(observer(component));
