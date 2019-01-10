@@ -1,0 +1,116 @@
+$kit-animation-duration: 900ms;
+$kit-animation-width: 3rem;
+
+@mixin kit-logo-animation-keyframe($name, $mul: 1, $rotate: 0deg) {
+  @keyframes #{$name} {
+    0% {
+      opacity: 0;
+      transform: rotate($rotate) translateX($kit-animation-width * $mul);
+      transform-origin: 0% 100%;
+    }
+    100% {
+      opacity: 1;
+      transform-origin: 0% 100%;
+      transform: rotate($rotate) translateX(0rem);
+    }
+  }
+}
+
+@include kit-logo-animation-keyframe(kit-logo-kito, -1);
+@include kit-logo-animation-keyframe(kit-logo-title);
+@include kit-logo-animation-keyframe(kit-logo-subtitle, 1, 90deg);
+
+@mixin kit-logo-animation ($name) {
+  animation-name: #{$name};
+  animation-duration: $kit-animation-duration;
+}
+
+.kit-hero {
+  overflow: hidden;
+  padding: 0px;
+}
+
+.kit-kito {
+  @include kit-logo-animation(kit-logo-kito);
+  position: relative;
+}
+
+.kit-logo {
+  font-family: 'Lato', sans-serif;
+  position: relative;
+  .title {
+    @include kit-logo-animation(kit-logo-title);
+    font-weight: 900;
+    position: relative;
+    text-align: center;
+    text-transform: uppercase;
+  }
+  .subtitle {
+    @include kit-logo-animation(kit-logo-subtitle);
+    text-transform: uppercase;
+    font-weight: 500;
+    position: relative;
+    transform: rotate(90deg);
+    transform-origin: 0% 100%;
+    .kit-logo-vtuber {
+      color: black;
+    }
+  }
+}
+
+@media only screen and (max-aspect-ratio: 4/5) {
+  .kit-kito {
+    left: 10vw;
+    width: 44vw;
+  }
+
+  .kit-logo {
+    left: 30vw;
+    margin-bottom: -64vw;
+    text-shadow: 0px 0px 2.5vw white;
+    top: -77vw;
+    .title {
+      font-size: 25vw;
+      line-height: 19vw;
+      width: 55vw;
+      .kit-family-name {
+        letter-spacing: -2.2vw;
+      }
+      .kit-first-name {
+        letter-spacing: -4vw;
+      }
+    }
+    .subtitle {
+      font-size: 4.7vw;
+      letter-spacing: -0.6vw;
+      top: -62vw;
+    }
+  }
+}
+
+@media only screen and (min-aspect-ratio: 4001/5000) and (max-aspect-ratio: 26/20) {
+  .kit-kito {
+    height: 110vh;
+  }
+  .kit-logo {
+    left: 13vh;
+    text-shadow: 0px 0px 2vh white;
+    top: -61vh;
+    .title{
+      font-size: 22.5vh;
+      line-height: 16.5vh;
+      width: 48vh;
+      .kit-family-name {
+        letter-spacing: -2.2vh;
+      }
+      .kit-first-name {
+        letter-spacing: -3.2vh;
+      }
+    }
+    .subtitle {
+      font-size: 4vh;
+      letter-spacing: -0.45vh;
+      top: -54vh;
+    }
+  }
+}
