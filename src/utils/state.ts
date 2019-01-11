@@ -19,6 +19,10 @@ const viewportTable: ViewportType[] = [
   ViewportType.others,
 ];
 
-/** Detect current viewport type. */
+/**
+ * Detect current viewport type.
+ *
+ * In SSR mode, it returns ViewportType.mobile.
+ */
 export const viewport = () =>
-  viewportTable.find(query => window.matchMedia(query).matches);
+  viewportTable.find(query => typeof window === 'undefined' || window.matchMedia(query).matches);
