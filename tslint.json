@@ -6,6 +6,7 @@
     "tslint-react"
   ],
   "jsRules": {
+    "file-name-casing": false,
     "no-default-export": false,
     "no-default-import": false,
     "no-implicit-dependencies": [
@@ -24,6 +25,13 @@
   "rules": {
     "file-name-casing": false,
     "import-name": false,
+    "max-line-length": [
+      true,
+      {
+        "limit": 100,
+        "ignore-pattern": "^ *[a-zA-Z0-9+]+=\"[^\"]+\"$"
+      }
+    ],
     "no-default-export": false,
     "no-default-import": false,
     "no-implicit-dependencies": [
@@ -39,7 +47,15 @@
         "ignore-module": "(\\.html|\\.s?css)$"
       }
     ],
-    "no-submodule-imports": false
+    "no-magic-numbers": false,
+    "no-submodule-imports": false,
+    "prefer-array-literal": [
+      true,
+      {
+        "allow-type-parameters": true
+      }
+    ],
+    "typedef": false
   },
   "rulesDirectory": [
     "node_modules/tslint-config-airbnb"

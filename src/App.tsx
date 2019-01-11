@@ -1,23 +1,24 @@
+import { Provider } from 'mobx-react';
 import React from 'react';
 import { hot } from 'react-hot-loader';
-import { Link, Router } from 'react-static';
-import Routes from 'react-static-routes';
+import { Router } from 'react-static';
 
-import './app.scss';
+import stores from '~/stores';
 
-const app: (() => React.ReactElement<{}>) = (): React.ReactElement<{}> => (
+import InjectedApp from './InjectedApp';
+
+import '~/styles/index.scss';
+
+const component: React.FC = () => (
   <Router>
-    <div>
-      <nav>
-        <Link exact={true} to="/">Home</Link>
-        <Link to="/about">About</Link>
-        <Link to="/blog">Blog</Link>
-      </nav>
-      <div className="content">
-        <Routes />
-      </div>
-    </div>
+    <React.Fragment>
+      <Provider {...stores}>
+        <InjectedApp />
+      </Provider>
+    </React.Fragment>
   </Router>
 );
 
-export default hot(module)(app);
+component.displayName = 'App';
+
+export default hot(module)(component);

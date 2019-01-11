@@ -1,0 +1,39 @@
+@import "~bulma/sass/utilities/initial-variables";
+@import "~bulma/sass/utilities/functions";
+
+$body-background-color: rgb(231, 231, 224);
+
+@import "~bulma/sass/utilities/derived-variables";
+@import '~bulma';
+
+@import './logo.scss';
+
+.kit-youtube {
+  position: relative;
+  padding-bottom: 56.25%;
+  padding-top: 30px;
+  height: 0px;
+  overflow: hidden;
+  iframe {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    width: 100%;
+    height: 100%;
+  }
+}
+
+.kit-table {
+  display: table;
+  dl {
+    display: table-row;
+  }
+  dt, dd {
+    display: table-cell;
+    padding: 0.5vw 0vw;
+  }
+  dt {
+    color: black;
+    padding-right: 1vw;
+  }
+}
