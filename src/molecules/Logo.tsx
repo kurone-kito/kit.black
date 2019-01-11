@@ -1,9 +1,17 @@
 import { Hero, HeroBody, Subtitle, Title } from 'bloomer';
+import { inject, observer } from 'mobx-react';
 import React from 'react';
 
+import SubTitle from '~/atoms/SubTitle';
 import imgKito from '~/images/kito.png';
+import ViewStore from '~/stores/view';
+import { ViewportType } from '~/utils/state';
 
-const component: React.FC = () => (
+interface IProps {
+  viewStore: ViewStore;
+}
+
+const component: React.FC<Partial<IProps>> = ({ viewStore: { viewportType } }) => (
   <Hero tag="header">
     <HeroBody className="kit-hero">
       <img className="kit-kito" alt="" src={imgKito} />
@@ -18,10 +26,11 @@ const component: React.FC = () => (
           <span className="kit-logo-web-programmer">Web Programmer</span>
         </Subtitle>
       </div>
+      {viewportType === ViewportType.tablet && <SubTitle />}
     </HeroBody>
   </Hero>
 );
 
 component.displayName = 'Logo';
 
-export default component;
+export default inject(({ viewStore }): IProps => ({ viewStore }))(observer(component));

@@ -1,9 +1,9 @@
 import React from 'react';
 import { withSiteData } from 'react-static';
 
-import Logo from '~/atoms/Logo';
 import YouTube from '~/atoms/YouTube';
 import About from '~/molecules/About';
+import Logo from '~/molecules/Logo';
 import Nav from '~/molecules/Nav';
 
 const component: React.FC = () => (
