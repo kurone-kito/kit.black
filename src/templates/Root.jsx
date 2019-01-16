@@ -12,13 +12,13 @@ import React from 'react';
 /** @type {React.FC<IProps>} */
 const component =
   ({ Body, children, Head }) => (
-    <html lang="ja-JP">
+    <html lang="ja">
       <Head>
         <meta charSet="UTF-8" />
         <meta httpEquiv="x-ua-compatible" content="ie=Edge" />
         <meta
           name="viewport"
-          content="width=device-width, initial-scale=1, maximum-scale=1, shrink-to-fit=no, viewport-fit=cover"
+          content="width=device-width, initial-scale=1, maximum-scale=5, shrink-to-fit=no, viewport-fit=cover"
         />
       </Head>
       <Body>{children}</Body>
