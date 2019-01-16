@@ -11,7 +11,7 @@ const component: React.FC = () => (
     <Nav />
     <Logo />
     <About />
-    <YouTube id="K1QRWeIDSdk" />
+    <YouTube id="K1QRWeIDSdk" title="社会性フィルター" />
     <footer className="footer">
       <p>©︎2018-2019 Kurone Kito</p>
     </footer>
