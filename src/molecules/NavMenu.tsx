@@ -12,8 +12,8 @@ interface IProps {
   navStore: NavStore;
 }
 
-const component: React.FC<Partial<IProps>> = () => (
-  <NavbarMenu id="navbarMenu" >
+const component: React.FC<Partial<IProps>> = ({ navStore: { expanded } }) => (
+  <NavbarMenu isActive={expanded}>
     <NavbarEnd>
       <NavbarItem>
         <div className="buttons">
