@@ -8,12 +8,11 @@ interface IProps {
   navStore: NavStore;
 }
 
-const component: React.FC<Partial<IProps>> = ({ navStore: { expand, toggleExpantion } }) => (
+const component: React.FC<Partial<IProps>> = ({ navStore: { expanded, toggleExpantion } }) => (
   <NavbarBrand>
-    <NavbarBurger isActive={expand} onClick={toggleExpantion} />
+    <NavbarBurger isActive={expanded} onClick={toggleExpantion} />
   </NavbarBrand>
 );
-
 component.displayName = 'NavBrand';
 
 export default inject(({ navStore }): IProps => ({ navStore }))(observer(component));
