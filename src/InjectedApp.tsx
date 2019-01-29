@@ -18,7 +18,7 @@ interface IProps {
 
 @inject(({ viewStore }): IProps => ({ viewStore }))
 @observer
-export default class InjectedApp extends React.PureComponent<Partial<IProps>> {
+export default class InjectedApp extends React.Component<Partial<IProps>> {
 
   public render() {
     return (
