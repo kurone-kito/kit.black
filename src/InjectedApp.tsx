@@ -10,7 +10,9 @@ import ViewStore from '~/stores/view';
 
 import '~/styles/index.scss';
 
+/** Type of properties. */
 interface IProps {
+  /** Storing state for view environment. */
   viewStore: ViewStore;
 }
 

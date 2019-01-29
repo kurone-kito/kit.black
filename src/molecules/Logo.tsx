@@ -7,7 +7,9 @@ import imgKito from '~/images/kito.png';
 import ViewStore from '~/stores/view';
 import { ViewportType } from '~/utils/state';
 
+/** Type of properties. */
 interface IProps {
+  /** Storing state for view environment. */
   viewStore: ViewStore;
 }
 

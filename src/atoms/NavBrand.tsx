@@ -4,7 +4,9 @@ import React from 'react';
 
 import NavStore from '~/stores/nav';
 
+/** Type of properties. */
 interface IProps {
+  /** Store for navigation menu. */
   navStore: NavStore;
 }
 
