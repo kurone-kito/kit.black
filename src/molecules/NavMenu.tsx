@@ -1,8 +1,9 @@
-import { Button, NavbarEnd, NavbarItem, NavbarMenu } from 'bloomer';
+import { NavbarEnd, NavbarItem, NavbarMenu } from 'bloomer';
 import { inject, observer } from 'mobx-react';
 import React from 'react';
 
 import Marshmallow from '~/atoms/Marshmallow';
+import NavButton from '~/atoms/NavButton';
 
 import NavStore from '~/stores/nav';
 
@@ -16,48 +17,26 @@ const component: React.FC<Partial<IProps>> = ({ navStore: { expanded } }) => (
   <NavbarMenu isActive={expanded}>
     <NavbarEnd>
       <NavbarItem>
-        <div className="buttons">
-          <Button>GitHub</Button>
+        <div className="buttons kit-nav-buttons">
+          <NavButton
+            url="https://github.com/kurone-kito"
+            icon="fab fa-github"
+            tip="GitHubでフォローしてください"
+          />
+          <NavButton
+            url="https://twitter.com/kurone_kito"
+            icon="fab fa-twitter"
+            tip="Twitterでフォローしてください"
+          />
+          <NavButton
+            url="https://www.youtube.com/channel/UCJs_ejHQM0rcemJaeO2s5vA"
+            icon="fab fa-youtube"
+            tip="YouTubeチャンネルに登録してください"
+          />
         </div>
       </NavbarItem>
     </NavbarEnd>
     <ul style={{ display: 'none' }}>
-      <li>
-        <a
-          href="https://github.com/kurone-kito"
-          rel="noopener"
-          target="_blank"
-          title="GitHubでフォローしてください"
-        >
-          <span className="icon">
-            <i className="fab fa-github fa-3x" />
-          </span>
-        </a>
-      </li>
-      <li>
-        <a
-          href="https://twitter.com/kurone_kito"
-          rel="noopener"
-          target="_blank"
-          title="Twitterでフォローしてください"
-        >
-          <span className="icon">
-            <i className="fab fa-twitter fa-3x" />
-          </span>
-        </a>
-      </li>
-      <li>
-        <a
-          href="https://www.youtube.com/channel/UCJs_ejHQM0rcemJaeO2s5vA"
-          rel="noopener"
-          target="_blank"
-          title="YouTubeチャンネルに登録してください"
-        >
-          <span className="icon">
-            <i className="fab fa-youtube fa-3x" />
-          </span>
-        </a>
-      </li>
       <li>
         <a
           href="https://marshmallow-qa.com/kurone_kito"
