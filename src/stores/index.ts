@@ -1,3 +1,4 @@
+import NavStore from './nav';
 import ViewStore from './view';
 
-export default { viewStore: new ViewStore() };
+export default { navStore: new NavStore(), viewStore: new ViewStore() };

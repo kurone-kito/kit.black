@@ -4,7 +4,7 @@ import { withSiteData } from 'react-static';
 import YouTube from '~/atoms/YouTube';
 import About from '~/molecules/About';
 import Logo from '~/molecules/Logo';
-import Nav from '~/molecules/Nav';
+import Nav from '~/organisms/Nav';
 
 const component: React.FC = () => (
   <React.Fragment>
