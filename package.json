@@ -2,7 +2,7 @@
   "name": "kit.black",
   "version": "1.0.0",
   "main": "index.js",
-  "license": "MIT",
+  "license": "CC-BY-NC-4.0",
   "private": true,
   "scripts": {
     "start": "react-static start",
