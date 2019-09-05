@@ -19,7 +19,7 @@
     "mobx-react-devtools": "^6.0.3",
     "react": "^16.7.0",
     "react-dom": "^16.7.0",
-    "react-event-listener": "^0.6.5",
+    "react-event-listener": "^0.6.6",
     "react-hot-loader": "^4.6.3",
     "react-outside-click-handler": "^1.2.2",
     "react-router": "^4.3.1",
