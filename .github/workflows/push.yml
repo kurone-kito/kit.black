@@ -1,0 +1,49 @@
+name: The CI workflow on push
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  build:
+    defaults:
+      run:
+        shell: ${{ matrix.platform.shell }}
+    name: The build process
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Stages the pushed branch
+        uses: actions/checkout@v4
+      - name: Pre-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Enable the corepack because of the pnpm
+        run: corepack enable
+      - name: Post-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          cache: ${{ !env.ACT && 'pnpm' || '' }}
+          node-version-file: .node-version
+      - env:
+          HUSKY: 0
+        name: Install the dependencies
+        run: pnpm install --prefer-frozen-lockfile
+      - name: Run the linting
+        run: pnpm run lint
+      - name: Run the tests
+        run: pnpm run test
+    strategy:
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            shell: bash
+          - os: windows-latest
+            shell: bash
+          - os: windows-latest
+            shell: powershell
+      fail-fast: false
+    timeout-minutes: 30

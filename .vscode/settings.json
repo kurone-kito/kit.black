@@ -1,0 +1,38 @@
+{
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "*.md": "${capture}.*.md",
+    ".gitattributes": ".gitignore",
+    ".markdownlint.*": ".markdownlint-cli2.*",
+    ".tool-versions": ".node-version, .nvmrc",
+    "package.json": ".npmrc, pnpm-lock.yaml",
+    "prettier.config.*": ".prettierignore",
+    "stylelint.config.*": ".stylelintignore",
+    "tsconfig.json": "*.tsbuildinfo"
+  },
+  "files.associations": {
+    ".imgbotconfig": "json",
+    "LICENSE": "plaintext"
+  },
+  "files.readonlyInclude": {
+    "**/node_modules/**/*": true
+  },
+  "files.watcherExclude": {
+    "**/.eslintcache": true,
+    "**/node_modules/**/*": true
+  },
+  "git.branchProtection": ["main"],
+  "search.exclude": {
+    "**/node_modules/**/*": true
+  },
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "yaml.schemas": {
+    "https://coderabbit.ai/integrations/coderabbit-overrides.v2.json": [
+      ".coderabbit.yaml"
+    ],
+    "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/packages/cspell-types/cspell.schema.json": [
+      "cspell.config.yml"
+    ]
+  }
+}

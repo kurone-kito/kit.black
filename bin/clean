@@ -1,8 +1,0 @@
-#!/bin/sh
-
-# Even when the node_modules folder, that is, the dependencies
-# are broken, the clean up script needs to be workable,
-# so it is implemented by a shell script.
-
-cd $(cd $(dirname $0); pwd)/..
-rm -rf dist node_modules tmp
