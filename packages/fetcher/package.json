@@ -13,9 +13,28 @@
   "license": "MIT",
   "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
   "type": "module",
-  "files": [],
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "bin": {
+    "kb-fetcher": "dist/bin.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" dist node_modules/.cache",
+    "kb-fetcher": "node dist/bin.mjs",
+    "start": "tsc -w",
+    "test": "tsc --noEmit"
+  },
   "dependencies": {
     "@kurone-kito/kit.black-lib": "workspace:^"
+  },
+  "devDependencies": {
+    "@kurone-kito/typescript-config": "^0.16.1",
+    "rimraf": "^6.0.1",
+    "typescript": "~5.6.2"
   },
   "engines": {
     "node": ">=22"

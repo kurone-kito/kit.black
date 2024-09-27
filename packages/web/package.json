@@ -13,12 +13,26 @@
   "license": "CC-BY-NC-4.0",
   "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
   "type": "module",
-  "files": [],
+  "main": "dist/index.mjs",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prebuild": "kb-fetcher > src/data.json",
+    "build": "tsc",
+    "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" dist node_modules/.cache \"src/*.json\"",
+    "prestart": "pnpm run prebuild",
+    "start": "tsc -w",
+    "test": "tsc --noEmit"
+  },
   "dependencies": {
     "@kurone-kito/kit.black-lib": "workspace:^"
   },
   "devDependencies": {
-    "@kurone-kito/kit.black-fetcher": "workspace:^"
+    "@kurone-kito/kit.black-fetcher": "workspace:^",
+    "@kurone-kito/typescript-config": "^0.16.1",
+    "rimraf": "^6.0.1",
+    "typescript": "~5.6.2"
   },
   "engines": {
     "node": ">=22"

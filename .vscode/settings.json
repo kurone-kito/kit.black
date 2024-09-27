@@ -2,7 +2,9 @@
   "explorer.fileNesting.enabled": true,
   "explorer.fileNesting.expand": false,
   "explorer.fileNesting.patterns": {
+    "*.d.mts": "${capture}.d.mts.*, ${capture}.mjs, ${capture}.mjs.*",
     "*.md": "${capture}.*.md",
+    "*.mjs": "${capture}.mjs.*",
     ".gitattributes": ".gitignore",
     ".markdownlint.*": ".markdownlint-cli2.*",
     ".tool-versions": ".node-version, .nvmrc",

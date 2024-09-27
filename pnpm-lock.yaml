@@ -122,8 +122,28 @@ importers:
       '@kurone-kito/kit.black-lib':
         specifier: workspace:^
         version: link:../lib
+    devDependencies:
+      '@kurone-kito/typescript-config':
+        specifier: ^0.16.1
+        version: 0.16.1(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript-eslint-language-service@5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript@5.6.2)
+      rimraf:
+        specifier: ^6.0.1
+        version: 6.0.1
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.2
 
-  packages/lib: {}
+  packages/lib:
+    devDependencies:
+      '@kurone-kito/typescript-config':
+        specifier: ^0.16.1
+        version: 0.16.1(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript-eslint-language-service@5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript@5.6.2)
+      rimraf:
+        specifier: ^6.0.1
+        version: 6.0.1
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.2
 
   packages/web:
     dependencies:
@@ -134,6 +154,15 @@ importers:
       '@kurone-kito/kit.black-fetcher':
         specifier: workspace:^
         version: link:../fetcher
+      '@kurone-kito/typescript-config':
+        specifier: ^0.16.1
+        version: 0.16.1(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript-eslint-language-service@5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(typescript@5.6.2)
+      rimraf:
+        specifier: ^6.0.1
+        version: 6.0.1
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.2
 
 packages:
 
