@@ -32,6 +32,8 @@ jobs:
           HUSKY: 0
         name: Install the dependencies
         run: pnpm install --prefer-frozen-lockfile
+      - name: Run the build
+        run: pnpm run build
       - name: Run the linting
         run: pnpm run lint
       - name: Run the tests

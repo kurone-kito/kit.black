@@ -15,6 +15,7 @@
   "type": "module",
   "files": [],
   "scripts": {
+    "build": "nodetouch .env",
     "clean": "rimraf -g .eslintcache \"*.tgz\" \"*.tsbuildinfo\" \"node_modules/.cache/**/*\"",
     "lint": "pnpm run \"/^lint:.+:check/\"",
     "lint:cspell:check": "cspell lint --no-progress --show-suggestions -u \"./**/*\"",
@@ -67,6 +68,7 @@
     "rimraf": "^6.0.1",
     "stylelint": "^16.9.0",
     "stylelint-config-standard": "^36.0.1",
+    "touch": "^3.1.1",
     "typescript": "~5.6.2",
     "typescript-eslint": "^8.8.1",
     "typescript-eslint-language-service": "^5.0.5"
