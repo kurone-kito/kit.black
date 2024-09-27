@@ -23,7 +23,7 @@
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" dist node_modules/.cache \"src/*.json\"",
     "prestart": "pnpm run prebuild",
     "start": "tsc -w",
-    "test": "tsc --noEmit"
+    "test": "vitest run"
   },
   "dependencies": {
     "@kurone-kito/kit.black-lib": "workspace:^"
@@ -32,7 +32,8 @@
     "@kurone-kito/kit.black-fetcher": "workspace:^",
     "@kurone-kito/typescript-config": "^0.16.1",
     "rimraf": "^6.0.1",
-    "typescript": "~5.6.2"
+    "typescript": "~5.6.2",
+    "vitest": "^2.1.2"
   },
   "engines": {
     "node": ">=22"

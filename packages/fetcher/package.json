@@ -26,7 +26,7 @@
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" dist node_modules/.cache",
     "kb-fetcher": "node dist/bin.mjs",
     "start": "tsc -w",
-    "test": "tsc --noEmit"
+    "test": "vitest run"
   },
   "dependencies": {
     "@kurone-kito/kit.black-lib": "workspace:^"
@@ -34,7 +34,8 @@
   "devDependencies": {
     "@kurone-kito/typescript-config": "^0.16.1",
     "rimraf": "^6.0.1",
-    "typescript": "~5.6.2"
+    "typescript": "~5.6.2",
+    "vitest": "^2.1.2"
   },
   "engines": {
     "node": ">=22"
