@@ -117,6 +117,24 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2))(eslint@9.12.0(jiti@1.21.6))(typescript@5.6.2)
 
+  packages/fetcher:
+    dependencies:
+      '@kurone-kito/kit.black-lib':
+        specifier: workspace:^
+        version: link:../lib
+
+  packages/lib: {}
+
+  packages/web:
+    dependencies:
+      '@kurone-kito/kit.black-lib':
+        specifier: workspace:^
+        version: link:../lib
+    devDependencies:
+      '@kurone-kito/kit.black-fetcher':
+        specifier: workspace:^
+        version: link:../fetcher
+
 packages:
 
   '@babel/code-frame@7.12.11':

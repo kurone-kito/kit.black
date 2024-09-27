@@ -1,0 +1,26 @@
+{
+  "name": "@kurone-kito/kit.black-fetcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "the API fetcher for kit.black",
+  "homepage": "https://github.com/kurone-kito/kit.black#readme",
+  "bugs": "https://github.com/kurone-kito/kit.black/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kurone-kito/kit.black.git",
+    "directory": "packages/fetcher"
+  },
+  "license": "MIT",
+  "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
+  "type": "module",
+  "files": [],
+  "dependencies": {
+    "@kurone-kito/kit.black-lib": "workspace:^"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

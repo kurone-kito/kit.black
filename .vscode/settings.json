@@ -6,7 +6,7 @@
     ".gitattributes": ".gitignore",
     ".markdownlint.*": ".markdownlint-cli2.*",
     ".tool-versions": ".node-version, .nvmrc",
-    "package.json": ".npmrc, pnpm-lock.yaml",
+    "package.json": ".npmrc, pnpm-lock.yaml, pnpm-workspace.yaml",
     "prettier.config.*": ".prettierignore",
     "stylelint.config.*": ".stylelintignore",
     "tsconfig.json": "*.tsbuildinfo"

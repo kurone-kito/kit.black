@@ -1,0 +1,23 @@
+{
+  "name": "@kurone-kito/kit.black-lib",
+  "version": "1.0.0",
+  "private": true,
+  "description": "the common library for kit.black",
+  "homepage": "https://github.com/kurone-kito/kit.black#readme",
+  "bugs": "https://github.com/kurone-kito/kit.black/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kurone-kito/kit.black.git",
+    "directory": "packages/lib"
+  },
+  "license": "MIT",
+  "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
+  "type": "module",
+  "files": [],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "name": "@kurone-kito/kit.black",
+  "name": "@kurone-kito/kit.black-root",
   "version": "1.0.0",
   "private": true,
   "description": "Website of kurone-kito",
@@ -14,9 +14,17 @@
   "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
   "type": "module",
   "files": [],
+  "workspaces": {
+    "packages": [
+      ".packages/*"
+    ]
+  },
   "scripts": {
-    "build": "nodetouch .env",
-    "clean": "rimraf -g .eslintcache \"*.tgz\" \"*.tsbuildinfo\" \"node_modules/.cache/**/*\"",
+    "prebuild": "nodetouch .env",
+    "build": "pnpm run -r build",
+    "clean": "pnpm run --no-bail \"/^clean:.+/\"",
+    "clean:root": "rimraf -g .eslintcache \"*.tgz\" \"*.tsbuildinfo\" \"node_modules/.cache/**/*\"",
+    "clean:sub": "pnpm run -r clean",
     "lint": "pnpm run \"/^lint:.+:check/\"",
     "lint:cspell:check": "cspell lint --no-progress --show-suggestions -u \"./**/*\"",
     "lint:eslint:check": "eslint --cache --cache-location node_modules/.cache/eslint/ --cache-strategy=content -f codeframe \"./**/*\"",
@@ -32,8 +40,10 @@
     "lint:stylelint:fix": "pnpm run stylelint --fix",
     "prepare": "husky",
     "prettier": "prettier --cache --log-level=warn \"./**/*\"",
+    "prestart": "pnpm run prebuild",
+    "start": "pnpm run --parallel -r start",
     "stylelint": "stylelint --aei --cache --cache-location node_modules/.cache/stylelint/ \"./**/*.css\"",
-    "test": "tsc"
+    "test": "pnpm run -r test"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.5.0",
