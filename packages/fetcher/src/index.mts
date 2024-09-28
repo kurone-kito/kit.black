@@ -6,4 +6,10 @@ export {
   fetchRawEventsFactory,
   getCalendar,
 } from './fetchRaw.mjs';
+export {
+  isAvailableRaw,
+  createVacationEventsFactory,
+  toEventFactory,
+  toEventsFactory,
+} from './parseEvent.mjs';
 export type { EventDetail, EventDetailRow } from './types.mjs';
