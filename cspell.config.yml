@@ -9,4 +9,5 @@ ignorePaths:
   - node_modules
 version: '0.2'
 words:
+  - unstub
   - waivable

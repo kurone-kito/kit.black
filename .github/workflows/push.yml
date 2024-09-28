@@ -32,7 +32,14 @@ jobs:
           HUSKY: 0
         name: Install the dependencies
         run: pnpm install --prefer-frozen-lockfile
-      - name: Run the build
+      - env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          ID_OTHERS: ${{ secrets.ID_OTHERS }}
+          ID_RELEASE: ${{ secrets.ID_RELEASE }}
+          ID_STREAMING: ${{ secrets.ID_STREAMING }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        name: Run the build
         run: pnpm run build
       - name: Run the linting
         run: pnpm run lint
