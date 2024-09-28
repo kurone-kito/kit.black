@@ -29,13 +29,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@kurone-kito/kit.black-lib": "workspace:^"
+    "@kurone-kito/kit.black-lib": "workspace:^",
+    "googleapis": "^144.0.0"
   },
   "devDependencies": {
     "@kurone-kito/typescript-config": "^0.16.1",
     "@types/node": "^22.7.4",
     "google-auth-library": "^9.14.1",
     "rimraf": "^6.0.1",
+    "type-fest": "^4.26.1",
     "typescript": "~5.6.2",
     "vitest": "^2.1.2"
   },
