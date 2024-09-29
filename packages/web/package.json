@@ -31,7 +31,10 @@
   "devDependencies": {
     "@kurone-kito/kit.black-fetcher": "workspace:^",
     "@kurone-kito/typescript-config": "^0.16.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
     "rimraf": "^6.0.1",
+    "tailwindcss": "^3.4.13",
     "typescript": "~5.6.2",
     "vitest": "^2.1.2"
   },
