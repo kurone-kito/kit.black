@@ -12,4 +12,5 @@ export {
   toEventFactory,
   toEventsFactory,
 } from './parseEvent.mjs';
+export { toRowMapper } from './toRow.mjs';
 export type { EventDetail, EventDetailRow } from './types.mjs';
