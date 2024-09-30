@@ -1,6 +1,7 @@
 import { FlatCompat } from '@eslint/eslintrc';
 import eslint from '@eslint/js';
 import base from '@kurone-kito/eslint-config-base';
+import solid from 'eslint-plugin-solid/configs/typescript';
 import tailwind from 'eslint-plugin-tailwindcss';
 import tsEslint from 'typescript-eslint';
 
@@ -12,6 +13,7 @@ const compat = new FlatCompat({
 
 export default tsEslint.config(
   ...base,
+  solid,
   ...tailwind.configs['flat/recommended'],
   ...compat.extends('eslint-config-stylelint'),
 );

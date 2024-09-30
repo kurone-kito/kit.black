@@ -1,12 +1,22 @@
 {
   "compilerOptions": {
-    "composite": false,
-    "declaration": false,
-    "declarationMap": false,
-    "outDir": "dist",
-    "rootDir": "src"
+    "allowSyntheticDefaultImports": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "lib": ["ESNext", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["@solidjs/start/env", "node", "solid-js", "vinxi/types/client"]
   },
-  "exclude": ["dist", "node_modules", "./**/*.test.mts", "./**/*.config.ts"],
+  "exclude": [
+    ".output",
+    ".vinxi",
+    "node_modules",
+    "./**/*.test.ts",
+    "./**/*.test.tsx",
+    "*.config.ts"
+  ],
   "extends": "@kurone-kito/typescript-config/tsconfig.json",
-  "include": ["./**/*.ts", "./**/*.mts"]
+  "include": ["./**/*.ts", "./**/*.tsx", "vitest.config.mts"]
 }

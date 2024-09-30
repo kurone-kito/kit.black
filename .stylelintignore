@@ -255,3 +255,12 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/linux,macos,node,vim,visualstudiocode,windows
+
+### THE PROJECT SPECIFIES #################################################
+
+### Node ###
+# Solid.js
+packages/web/.output
+packages/web/.vinxi
+packages/web/app.config.timestamp_*.js
+packages/web/app.config.timestamp_*.mjs

@@ -10,4 +10,5 @@ ignorePaths:
 version: '0.2'
 words:
   - unstub
+  - vinxi
   - waivable

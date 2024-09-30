@@ -261,3 +261,12 @@ $RECYCLE.BIN/
 ### Node ###
 # JSON
 packages/web/src/*.json
+
+# Solid.js
+packages/web/.output
+packages/web/.vinxi
+packages/web/app.config.timestamp_*.js
+packages/web/app.config.timestamp_*.mjs
+
+# Vitest
+packages/web/vitest.config.mts.timestamp-*
