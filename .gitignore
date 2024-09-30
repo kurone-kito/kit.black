@@ -1,5 +1,5 @@
-# Created by https://www.toptal.com/developers/gitignore/api/linux,macos,node,vim,visualstudiocode,windows
-# Edit at https://www.toptal.com/developers/gitignore?templates=linux,macos,node,vim,visualstudiocode,windows
+# Created by https://www.toptal.com/developers/gitignore/api/linux,macos,node,storybookjs,vim,visualstudiocode,windows
+# Edit at https://www.toptal.com/developers/gitignore?templates=linux,macos,node,storybookjs,vim,visualstudiocode,windows
 
 ### Linux ###
 *~
@@ -189,6 +189,12 @@ dist
 # SvelteKit build / generate output
 .svelte-kit
 
+### StorybookJs ###
+# gitignore template for the Storybook, UI guide for front apps
+# website: https://storybook.js.org/
+
+storybook-static/
+
 ### Vim ###
 # Swap
 [._]*.s[a-v][a-z]
@@ -254,7 +260,7 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
-# End of https://www.toptal.com/developers/gitignore/api/linux,macos,node,vim,visualstudiocode,windows
+# End of https://www.toptal.com/developers/gitignore/api/linux,macos,node,storybookjs,vim,visualstudiocode,windows
 
 ### THE PROJECT SPECIFIES #################################################
 

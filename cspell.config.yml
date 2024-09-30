@@ -7,8 +7,10 @@ import:
   - '@kurone-kito/cspell-config'
 ignorePaths:
   - node_modules
+  - storybook-static
 version: '0.2'
 words:
+  - solidjs
   - unstub
   - vinxi
   - waivable
