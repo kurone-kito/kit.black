@@ -1,3 +1,5 @@
+*.webp binary
+
 .coderabbit.yaml export-ignore
 .github/** export-ignore
 .gitattributes export-ignore

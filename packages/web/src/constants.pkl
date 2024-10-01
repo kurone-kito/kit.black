@@ -2,6 +2,13 @@ author {
   name = "Kuroné Kito"
   url = "https://x.com/kurone_kito"
 }
+description = "黒猫にゃんにゃん VTuber、黒音キト (くろねきと) の公式サイトです。"
+favicon {
+  type = "image/webp"
+  path = "/favicon.webp"
+  size = 1024
+  url = "\(site.url)\(favicon.path)"
+}
 keywords = "\(author.name), 黒音キト, VTuber, Virtual YouTuber, Streamer"
 licenseUrl = "https://github.com/kurone-kito/kit.black/blob/main/LICENSE"
 site {

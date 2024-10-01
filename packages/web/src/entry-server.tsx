@@ -5,8 +5,8 @@ import { createHandler, StartServer } from '@solidjs/start/server';
 export default createHandler(() => (
   <StartServer
     document={({ assets, children, scripts }) => (
-      <html>
-        <head>
+      <html lang="ja">
+        <head prefix="og: http://ogp.me/ns#">
           <meta charset="utf-8" />
           {assets}
         </head>
