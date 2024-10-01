@@ -18,11 +18,13 @@
     "dist"
   ],
   "scripts": {
-    "prebuild": "kb-fetcher > src/data.json",
+    "prebuild": "pnpm run \"/^prebuild:.+/\"",
     "build": "pnpm run \"/^build:.+/\"",
     "build:storybook": "storybook build",
     "build:vinxi": "vinxi build",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi node_modules/.cache \"src/*.json\"",
+    "prebuild:fetcher": "kb-fetcher > src/data.json",
+    "prebuild:pkl": "pkl eval -f json src/constants.pkl -o src/constants.json",
     "serve": "serve .output/public",
     "prestart": "pnpm run prebuild",
     "start": "pnpm run -p \"/^start:.+/\"",
@@ -41,6 +43,7 @@
   "devDependencies": {
     "@kurone-kito/kit.black-fetcher": "workspace:^",
     "@kurone-kito/typescript-config": "^0.16.1",
+    "@pkl-community/pkl": "0.25.1-2",
     "@solidjs/testing-library": "^0.8.10",
     "@storybook/addon-essentials": "^8.3.5",
     "@storybook/addon-interactions": "^8.3.5",

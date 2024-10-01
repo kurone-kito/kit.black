@@ -217,6 +217,9 @@ importers:
       '@kurone-kito/typescript-config':
         specifier: ^0.16.1
         version: 0.16.1(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(typescript-eslint-language-service@5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(typescript@5.6.2)
+      '@pkl-community/pkl':
+        specifier: 0.25.1-2
+        version: 0.25.1-2
       '@solidjs/testing-library':
         specifier: ^0.8.10
         version: 0.8.10(@solidjs/router@0.14.7(solid-js@1.9.2))(solid-js@1.9.2)
@@ -1334,6 +1337,30 @@ packages:
   '@pkgr/core@0.1.1':
     resolution: {integrity: sha512-cq8o4cWH0ibXh9VGi5P20Tu9XF/0fFXl9EUinr9QfTM7a7p0oTA4iJRCQWppXR1Pg8dSM0UCItCkPwsk9qWWYA==}
     engines: {node: ^12.20.0 || ^14.18.0 || >=16.0.0}
+
+  '@pkl-community/pkl-darwin-arm64@0.25.1-2':
+    resolution: {integrity: sha512-7yABD7X2WkWUqakv5aH58EUDz9CMHcukO2/Mq7y/QNwr5zRLMmBy+l/cL0sOgr3aS6YipoaDKsxC5AmjjgowTg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@pkl-community/pkl-darwin-x64@0.25.1-2':
+    resolution: {integrity: sha512-iFBYLiiPjcelfPPlaer36IPTQbdQhsmrOLY9judwVhmoxipprL82ZoJMDkM4PUQ9PjMPjYuYzb2F/cmzHnx2Yg==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@pkl-community/pkl-linux-arm64@0.25.1-2':
+    resolution: {integrity: sha512-qwCHglXM3SJz4IWt+NpeqXtAVY7d5QxXMOpv97ia0+HFKdno7e2M4AksBj/5L0hbhlSP5KfGtQD1vMV2RdmOKA==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@pkl-community/pkl-linux-x64@0.25.1-2':
+    resolution: {integrity: sha512-5JRzgrQxuSY0RRHIeHZGCfKySnNzyQciLLjLzFxUseAZpVusuRTnbQAEnij1pUd5PYlfr05s0OWiIZLJJbnLBg==}
+    cpu: [x64]
+    os: [linux]
+
+  '@pkl-community/pkl@0.25.1-2':
+    resolution: {integrity: sha512-WVxoTTp8vZuCdEoYeDY8Yiuj2etKBxDioMPFqF04g7SvKq7bPR5bT0GUGJGUvQpiGGG4+FfgHESsRYflo3AX+g==}
+    hasBin: true
 
   '@rollup/plugin-alias@5.1.1':
     resolution: {integrity: sha512-PR9zDb+rOzkRb2VD+EuKB7UC41vU5DIwZ5qqCpk0KJudcWAyi8rvYOhS7+L5aZCspw1stTViLgN5v6FF1p5cgQ==}
@@ -6969,6 +6996,25 @@ snapshots:
     optional: true
 
   '@pkgr/core@0.1.1': {}
+
+  '@pkl-community/pkl-darwin-arm64@0.25.1-2':
+    optional: true
+
+  '@pkl-community/pkl-darwin-x64@0.25.1-2':
+    optional: true
+
+  '@pkl-community/pkl-linux-arm64@0.25.1-2':
+    optional: true
+
+  '@pkl-community/pkl-linux-x64@0.25.1-2':
+    optional: true
+
+  '@pkl-community/pkl@0.25.1-2':
+    optionalDependencies:
+      '@pkl-community/pkl-darwin-arm64': 0.25.1-2
+      '@pkl-community/pkl-darwin-x64': 0.25.1-2
+      '@pkl-community/pkl-linux-arm64': 0.25.1-2
+      '@pkl-community/pkl-linux-x64': 0.25.1-2
 
   '@rollup/plugin-alias@5.1.1(rollup@4.24.0)':
     optionalDependencies:
