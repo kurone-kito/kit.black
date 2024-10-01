@@ -198,6 +198,9 @@ importers:
       '@solid-primitives/date':
         specifier: ^2.0.23
         version: 2.0.23(solid-js@1.9.2)
+      '@solidjs/router':
+        specifier: ^0.14.7
+        version: 0.14.7(solid-js@1.9.2)
       '@solidjs/start':
         specifier: ^1.0.8
         version: 1.0.8(@testing-library/jest-dom@6.5.0)(solid-js@1.9.2)(vinxi@0.4.3(@types/node@22.7.5)(ioredis@5.4.1)(terser@5.34.1))(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))
@@ -213,7 +216,7 @@ importers:
         version: 0.16.1(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(typescript-eslint-language-service@5.0.5(@typescript-eslint/parser@8.8.1(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(eslint@9.12.0(jiti@2.3.3))(typescript@5.6.2))(typescript@5.6.2)
       '@solidjs/testing-library':
         specifier: ^0.8.10
-        version: 0.8.10(solid-js@1.9.2)
+        version: 0.8.10(@solidjs/router@0.14.7(solid-js@1.9.2))(solid-js@1.9.2)
       '@storybook/addon-essentials':
         specifier: ^8.3.5
         version: 8.3.5(storybook@8.3.5)
@@ -1519,6 +1522,11 @@ packages:
     resolution: {integrity: sha512-CqAwKb2T5Vi72+rhebSsqNZ9o67buYRdEJrIFzRXz3U59QqezuuxPsyzTSVCacwS5Pf109VRsgCJQoxKRoECZQ==}
     peerDependencies:
       solid-js: ^1.6.12
+
+  '@solidjs/router@0.14.7':
+    resolution: {integrity: sha512-agLf8AUz5XnW6+F64a4Iq+QQQobI5zGHQ/gUYd/WHSwcbnFpavbsiwRLob3YhWMXVX3sQyn4ekUN+uchMCRupw==}
+    peerDependencies:
+      solid-js: ^1.8.6
 
   '@solidjs/start@1.0.8':
     resolution: {integrity: sha512-5JfIa305L898GkUxVDtxqujLYqCjuekJvXDl9uysZmPqtfFMcDmJyfnfkmoIOgGRyswKcyEWySYru8ZRYCIBuw==}
@@ -7100,6 +7108,10 @@ snapshots:
     dependencies:
       solid-js: 1.9.2
 
+  '@solidjs/router@0.14.7(solid-js@1.9.2)':
+    dependencies:
+      solid-js: 1.9.2
+
   '@solidjs/start@1.0.8(@testing-library/jest-dom@6.5.0)(solid-js@1.9.2)(vinxi@0.4.3(@types/node@22.7.5)(ioredis@5.4.1)(terser@5.34.1))(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))':
     dependencies:
       '@vinxi/plugin-directives': 0.4.3(vinxi@0.4.3(@types/node@22.7.5)(ioredis@5.4.1)(terser@5.34.1))
@@ -7123,10 +7135,12 @@ snapshots:
       - vinxi
       - vite
 
-  '@solidjs/testing-library@0.8.10(solid-js@1.9.2)':
+  '@solidjs/testing-library@0.8.10(@solidjs/router@0.14.7(solid-js@1.9.2))(solid-js@1.9.2)':
     dependencies:
       '@testing-library/dom': 10.4.0
       solid-js: 1.9.2
+    optionalDependencies:
+      '@solidjs/router': 0.14.7(solid-js@1.9.2)
 
   '@storybook/addon-actions@8.3.5(storybook@8.3.5)':
     dependencies:
