@@ -1,10 +1,10 @@
 import type { Meta, StoryObj } from 'storybook-solidjs';
-import App from './app.js';
+import Index from './index.js';
 
 /** Type definition for the component. */
-type Target = typeof App;
+type Target = typeof Index;
 
 /** The default story for the component. */
 export const Default: StoryObj<Target> = {};
 
-export default { component: App } satisfies Meta<Target>;
+export default { component: Index } satisfies Meta<Target>;
