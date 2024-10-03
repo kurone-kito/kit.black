@@ -2,6 +2,7 @@ import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
 import { Article } from '../components/atoms/Article.js';
 import { Hero } from '../components/atoms/Hero.js';
+import { Logo } from '../components/atoms/Logo.js';
 
 /**
  * The top page.
@@ -12,7 +13,7 @@ const Index: Component<RouteSectionProps> = () => (
     <Hero
       logo={
         <div class="flex aspect-[29/40] h-auto w-full max-w-[100dvw] items-end sm:container md:max-w-md xl:max-w-lg">
-          Kuroné Kito
+          <Logo class="-ml-[36%] h-[50%] w-auto opacity-95" role="banner" />
         </div>
       }
     >

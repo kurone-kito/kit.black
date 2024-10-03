@@ -65,6 +65,7 @@
     "storybook-solidjs-vite": "1.0.0-beta.2",
     "tailwindcss": "^3.4.13",
     "tailwindcss-safe-area": "^0.6.0",
+    "type-fest": "^4.26.1",
     "typescript": "~5.6.2",
     "vinxi": "^0.4.3",
     "vite-plugin-solid": "^2.10.2",
