@@ -12,5 +12,6 @@ version: '0.2'
 words:
   - solidjs
   - unstub
+  - vgeek
   - vinxi
   - waivable
