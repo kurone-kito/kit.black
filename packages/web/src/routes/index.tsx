@@ -3,10 +3,10 @@ import type { Component } from 'solid-js';
 import { Anchor } from '../components/atoms/Anchor.js';
 import { Article } from '../components/atoms/Article.js';
 import { Hero } from '../components/atoms/Hero.js';
-import { Logo } from '../components/atoms/Logo.js';
 import { ProfileItem } from '../components/atoms/ProfileItem.js';
 import type { Item } from '../components/molecules/Carousel.js';
 import { Carousel } from '../components/molecules/Carousel.js';
+import { KitoWithLogo } from '../components/molecules/KitoWithLogo.js';
 
 /** The items. */
 const items = Array.from<unknown, Item>(
@@ -20,13 +20,7 @@ const items = Array.from<unknown, Item>(
  */
 const Index: Component<RouteSectionProps> = () => (
   <>
-    <Hero
-      logo={
-        <div class="flex aspect-[29/40] h-auto w-full max-w-[100dvw] items-end sm:container md:max-w-md xl:max-w-lg">
-          <Logo class="-ml-[36%] h-[50%] w-auto opacity-95" role="banner" />
-        </div>
-      }
-    >
+    <Hero logo={<KitoWithLogo />}>
       <blockquote class="font-serif text-lg italic opacity-80 xl:text-2xl">
         “お仕事ぱたぱたいっぱい大変にゃんにゃん！”
       </blockquote>

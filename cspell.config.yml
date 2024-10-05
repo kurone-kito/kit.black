@@ -10,6 +10,7 @@ ignorePaths:
   - storybook-static
 version: '0.2'
 words:
+  - momoneko
   - solidjs
   - unstub
   - vgeek
