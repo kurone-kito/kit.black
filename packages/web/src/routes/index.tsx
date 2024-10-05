@@ -5,6 +5,14 @@ import { Article } from '../components/atoms/Article.js';
 import { Hero } from '../components/atoms/Hero.js';
 import { Logo } from '../components/atoms/Logo.js';
 import { ProfileItem } from '../components/atoms/ProfileItem.js';
+import type { Item } from '../components/molecules/Carousel.js';
+import { Carousel } from '../components/molecules/Carousel.js';
+
+/** The items. */
+const items = Array.from<unknown, Item>(
+  { length: 10 },
+  (_, i) => ['https://placehold.jp/256x144.png', `${i}`] as const,
+);
 
 /**
  * The top page.
@@ -49,6 +57,7 @@ const Index: Component<RouteSectionProps> = () => (
         </li>
       </ul>
     </Hero>
+    <Carousel class="m-safe" items={items} />
     <Article heading="Top page">TODO: Add the content here.</Article>
   </>
 );
