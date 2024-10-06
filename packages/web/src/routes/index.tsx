@@ -1,3 +1,4 @@
+import { tupleMap, weekRange, formatDate } from '@kurone-kito/kit.black-lib';
 import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
 import { Anchor } from '../components/atoms/Anchor.js';
@@ -7,12 +8,18 @@ import { ProfileItem } from '../components/atoms/ProfileItem.js';
 import type { Item } from '../components/molecules/Carousel.js';
 import { Carousel } from '../components/molecules/Carousel.js';
 import { KitoWithLogo } from '../components/molecules/KitoWithLogo.js';
+import { Calendar } from '../components/molecules/calendar/Calendar.js';
+import rows from '../data.json';
+import { now } from '../modules/datetime.js';
+import type { RowProps } from '../components/atoms/calendar/Row.js';
 
 /** The items. */
 const items = Array.from<unknown, Item>(
   { length: 10 },
   (_, i) => ['https://placehold.jp/256x144.png', `${i}`] as const,
 );
+
+const [since, until] = tupleMap(weekRange(now()), formatDate);
 
 /**
  * The top page.
@@ -52,7 +59,17 @@ const Index: Component<RouteSectionProps> = () => (
       </ul>
     </Hero>
     <Carousel class="m-safe" items={items} />
-    <Article heading="Top page">TODO: Add the content here.</Article>
+    <Article
+      class="!px-safe flex flex-col justify-center xl:w-10/12"
+      heading="#VTuber予定表"
+    >
+      <Calendar
+        id="calendar"
+        rows={rows as readonly RowProps[]}
+        since={since}
+        until={until}
+      />
+    </Article>
   </>
 );
 
