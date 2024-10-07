@@ -5,13 +5,14 @@ import { Anchor } from '../components/atoms/Anchor.js';
 import { Article } from '../components/atoms/Article.js';
 import { Hero } from '../components/atoms/Hero.js';
 import { ProfileItem } from '../components/atoms/ProfileItem.js';
+import type { RowProps } from '../components/atoms/calendar/Row.js';
 import type { Item } from '../components/molecules/Carousel.js';
 import { Carousel } from '../components/molecules/Carousel.js';
 import { KitoWithLogo } from '../components/molecules/KitoWithLogo.js';
 import { Calendar } from '../components/molecules/calendar/Calendar.js';
+import { Activities } from '../components/organisms/Activities.js';
 import rows from '../data.json';
 import { now } from '../modules/datetime.js';
-import type { RowProps } from '../components/atoms/calendar/Row.js';
 
 /** The items. */
 const items = Array.from<unknown, Item>(
@@ -59,6 +60,7 @@ const Index: Component<RouteSectionProps> = () => (
       </ul>
     </Hero>
     <Carousel class="m-safe" items={items} />
+    <Activities />
     <Article
       class="!px-safe flex flex-col justify-center xl:w-10/12"
       heading="#VTuber予定表"

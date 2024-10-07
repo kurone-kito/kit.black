@@ -10,9 +10,11 @@ ignorePaths:
   - storybook-static
 version: '0.2'
 words:
+  - amebient
   - momoneko
   - solidjs
   - unstub
   - vgeek
   - vinxi
+  - vocaloid
   - waivable
