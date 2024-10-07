@@ -11,6 +11,7 @@ ignorePaths:
 version: '0.2'
 words:
   - amebient
+  - cresteaju
   - momoneko
   - solidjs
   - unstub
