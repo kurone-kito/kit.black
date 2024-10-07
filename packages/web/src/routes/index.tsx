@@ -1,19 +1,12 @@
-import { tupleMap, weekRange, formatDate } from '@kurone-kito/kit.black-lib';
 import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
 import { Anchor } from '../components/atoms/Anchor.js';
-import { Article } from '../components/atoms/Article.js';
 import { Hero } from '../components/atoms/Hero.js';
 import { ProfileItem } from '../components/atoms/ProfileItem.js';
-import type { RowProps } from '../components/atoms/calendar/Row.js';
 import { KitoWithLogo } from '../components/molecules/KitoWithLogo.js';
-import { Calendar } from '../components/molecules/calendar/Calendar.js';
 import { Activities } from '../components/organisms/Activities.js';
 import { ActivitiesCarousel } from '../components/organisms/ActivitiesCarousel.js';
-import rows from '../data.json';
-import { now } from '../modules/datetime.js';
-
-const [since, until] = tupleMap(weekRange(now()), formatDate);
+import { Calendar } from '../components/organisms/Calendar.js';
 
 /**
  * The top page.
@@ -54,17 +47,7 @@ const Index: Component<RouteSectionProps> = () => (
     </Hero>
     <ActivitiesCarousel />
     <Activities />
-    <Article
-      class="!px-safe flex flex-col justify-center xl:w-10/12"
-      heading="#VTuber予定表"
-    >
-      <Calendar
-        id="calendar"
-        rows={rows as readonly RowProps[]}
-        since={since}
-        until={until}
-      />
-    </Article>
+    <Calendar />
   </>
 );
 
