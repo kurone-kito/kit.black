@@ -8,6 +8,7 @@ import { MetaList } from '../atoms/meta/MetaList.js';
 import { Ogp } from '../atoms/meta/Ogp.js';
 import { Title } from '../atoms/meta/Title.js';
 import { XCard } from '../atoms/meta/XCard.js';
+import { Footer } from '../organisms/Footer';
 
 /** The images for the Open Graph protocol. */
 const images = [constants.favicon.url] as const;
@@ -46,5 +47,6 @@ export const RootTemplate: Component<RouteSectionProps> = (props) => (
     <main>
       <Suspense fallback={<div>Loading...</div>}>{props.children}</Suspense>
     </main>
+    <Footer />
   </MetaProvider>
 );
