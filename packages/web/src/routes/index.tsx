@@ -6,6 +6,7 @@ import { ActivitiesCarousel } from '../components/organisms/ActivitiesCarousel.j
 import { Calendar } from '../components/organisms/Calendar.js';
 import { Events } from '../components/organisms/Events.js';
 import { Links } from '../components/organisms/Links.js';
+import { Works } from '../components/organisms/Works.js';
 
 /**
  * The top page.
@@ -16,6 +17,7 @@ const Index: Component<RouteSectionProps> = () => (
     <Hero />
     <ActivitiesCarousel />
     <Activities />
+    <Works />
     <Events />
     <Calendar />
     <Links />
