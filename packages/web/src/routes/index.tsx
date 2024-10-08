@@ -7,6 +7,7 @@ import { KitoWithLogo } from '../components/molecules/KitoWithLogo.js';
 import { Activities } from '../components/organisms/Activities.js';
 import { ActivitiesCarousel } from '../components/organisms/ActivitiesCarousel.js';
 import { Calendar } from '../components/organisms/Calendar.js';
+import { Events } from '../components/organisms/Events.js';
 
 /**
  * The top page.
@@ -47,6 +48,7 @@ const Index: Component<RouteSectionProps> = () => (
     </Hero>
     <ActivitiesCarousel />
     <Activities />
+    <Events />
     <Calendar />
   </>
 );
