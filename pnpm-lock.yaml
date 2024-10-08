@@ -195,6 +195,9 @@ importers:
       '@kurone-kito/kit.black-lib':
         specifier: workspace:^
         version: link:../lib
+      '@kurone-kito/launchpad-icons-solid':
+        specifier: 0.6.0-alpha.3
+        version: 0.6.0-alpha.3(solid-js@1.9.2)
       '@solid-primitives/date':
         specifier: ^2.0.23
         version: 2.0.23(solid-js@1.9.2)
@@ -1137,6 +1140,12 @@ packages:
     peerDependencies:
       eslint: '>=9.x.x'
 
+  '@kurone-kito/launchpad-icons-solid@0.6.0-alpha.3':
+    resolution: {integrity: sha512-GM1ywVg21JPnXMp/RI3dDvTMHCR4UlvoXmVS0wfxZVcJ4A3XMVSKU98NvUbnoosrTLZmyJ4isgw07Fbfh1NUHg==}
+    engines: {node: '>=18.20'}
+    peerDependencies:
+      solid-js: '>=1.x.x'
+
   '@kurone-kito/lint-staged-config@0.16.1':
     resolution: {integrity: sha512-WPqZJuwvZCPB9kkjJ4vvL21s6HyE9ovwx2VhFM9rba92o9Rwqh4qhtuy+arYnugi1Se6Gg3Vqb+y4QtnUjpkcw==}
     engines: {node: ^18.20 || ^20.10 || >=22}
@@ -1661,11 +1670,11 @@ packages:
       react-dom:
         optional: true
 
-  '@storybook/builder-vite@8.4.0-alpha.4':
-    resolution: {integrity: sha512-NehLywjKaeUNU4soxeegLj0BODcHP0FZrdDmHU4+QWkrwdKymCxRMLc17n68FtoyGHnu9zKiQK3vwJrqZkRppg==}
+  '@storybook/builder-vite@8.4.0-alpha.5':
+    resolution: {integrity: sha512-5n/5jf5io6r19WkASsdGR+knJTrQPRm9DIlnrxcNt9od4DnACOfBeu/TUIXJaoABW0Knm1eOoluYRtKvOWtCLQ==}
     peerDependencies:
       '@preact/preset-vite': '*'
-      storybook: ^8.4.0-alpha.4
+      storybook: ^8.4.0-alpha.5
       typescript: '>= 4.3.x'
       vite: ^4.0.0 || ^5.0.0
       vite-plugin-glimmerx: '*'
@@ -1685,10 +1694,10 @@ packages:
     peerDependencies:
       storybook: ^8.3.5
 
-  '@storybook/csf-plugin@8.4.0-alpha.4':
-    resolution: {integrity: sha512-1jgRLUm8u/FYR+q1NjN+FASW6eaL0EF8DVVn7ygYEr7lkC6G0FLJ+YOP91t8RhzZw/3yxwjB7Ztxu/GgQs3C1A==}
+  '@storybook/csf-plugin@8.4.0-alpha.5':
+    resolution: {integrity: sha512-YtTBXDKE9uQEZpZaagiVrMauJ/TojsSC3AQjoM9s6zg0kPu41iUk8YYZi6HyDZxwx0AKPDRAY/eMwVhq8odNHQ==}
     peerDependencies:
-      storybook: ^8.4.0-alpha.4
+      storybook: ^8.4.0-alpha.5
 
   '@storybook/csf@0.1.11':
     resolution: {integrity: sha512-dHYFQH3mA+EtnCkHXzicbLgsvzYjcDJ1JWsogbItZogkPHgSJM/Wr71uMkcvw8v9mmCyP4NpXJuu6bPoVsOnzg==}
@@ -6853,6 +6862,10 @@ snapshots:
       - supports-color
       - typescript
 
+  '@kurone-kito/launchpad-icons-solid@0.6.0-alpha.3(solid-js@1.9.2)':
+    dependencies:
+      solid-js: 1.9.2
+
   '@kurone-kito/lint-staged-config@0.16.1(cspell@8.14.4)(eslint-formatter-codeframe@7.32.1)(eslint@9.12.0(jiti@2.3.3))(lint-staged@15.2.10)(prettier@3.3.3)':
     dependencies:
       cspell: 8.14.4
@@ -7340,13 +7353,12 @@ snapshots:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
 
-  '@storybook/builder-vite@8.4.0-alpha.4(storybook@8.3.5)(typescript@5.6.2)(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))':
+  '@storybook/builder-vite@8.4.0-alpha.5(storybook@8.3.5)(typescript@5.6.2)(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))':
     dependencies:
-      '@storybook/csf-plugin': 8.4.0-alpha.4(storybook@8.3.5)
+      '@storybook/csf-plugin': 8.4.0-alpha.5(storybook@8.3.5)
       '@types/find-cache-dir': 3.2.1
       browser-assert: 1.2.1
       es-module-lexer: 1.5.4
-      express: 4.21.0
       find-cache-dir: 3.3.2
       magic-string: 0.30.11
       storybook: 8.3.5
@@ -7355,7 +7367,6 @@ snapshots:
     optionalDependencies:
       typescript: 5.6.2
     transitivePeerDependencies:
-      - supports-color
       - webpack-sources
 
   '@storybook/core@8.3.5':
@@ -7385,7 +7396,7 @@ snapshots:
     transitivePeerDependencies:
       - webpack-sources
 
-  '@storybook/csf-plugin@8.4.0-alpha.4(storybook@8.3.5)':
+  '@storybook/csf-plugin@8.4.0-alpha.5(storybook@8.3.5)':
     dependencies:
       storybook: 8.3.5
       unplugin: 1.14.1
@@ -11517,11 +11528,10 @@ snapshots:
 
   storybook-solidjs-vite@1.0.0-beta.2(storybook@8.3.5)(typescript@5.6.2)(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1)):
     dependencies:
-      '@storybook/builder-vite': 8.4.0-alpha.4(storybook@8.3.5)(typescript@5.6.2)(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))
+      '@storybook/builder-vite': 8.4.0-alpha.5(storybook@8.3.5)(typescript@5.6.2)(vite@5.4.8(@types/node@22.7.5)(terser@5.34.1))
     transitivePeerDependencies:
       - '@preact/preset-vite'
       - storybook
-      - supports-color
       - typescript
       - vite
       - vite-plugin-glimmerx
