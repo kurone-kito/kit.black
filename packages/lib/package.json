@@ -28,7 +28,7 @@
     "@kurone-kito/typescript-config": "^0.16.1",
     "rimraf": "^6.0.1",
     "type-fest": "^4.26.1",
-    "typescript": "~5.6.2",
+    "typescript": "~5.6.3",
     "vitest": "^2.1.2"
   },
   "engines": {
