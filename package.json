@@ -76,7 +76,7 @@
     "husky": "^9.1.6",
     "lint-staged": "^15.2.10",
     "markdownlint-cli2": "^0.14.0",
-    "oxlint": "^0.9.9",
+    "oxlint": "^0.9.10",
     "prettier": "^3.3.3",
     "prettier-plugin-packagejson": "^2.5.2",
     "prettier-plugin-sh": "^0.14.0",
