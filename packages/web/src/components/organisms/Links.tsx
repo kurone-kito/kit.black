@@ -1,20 +1,21 @@
-import { Group } from '@kurone-kito/launchpad-icons-solid/dist/Group';
 import { VRC } from '@kurone-kito/launchpad-icons-solid/dist/VRC';
+import { clientOnly } from '@solidjs/start';
 import {
   FaBrandsAmazon,
   FaBrandsGithub,
   FaBrandsKeybase,
-  FaBrandsSteam,
   FaBrandsYoutube,
 } from 'solid-icons/fa';
 import { ImNpm } from 'solid-icons/im';
 import type { Component } from 'solid-js';
 import kito3 from '../../assets/avatars/kito3.webp';
+import { Marshmallow } from '../atoms/icons/Marshmallow.js';
+import { X } from '../atoms/icons/X.js';
 import { Article } from '../atoms/Article.js';
-import { Threads } from '../atoms/icons/Threads.jsx';
-import { L08 } from '../atoms/icons/L08.jsx';
-import { Marshmallow } from '../atoms/icons/Marshmallow.jsx';
 import { LinkItem } from '../molecules/LinkItem.js';
+
+/** The random links component. */
+const LinksRandom = clientOnly(() => import('./LinksRandom.js'));
 
 /**
  * The links component.
@@ -24,60 +25,74 @@ export const Links: Component = () => (
   <Article
     class="!px-safe bg-[image:var(--image-kito-url)] bg-cover bg-top bg-no-repeat py-0"
     heading="黒音キトの SNS リンク集"
-    style={{ '--image-kito-url': `url("${kito3}")` }}
+    style={{ '--image-kito-url': `url('${kito3}')` }}
   >
     <ul class="bg-base-100/80 grid grid-cols-3 justify-items-center gap-y-12 rounded-3xl bg-opacity-10 px-4 py-20 backdrop-blur-sm backdrop-filter md:grid-cols-4 md:gap-y-20 lg:gap-y-24 lg:backdrop-blur-md xl:gap-y-32 2xl:gap-y-40">
-      <LinkItem caption="@kurone_kito" href="https://x.com/kurone_kito">
-        𝕏
+      <LinkItem
+        caption="@kurone_kito"
+        href="https://x.com/kurone_kito"
+        hreflang="ja"
+        title="X/Twitter"
+      >
+        <X class="inline h-[4.5rem] w-[4.5rem]" />
       </LinkItem>
-      <LinkItem caption="@kuronekito" href="https://youtube.com/@kuronekito">
+      <LinkItem
+        caption="@kuronekito"
+        href="https://youtube.com/@kuronekito"
+        hreflang="ja"
+        title="YouTube"
+      >
         <FaBrandsYoutube class="inline" />
       </LinkItem>
       <LinkItem
         caption="ID: kurone-kito"
         href="https://vrchat.com/home/user/usr_4e529c16-8045-47fa-8deb-efeec9d73cba"
+        hreflang="ja"
+        title="VRChat"
       >
         <VRC class="inline h-[4.5rem] w-[4.5rem]" />
       </LinkItem>
-      <LinkItem caption="KITO.5699" href="https://vrc.group/KITO.5699">
-        <Group class="[&_*]:!fill-accent-content [&_*]:!stroke-accent-content inline h-[4.5rem] w-[4.5rem]" />
+      <LinkItem
+        caption="@kurone_kito"
+        href="https://marshmallow-qa.com/kurone_kito"
+        hreflang="ja"
+        title="マシュマロ"
+      >
+        <Marshmallow class="h-[4.5rem] w-[4.5rem]" />
       </LinkItem>
-      <LinkItem caption="@kurone-kito" href="https://github.com/kurone-kito">
+      <LinkItem
+        caption="@kurone-kito"
+        href="https://github.com/kurone-kito"
+        hreflang="en"
+        title="GitHub"
+      >
         <FaBrandsGithub class="inline" />
       </LinkItem>
-      <LinkItem caption="kurone-kito" href="https://www.npmjs.com/~kurone-kito">
+      <LinkItem
+        caption="kurone-kito"
+        href="https://www.npmjs.com/~kurone-kito"
+        hreflang="en"
+        title="npm"
+      >
         <ImNpm class="inline" />
       </LinkItem>
       <LinkItem
         caption="ほしい物リスト"
         href="https://www.amazon.co.jp/hz/wishlist/ls/27C22EN4MOBL8"
+        hreflang="ja"
+        title="Amazon JP"
       >
         <FaBrandsAmazon class="inline" />
       </LinkItem>
       <LinkItem
         caption="kurone_kito"
-        href="https://steamcommunity.com/id/kurone_kito/"
+        href="https://keybase.io/kurone_kito"
+        hreflang="en"
+        title="Keybase"
       >
-        <FaBrandsSteam class="inline" />
-      </LinkItem>
-      <LinkItem caption="kurone_kito" href="https://keybase.io/kurone_kito">
         <FaBrandsKeybase class="inline" />
       </LinkItem>
-      <LinkItem
-        caption="@kurone_kito"
-        href="https://www.threads.net/@kurone_kito"
-      >
-        <Threads class="h-[4.5rem] w-[4.5rem]" />
-      </LinkItem>
-      <LinkItem caption="@kurone_kito" href="https://l08.me/p/kurone_kito">
-        <L08 class="h-[4.5rem] w-[4.5rem]" />
-      </LinkItem>
-      <LinkItem
-        caption="@kurone_kito"
-        href="https://marshmallow-qa.com/kurone_kito"
-      >
-        <Marshmallow class="h-[4.5rem] w-[4.5rem]" />
-      </LinkItem>
+      <LinksRandom />
     </ul>
   </Article>
 );
