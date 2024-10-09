@@ -25,15 +25,19 @@ export const Hero: Component = () => (
       <ProfileItem heading="お誕生日">
         <time datetime="10-09">10 月 9 日</time>
       </ProfileItem>
-      <ProfileItem heading="特技">にゃんにゃん鳴きます🐱</ProfileItem>
+      <ProfileItem heading="特技">
+        <Anchor class="lg:link-hover link" href="https://youtu.be/K1QRWeIDSdk">
+          にゃんにゃん鳴きます🐱
+        </Anchor>
+      </ProfileItem>
       <li>
-        <Anchor class="link-hover link" href="https://vgeekpro.com">
+        <Anchor class="lg:link-hover link" href="https://vgeekpro.com">
           ぶいぎーく！Vgeek production
         </Anchor>
         &nbsp;所属 VTuber
       </li>
       <li>
-        <Anchor class="link-hover link" href="https://engineer-meetup.com">
+        <Anchor class="lg:link-hover link" href="https://engineer-meetup.com">
           エンジニア集会
         </Anchor>
         スタッフ
