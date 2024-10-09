@@ -1,9 +1,9 @@
-name: The CI workflow on merge as a master branch
+name: The CI workflow on merge as a main branch
 run-name: Merged the main branch by @${{ github.actor }}
 on:
   push:
     branches:
-      - master
+      - main
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
@@ -53,5 +53,5 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
-          production-branch: master
+          production-branch: main
           publish-dir: './packages/web/.output/public'
