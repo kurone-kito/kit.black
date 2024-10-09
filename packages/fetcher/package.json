@@ -1,0 +1,50 @@
+{
+  "name": "@kurone-kito/kit.black-fetcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "the API fetcher for kit.black",
+  "homepage": "https://github.com/kurone-kito/kit.black#readme",
+  "bugs": "https://github.com/kurone-kito/kit.black/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kurone-kito/kit.black.git",
+    "directory": "packages/fetcher"
+  },
+  "license": "MIT",
+  "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "bin": {
+    "kb-fetcher": "dist/bin.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" dist node_modules/.cache",
+    "kb-fetcher": "node dist/bin.mjs",
+    "start": "tsc -w",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kurone-kito/kit.black-lib": "workspace:^",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@kurone-kito/typescript-config": "^0.16.1",
+    "@types/node": "^22.7.4",
+    "google-auth-library": "^9.14.1",
+    "rimraf": "^6.0.1",
+    "type-fest": "^4.26.1",
+    "typescript": "~5.6.2",
+    "vitest": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

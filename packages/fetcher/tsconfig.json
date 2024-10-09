@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "exclude": ["dist", "node_modules", "./**/*.test.mts"],
+  "extends": "@kurone-kito/typescript-config/tsconfig.json",
+  "include": ["./**/*.mts"]
+}

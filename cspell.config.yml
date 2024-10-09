@@ -1,0 +1,23 @@
+cache:
+  cacheFormat: universal
+  cacheLocation: node_modules/.cache/cspell/.cspell.cache
+  cacheStrategy: metadata
+  useCache: true
+import:
+  - '@kurone-kito/cspell-config'
+ignorePaths:
+  - node_modules
+  - storybook-static
+version: '0.2'
+words:
+  - amebient
+  - cresteaju
+  - graphig
+  - momoneko
+  - solidjs
+  - unstub
+  - vgeek
+  - vinxi
+  - vocaloid
+  - vrcui
+  - waivable

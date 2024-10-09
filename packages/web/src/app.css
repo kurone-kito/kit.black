@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@responsive {
+  .text-stroke-3 {
+    text-shadow:
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
+      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity)));
+  }
+}

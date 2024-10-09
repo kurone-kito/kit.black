@@ -1,0 +1,108 @@
+name: The CI workflow on push
+on:
+  push:
+    branches:
+      - '*'
+      - '!master'
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  build:
+    defaults:
+      run:
+        shell: ${{ matrix.platform.shell }}
+    name: The build process
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Stages the pushed branch
+        uses: actions/checkout@v4
+      - name: Pre-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Enable the corepack because of the pnpm
+        run: corepack enable
+      - name: Post-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          cache: ${{ !env.ACT && 'pnpm' || '' }}
+          node-version-file: .node-version
+      - env:
+          HUSKY: 0
+        name: Install the dependencies
+        run: pnpm install --prefer-frozen-lockfile
+      - env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          ID_OTHERS: ${{ secrets.ID_OTHERS }}
+          ID_RELEASE: ${{ secrets.ID_RELEASE }}
+          ID_STREAMING: ${{ secrets.ID_STREAMING }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        name: Run the build
+        run: pnpm run build
+      - name: Run the linting
+        run: pnpm run lint
+      - name: Run the tests
+        run: pnpm run test
+    strategy:
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            shell: bash
+          # ! The Windows is not supported by the pkl
+          # - os: windows-latest
+          #   shell: bash
+          # - os: windows-latest
+          #   shell: powershell
+      fail-fast: false
+    timeout-minutes: 30
+  deploy:
+    name: The staging deploy process
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Stages the pushed branch
+        uses: actions/checkout@v4
+      - name: Pre-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Enable the corepack because of the pnpm
+        run: corepack enable
+      - name: Post-prepare the Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          cache: ${{ !env.ACT && 'pnpm' || '' }}
+          node-version-file: .node-version
+      - env:
+          HUSKY: 0
+        name: Install the dependencies
+        run: pnpm install --prefer-frozen-lockfile
+      - env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          ID_OTHERS: ${{ secrets.ID_OTHERS }}
+          ID_RELEASE: ${{ secrets.ID_RELEASE }}
+          ID_STREAMING: ${{ secrets.ID_STREAMING }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        name: Run the build
+        run: pnpm run build
+      - env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        name: Deploy to Netlify
+        # cspell:disable-next-line
+        uses: nwtgck/actions-netlify@v3.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          production-deploy: false
+          publish-dir: './packages/web/.output/public'

@@ -1,39 +1,5 @@
 {
-  "compileOnSave": false,
-  "compilerOptions": {
-    "allowJs": true,
-    "allowSyntheticDefaultImports": true,
-    "baseUrl": ".",
-    "experimentalDecorators": true,
-    "jsx": "preserve",
-    "lib": [
-      "dom",
-      "es2015",
-      "es2016"
-    ],
-    "module": "esnext",
-    "moduleResolution": "node",
-    "noEmit": true,
-    "noImplicitAny": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "paths": {
-      "~/*": [
-        "src/*"
-      ]
-    },
-    "preserveConstEnums": true,
-    "removeComments": false,
-    "skipLibCheck": true,
-    "sourceMap": true,
-    "target": "esnext",
-    "typeRoots": [
-      "./node_modules/@types"
-    ]
-  },
-  "exclude": [
-    "dist/**/*",
-    "public/**/*",
-    "node_modules"
-  ]
+  "compilerOptions": { "noEmit": true, "types": ["node"] },
+  "extends": "@kurone-kito/typescript-config/tsconfig.json",
+  "include": ["*.config.mjs"]
 }
