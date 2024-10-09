@@ -13,19 +13,16 @@
   "license": "CC-BY-NC-4.0",
   "author": "kurone-kito <krone@kit.black> (https://kit.black/)",
   "type": "module",
-  "main": "dist/index.mjs",
-  "files": [
-    "dist"
-  ],
+  "files": [],
   "scripts": {
     "prebuild": "pnpm run \"/^prebuild:.+/\"",
     "build": "pnpm run \"/^build:.+/\"",
     "build:storybook": "storybook build",
     "build:vinxi": "vinxi build",
-    "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi node_modules/.cache \"src/*.json\"",
+    "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi dist node_modules/.cache \"src/*.json\" storybook-static",
     "prebuild:fetcher": "kb-fetcher > src/data.json",
     "prebuild:pkl": "pkl eval -f json src/constants.pkl -o src/constants.json",
-    "serve": "serve .output/public",
+    "serve": "serve dist",
     "prestart": "pnpm run prebuild",
     "start": "pnpm run -p \"/^start:.+/\"",
     "start:storybook": "storybook dev -p 6006",
