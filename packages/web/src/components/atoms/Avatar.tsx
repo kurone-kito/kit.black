@@ -22,7 +22,7 @@ export interface AvatarProps
 export const Avatar: Component<AvatarProps> = (props) => (
   <div
     id={props.id}
-    class={twMerge('aspect-[46/89] h-auto w-full', props.class)}
+    class={twMerge('relative aspect-[46/89] h-auto w-full', props.class)}
   >
     <img
       alt={props.alt}
@@ -37,7 +37,6 @@ export const Avatar: Component<AvatarProps> = (props) => (
         'absolute left-0 right-0 mx-auto cursor-grab max-md:hidden',
         props.anchorClass,
       )}
-      role="none"
     >
       &nbsp;
     </a>
