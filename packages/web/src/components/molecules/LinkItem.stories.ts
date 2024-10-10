@@ -8,6 +8,11 @@ type Target = typeof LinkItem;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { children: '◆', href: 'https://example.com/' },
+  args: {
+    caption: 'Caption',
+    children: '◆',
+    href: 'https://example.com/',
+    title: 'Title',
+  },
   component: LinkItem,
 } satisfies Meta<Target>;
