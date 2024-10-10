@@ -5,7 +5,7 @@ import type { Except } from 'type-fest';
 /** Type definition for the properties. */
 export interface AnchorProps
   extends Except<
-    JSX.AnchorHTMLAttributes<HTMLAnchorElement>,
+    Readonly<JSX.AnchorHTMLAttributes<HTMLAnchorElement>>,
     'rel' | 'target'
   > {}
 
@@ -19,11 +19,9 @@ const external = /^https?:\/\//;
  */
 export const Anchor: Component<AnchorProps> = (props) => (
   <Show
-    fallback={<a {...props}>{props.children}</a>}
+    fallback={<a {...props} />}
     when={props.href && external.test(props.href)}
   >
-    <a {...props} rel="noopener noreferrer" target="_blank">
-      {props.children}
-    </a>
+    <a rel="noopener noreferrer" target="_blank" {...props} />
   </Show>
 );
