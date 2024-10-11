@@ -1,5 +1,5 @@
-import type { IconProps } from 'solid-icons';
 import type { Component } from 'solid-js';
+import type { IconProps } from './types.js';
 
 /**
  * The Threads icon component.
