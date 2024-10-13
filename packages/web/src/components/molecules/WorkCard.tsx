@@ -75,11 +75,7 @@ export const WorkCard: Component<WorkCardProps> = (props) => (
             </li>
           </Show>
           <Show when={props.since}>
-            {(since) => (
-              <li>
-                <time datetime={`${since()}`}>{since()}</time> 年リリース
-              </li>
-            )}
+            {(since) => <li>{since()} 年リリース</li>}
           </Show>
         </ul>
       </Show>
