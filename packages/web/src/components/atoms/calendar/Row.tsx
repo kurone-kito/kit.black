@@ -29,7 +29,7 @@ export const Row: Component<RowProps> = (props) => {
   return (
     <tr>
       <Show when={props.date}>
-        <td classList={wc} rowSpan={props.dateSpan}>
+        <td class="date" classList={wc} rowSpan={props.dateSpan}>
           {props.date}
         </td>
       </Show>
@@ -41,7 +41,9 @@ export const Row: Component<RowProps> = (props) => {
         }
         when={props.time}
       >
-        <td classList={tc}>{props.time}</td>
+        <td class="time" classList={tc}>
+          {props.time}
+        </td>
         <td classList={tc}>{props.children}</td>
       </Show>
     </tr>
