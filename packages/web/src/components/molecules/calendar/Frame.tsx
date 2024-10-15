@@ -11,7 +11,7 @@ export const Frame: Component<Readonly<ParentProps>> = (props) => (
     <ul class="text-stroke-3 flex gap-4 pt-2 lg:tracking-tighter">
       <li>JST (+9:00)</li>
       <li>
-        <IconContainer class="text-primary" />
+        <IconContainer class="text-accent" />
         &nbsp;ライブ配信あり
       </li>
       <li>

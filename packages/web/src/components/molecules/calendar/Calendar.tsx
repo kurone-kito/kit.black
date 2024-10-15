@@ -26,8 +26,8 @@ export interface CalendarProps {
  */
 export const Calendar: Component<CalendarProps> = (props) => (
   <section
-    class="bg-base-200 @container-[size]/schedule mx-auto mb-8 flex aspect-[3/4] h-auto w-full items-end justify-around bg-[image:var(--image-kito-url)] bg-contain bg-right-top bg-no-repeat p-[3%] shadow-lg lg:aspect-[4/3] xl:w-10/12"
-    style={{ '--image-kito-url': `url("${kito2}")` }}
+    class="bg-base-100 border-base-200 @container-[size]/schedule mx-auto my-20 mb-8 flex aspect-[3/4] h-auto w-full items-end justify-around border-2 bg-[image:var(--image-kito-url)] bg-contain bg-right-top bg-no-repeat p-[3%] shadow-lg lg:aspect-[4/3] xl:w-10/12"
+    style={{ '--image-kito-url': `url('${kito2}')` }}
     id={props.id}
   >
     <div class="flex flex-col text-[2.3cqi] lg:flex-row-reverse lg:gap-2 lg:text-[1.8cqi]">
