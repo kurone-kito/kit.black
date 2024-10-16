@@ -11,17 +11,15 @@ import { Article } from '../atoms/Article.js';
  */
 export const Events: Component = () => (
   <Article heading="開催している VRChat イベント">
+    <p>黒音キトが VRChat で開催しているイベントをご紹介します。</p>
     <p>
-      黒音キトが VRChat で開催しているイベントをご紹介します。
-      <br />
       <Anchor class="link link-primary" href="http://vrc.group/KITO.5699">
         KITO.5699
       </Anchor>
       &nbsp;グループで Group+
       で開催しております。どなたでもご参加いただけますので、ぜひ遊びに来てください！
-      <br />
-      また、集会終了後は同一インスタンスで VR 睡眠もしています。😴
     </p>
+    <p>また、集会終了後は同一インスタンスで VR 睡眠もしています。😴</p>
     <ul class="grid-col-1 grid gap-4 py-20 md:grid-cols-2 lg:grid-cols-1 2xl:grid-cols-2">
       <Event alt="にゃんにゃん集会" heading="にゃんにゃん集会" src={eventMeow}>
         <li>
