@@ -2,6 +2,10 @@ author {
   name = "Kuroné Kito"
   url = "https://x.com/kurone_kito"
 }
+color {
+  dark = "#15191E"
+  light = "#E5E6E6"
+}
 description = "黒猫にゃんにゃん VTuber、黒音キト (くろねきと) の公式サイトです。"
 favicon {
   type = "image/webp"
