@@ -16,10 +16,10 @@ const Index: Component<RouteSectionProps> = () => (
   <>
     <Hero />
     <ActivitiesCarousel />
+    <Calendar />
     <Activities />
     <Works />
     <Events />
-    <Calendar />
     <Links />
   </>
 );
