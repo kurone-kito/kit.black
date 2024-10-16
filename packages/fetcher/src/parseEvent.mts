@@ -7,7 +7,7 @@ import {
 } from '@kurone-kito/kit.black-lib';
 import type { calendar_v3 } from 'googleapis';
 import type { EventType } from './constants.mjs';
-import { eventTypes } from './constants.mjs';
+import { eventTypes, MAX_EVENTS } from './constants.mjs';
 import type { EventDetail } from './types.mjs';
 import type { ReadonlyTuple } from 'type-fest';
 
@@ -78,6 +78,7 @@ export const toEventsFactory = (span: ReadonlyTuple<Date, 2>) => {
     const merged = [...all, ...createVacationEvents(all)];
     return merged
       .filter(({ epoch: e }) => e >= since && e < until)
-      .toSorted((a, b) => a.epoch - b.epoch);
+      .toSorted((a, b) => a.epoch - b.epoch)
+      .slice(0, MAX_EVENTS);
   };
 };
