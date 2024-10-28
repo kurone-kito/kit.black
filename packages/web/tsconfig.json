@@ -7,6 +7,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "skipLibCheck": true,
     "types": ["@solidjs/start/env", "node", "solid-js", "vinxi/types/client"]
   },
   "exclude": [
@@ -15,8 +16,9 @@
     "node_modules",
     "./**/*.test.ts",
     "./**/*.test.tsx",
+    "*.config.mts",
     "*.config.ts"
   ],
   "extends": "@kurone-kito/typescript-config/tsconfig.json",
-  "include": ["./**/*.ts", "./**/*.tsx"]
+  "include": ["./**/*.mts", "./**/*.ts", "./**/*.tsx"]
 }
