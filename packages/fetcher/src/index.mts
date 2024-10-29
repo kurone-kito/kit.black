@@ -1,6 +1,6 @@
 export { getCalendarIds, getJwtInput } from './env.mjs';
 export type { EventType } from './constants.mjs';
-export { eventTypes } from './constants.mjs';
+export { eventTypes, MAX_EVENTS } from './constants.mjs';
 export {
   fetchAllRawEventsFactory,
   fetchRawEventsFactory,
