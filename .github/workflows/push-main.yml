@@ -55,4 +55,4 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
           production-branch: main
-          publish-dir: './packages/web/.output/public'
+          publish-dir: ./packages/web/dist

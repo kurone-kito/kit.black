@@ -106,4 +106,4 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: false
-          publish-dir: './packages/web/.output/public'
+          publish-dir: ./packages/web/dist
