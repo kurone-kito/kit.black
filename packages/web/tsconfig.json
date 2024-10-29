@@ -16,9 +16,10 @@
     "node_modules",
     "./**/*.test.ts",
     "./**/*.test.tsx",
+    "*.config.mjs",
     "*.config.mts",
     "*.config.ts"
   ],
   "extends": "@kurone-kito/typescript-config/tsconfig.json",
-  "include": ["./**/*.mts", "./**/*.ts", "./**/*.tsx"]
+  "include": ["./**/*.mjs", "./**/*.mts", "./**/*.ts", "./**/*.tsx"]
 }
