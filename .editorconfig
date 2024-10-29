@@ -10,3 +10,6 @@ trim_trailing_whitespace = true
 
 [*.{md,mdx}]
 trim_trailing_whitespace = false
+
+[packages/web/src/i18n/{en,ja}.ts]
+trim_trailing_whitespace = false
