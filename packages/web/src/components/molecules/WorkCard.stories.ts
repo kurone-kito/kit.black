@@ -11,9 +11,10 @@ export default {
   args: {
     alt: 'Alt',
     children: 'Children',
+    class: 'prose',
     heading: 'Heading',
     href: 'https://example.com',
-    since: 2024,
+    released: '2024 年リリース',
     src: 'https://placehold.jp/1024x1656.png',
   },
   component: WorkCard,

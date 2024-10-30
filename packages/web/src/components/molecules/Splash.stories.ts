@@ -1,18 +1,13 @@
 import type { Meta, StoryObj } from 'storybook-solidjs';
-import { LinkItem } from './LinkItem.js';
+import { Splash } from './Splash.js';
 
 /** Type definition for the component. */
-type Target = typeof LinkItem;
+type Target = typeof Splash;
 
 /** The default story for the component. */
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: {
-    caption: 'Caption',
-    children: '◆',
-    href: 'https://example.com/',
-    title: 'Title',
-  },
-  component: LinkItem,
+  args: { animation: true },
+  component: Splash,
 } satisfies Meta<Target>;

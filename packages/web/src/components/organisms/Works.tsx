@@ -26,6 +26,8 @@ export const Works: Component = () => {
           alt="“Dantalion”Web ページ"
           heading={dantalion}
           href="https://kurone-kito.github.io/dantalion/"
+          labelMore="もっと見る"
+          labelSince="年リリース"
           since={2021}
           src={worksDantalion}
         >
@@ -53,6 +55,8 @@ export const Works: Component = () => {
           alt="“black.kit.vrcui”配布ページ"
           heading="VRChat 風 UI スキン “black.kit.vrcui”"
           href="https://kurone-kito.booth.pm/items/5545750"
+          labelMore="もっと見る"
+          labelSince="年リリース"
           since={2024}
           src={worksVrcUi}
         >
@@ -72,6 +76,8 @@ export const Works: Component = () => {
           alt="“Launchpad Icons”Web ページ"
           heading="VRChat 風アイコン集 “Launchpad Icons”"
           href="https://kurone-kito.github.io/launchpad-icons/ja/"
+          labelMore="もっと見る"
+          labelSince="年リリース"
           since={2024}
           src={worksLaunchpadIcons}
         >
@@ -96,6 +102,8 @@ export const Works: Component = () => {
           alt="黒音キト グラフィグ"
           heading="黒音キト グラフィグ"
           href="https://gist.github.com/kurone-kito/e3018a3920aa723d7c52632a70aba176"
+          labelMore="もっと見る"
+          labelSince="年リリース"
           since={2019}
           src={worksGraphig}
         >

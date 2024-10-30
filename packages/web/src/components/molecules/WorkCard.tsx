@@ -1,25 +1,29 @@
-import type { Component, JSX, ParentProps } from 'solid-js';
-import { Show } from 'solid-js';
+import type { Component, JSX } from 'solid-js';
+import { Show, splitProps } from 'solid-js';
+import { twMerge } from 'tailwind-merge';
 import { Anchor } from '../atoms/Anchor.js';
 
 /** Type definition for the properties. */
 export interface WorkCardProps
   extends Pick<
-      Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
-      'alt' | 'src'
+      Readonly<JSX.HTMLAttributes<HTMLDivElement>>,
+      'children' | 'class' | 'innerHTML'
     >,
-    Readonly<ParentProps> {
+    Pick<Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>, 'alt' | 'src'> {
   /** The work heading title. */
   readonly heading?: JSX.Element;
 
   /** The URL to the work. */
-  readonly href?: string;
+  readonly href: string;
+
+  /** The label for more information button. */
+  readonly labelMore: JSX.Element;
 
   /** The landscape image URL. */
   readonly landscapeSrc?: string;
 
-  /** The year of the work. */
-  readonly since?: number;
+  /** The release year text. */
+  readonly released: JSX.Element;
 }
 
 /**
@@ -27,62 +31,76 @@ export interface WorkCardProps
  * @param props The properties.
  * @returns The component.
  */
-export const WorkCard: Component<WorkCardProps> = (props) => (
-  <li class="card bg-base-300 lg:card-side shadow-xl">
-    <Show when={props.src}>
-      <figure class="aspect-video !items-start lg:aspect-[128/207] lg:h-full lg:w-auto lg:max-w-72 xl:aspect-square xl:max-w-96">
-        <Show
-          fallback={
+export const WorkCard: Component<WorkCardProps> = (props) => {
+  const [local, others] = splitProps(props, ['children', 'innerHTML']);
+  return (
+    <li class="card bg-base-300 lg:card-side shadow-xl">
+      <Show when={others.src}>
+        <figure class="aspect-video !items-start lg:aspect-[128/207] lg:h-full lg:w-auto lg:max-w-72 xl:aspect-square xl:max-w-96">
+          <Show
+            fallback={
+              <img
+                alt={others.alt}
+                class="w-full"
+                decoding="async"
+                fetchpriority="low"
+                height={1024}
+                loading="lazy"
+                src={others.src}
+                width={1656}
+              />
+            }
+            when={others.landscapeSrc}
+          >
             <img
-              alt={props.alt}
-              class="w-full"
+              alt={others.alt}
+              class="block w-full lg:hidden"
+              decoding="async"
+              fetchpriority="low"
+              height={1280}
+              loading="lazy"
+              src={others.landscapeSrc}
+              width={720}
+            />
+            <img
+              alt={others.alt}
+              class="hidden w-full lg:block"
+              decoding="async"
+              fetchpriority="low"
               height={1024}
-              src={props.src}
+              loading="lazy"
+              src={others.src}
               width={1656}
             />
-          }
-          when={props.landscapeSrc}
-        >
-          <img
-            alt={props.alt}
-            class="block w-full lg:hidden"
-            height={1280}
-            src={props.landscapeSrc}
-            width={720}
-          />
-          <img
-            alt={props.alt}
-            class="hidden w-full lg:block"
-            height={1024}
-            src={props.src}
-            width={1656}
-          />
+          </Show>
+        </figure>
+      </Show>
+      <div class="card-body lg:basis-0">
+        <Show when={others.heading}>
+          <h3 class="card-title">{others.heading}</h3>
         </Show>
-      </figure>
-    </Show>
-    <div class="card-body lg:basis-0">
-      <Show when={props.heading}>
-        <h3 class="card-title">{props.heading}</h3>
-      </Show>
-      {props.children}
-      <Show when={props.since || props.href}>
-        <ul class="flex items-center gap-4">
-          <Show when={props.href}>
-            <li>
-              <Anchor class="btn btn-primary" href={props.href}>
-                もっと見る
-              </Anchor>
-            </li>
-          </Show>
-          <Show when={props.since}>
-            {(since) => (
+        <div
+          class={twMerge('flex h-full flex-col justify-between', others.class)}
+          {...local}
+        />
+        <Show when={others.released || others.href}>
+          <ul class="flex items-center gap-4">
+            <Show when={others.href}>
               <li>
-                <time datetime={`${since()}`}>{since()}</time> 年リリース
+                <Anchor
+                  class="btn btn-primary font-semibold"
+                  href={others.href}
+                >
+                  {others.labelMore}
+                </Anchor>
               </li>
-            )}
-          </Show>
-        </ul>
-      </Show>
-    </div>
-  </li>
-);
+            </Show>
+            <Show when={others.released}>
+              {(released) => <li>{released()}</li>}
+            </Show>
+          </ul>
+        </Show>
+      </div>
+    </li>
+  );
+};
