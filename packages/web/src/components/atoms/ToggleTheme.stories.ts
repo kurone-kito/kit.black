@@ -1,19 +1,18 @@
 import type { Meta, StoryObj } from 'storybook-solidjs';
-import { Event } from './Event.js';
+import { ToggleTheme } from './ToggleTheme.js';
 
 /** Type definition for the component. */
-type Target = typeof Event;
+type Target = typeof ToggleTheme;
 
 /** The default story for the component. */
 export const Default: StoryObj<Target> = {};
 
 export default {
   args: {
-    alt: 'Alt',
-    children: 'Children',
-    class: 'prose',
-    heading: 'Heading',
-    src: 'https://placehold.jp/1280x1810.png',
+    labelToDark: 'Dark',
+    labelToLight: 'Light',
+    themes: ['light', 'dark'],
+    toggleTooltip: 'Toggle theme',
   },
-  component: Event,
+  component: ToggleTheme,
 } satisfies Meta<Target>;

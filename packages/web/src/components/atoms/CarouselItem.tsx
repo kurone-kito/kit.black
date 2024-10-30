@@ -20,6 +20,8 @@ export const CarouselItem: Component<CarouselItemProps> = (props) => {
     <div class={twMerge('aspect-video', local.class)}>
       <img
         class="rounded-box saturate-100 transition-[filter] duration-500 hover:saturate-100 lg:saturate-[.33]"
+        decoding="async"
+        fetchpriority="low"
         {...rest}
       />
     </div>

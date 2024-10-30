@@ -1,7 +1,14 @@
 import type { Component, JSX, ParentProps } from 'solid-js';
+import { splitProps } from 'solid-js';
+import { twMerge } from 'tailwind-merge';
 
 /** Type definition for the properties. */
-export interface HeroProps extends Readonly<ParentProps> {
+export interface HeroProps
+  extends Pick<
+      Readonly<JSX.HTMLAttributes<HTMLElement>>,
+      'class' | 'innerHTML'
+    >,
+    Readonly<ParentProps> {
   /** The logo */
   readonly logo?: JSX.Element;
 }
@@ -11,18 +18,29 @@ export interface HeroProps extends Readonly<ParentProps> {
  * @param props The component properties.
  * @returns The component.
  */
-export const Hero: Component<HeroProps> = (props) => (
-  <>
-    <section class="hero bg-base-300 lg:pb-20">
-      <div class="hero-content w-full items-stretch px-0">
-        {props.logo}
-        <div class="hidden flex-col justify-around py-28 leading-loose tracking-wider lg:flex">
-          {props.children}
+export const Hero: Component<HeroProps> = (props) => {
+  const [local, others] = splitProps(props, ['class', 'logo']);
+  return (
+    <>
+      <section class="hero bg-base-300 lg:pb-20">
+        <div class="hero-content w-full items-stretch px-0">
+          {local.logo}
+          <div
+            class={twMerge(
+              'hidden flex-col justify-around py-28 leading-loose tracking-wider lg:flex',
+              local.class,
+            )}
+            {...others}
+          />
         </div>
-      </div>
-    </section>
-    <section class="container mx-auto flex flex-col items-center gap-8 py-20 leading-loose tracking-wider lg:hidden">
-      {props.children}
-    </section>
-  </>
-);
+      </section>
+      <section
+        class={twMerge(
+          'container mx-auto flex flex-col items-center gap-8 py-20 leading-loose tracking-wider lg:hidden',
+          local.class,
+        )}
+        {...others}
+      />
+    </>
+  );
+};

@@ -1,11 +1,11 @@
 import type { Component, JSX } from 'solid-js';
-import { mergeProps } from 'solid-js/web';
+import { mergeProps, splitProps } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
 import { twMerge } from 'tailwind-merge';
 import type { IntRange } from 'type-fest';
 
 /** Type definition for the properties. */
-export interface LogoProps extends Pick<JSX.AriaAttributes, 'role'> {
+export interface LogoProps extends JSX.AriaAttributes {
   /**
    * The heading level.
    * @default 1
@@ -21,21 +21,24 @@ const defaultProps = { level: 1 } as const satisfies LogoProps;
 
 /**
  * The logo component.
+ * @param props The properties.
  * @returns The component.
  */
 export const Logo: Component<LogoProps> = (props) => {
   const concProps = mergeProps(defaultProps, props);
+  const [local, others] = splitProps(concProps, ['class', 'level']);
   return (
     <div
       class={twMerge(
         'font-Lato text-base-content @container-[size]/logo flex aspect-[47/50] cursor-default select-none flex-row-reverse uppercase drop-shadow-md',
-        props.class,
+        local.class,
       )}
-      role={props.role}
+      translate="no"
+      {...others}
     >
       <Dynamic
         class="-ml-[3.5cqh] break-all p-0 text-[44.5cqh] font-black leading-[32.8cqh] after:absolute after:bottom-[1cqh] after:right-[2.1cqh] after:text-[5cqh] after:font-black after:leading-none after:content-['TM']"
-        component={`h${concProps.level}` as const}
+        component={`h${local.level}` as const}
       >
         <span class="-tracking-[4.5cqh]">Kuroné</span>
         <span class="-tracking-[7.4cqh]">Kito</span>
