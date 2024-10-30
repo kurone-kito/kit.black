@@ -1,43 +1,34 @@
 import type { Component } from 'solid-js';
+import { html as en } from '../../assets/texts/hero.en.md';
+import { html as ja } from '../../assets/texts/hero.ja.md';
+import {
+  createI18NText,
+  useLanguage,
+  useTranslator,
+} from '../../modules/createI18N';
 import { Hero as AtomsHero } from '../atoms/Hero.js';
-import { Anchor } from '../atoms/Anchor.js';
-import { ProfileItem } from '../atoms/ProfileItem.js';
 import { KitoWithLogo } from '../molecules/KitoWithLogo.js';
+
+/** The accessor for the translated markdown. */
+const mdTranslator = createI18NText({ en, ja } as const);
 
 /**
  * The hero component
  * @returns The component.
  */
-export const Hero: Component = () => (
-  <AtomsHero logo={<KitoWithLogo />}>
-    <blockquote class="font-serif text-lg italic opacity-80 xl:text-2xl">
-      “お仕事ぱたぱたいっぱい大変にゃんにゃん！”
-    </blockquote>
-    <p>
-      黒音キトは、(元？)ブラックIT系な、黒猫にゃんにゃんVTuber。
-      <br />
-      本業は Web フロントエンドエンジニア。
-    </p>
-    <ul class="list-inside list-disc">
-      <ProfileItem heading="活動開始">
-        <time datetime="2018-11-02">2018 年 11 月 2 日</time>
-      </ProfileItem>
-      <ProfileItem heading="お誕生日">
-        <time datetime="10-09">10 月 9 日</time>
-      </ProfileItem>
-      <ProfileItem heading="特技">にゃんにゃん鳴きます🐱</ProfileItem>
-      <li>
-        <Anchor class="link-hover link" href="https://vgeekpro.com">
-          ぶいぎーく！Vgeek production
-        </Anchor>
-        &nbsp;所属 VTuber
-      </li>
-      <li>
-        <Anchor class="link-hover link" href="https://engineer-meetup.com">
-          エンジニア集会
-        </Anchor>
-        スタッフ
-      </li>
-    </ul>
-  </AtomsHero>
-);
+export const Hero: Component = () => {
+  const md = mdTranslator(useLanguage());
+  const t = useTranslator();
+  return (
+    <AtomsHero
+      class="prose [&_strong]:text-base-content/80 [&_a]:link [&_a]:lg:link-hover [&_blockquote]:font-serif [&_blockquote]:text-lg [&_blockquote]:italic [&_blockquote]:opacity-80 [&_blockquote]:xl:text-2xl [&_strong]:font-bold [&_ul]:list-inside [&_ul]:list-disc"
+      innerHTML={md('text')}
+      logo={
+        <KitoWithLogo
+          altKito={t('avatarKito')}
+          altMomoneko={t('avatarMomoneko')}
+        />
+      }
+    />
+  );
+};

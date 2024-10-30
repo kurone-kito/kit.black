@@ -41,7 +41,8 @@
     "@solidjs/start": "^1.0.8",
     "solid-icons": "^1.1.0",
     "solid-js": "^1.9.2",
-    "tailwind-merge": "^2.5.3"
+    "tailwind-merge": "^2.5.3",
+    "theme-change": "^2.5.0"
   },
   "devDependencies": {
     "@kurone-kito/kit.black-fetcher": "workspace:^",

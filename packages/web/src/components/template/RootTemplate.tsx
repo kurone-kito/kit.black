@@ -1,45 +1,39 @@
+import { createMediaQuery } from '@solid-primitives/media';
 import { MetaProvider } from '@solidjs/meta';
 import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
-import { Suspense } from 'solid-js';
-import constants from '../../constants.json';
-import { Footer } from '../organisms/Footer';
-import { Head } from '../molecules/Head';
-
-/** The images for the Open Graph protocol. */
-const images = [constants.favicon.url] as const;
+import { createSignal, onMount, Show, Suspense } from 'solid-js';
+import { themeChange } from 'theme-change';
+import { Footer } from '../organisms/Footer.js';
+import { Head } from '../organisms/Head.js';
+import { Navbar } from '../organisms/Navbar.js';
+import { DURATION, Splash } from '../organisms/Splash.js';
 
 /**
  * The root template component.
  * @param props The properties.
  * @returns The component.
  */
-export const RootTemplate: Component<RouteSectionProps> = (props) => (
-  <MetaProvider>
-    <Head
-      author={constants.author.name}
-      authorUrl={constants.author.url}
-      colorDark={undefined}
-      colorLight={undefined}
-      description={constants.description}
-      faviconType={constants.favicon.type}
-      faviconUrl={constants.favicon.path}
-      keywords={constants.keywords}
-      imageAlt={constants.author.name}
-      imageHeight={constants.favicon.size}
-      images={images}
-      imageType={constants.favicon.type}
-      imageWidth={constants.favicon.size}
-      language="ja"
-      licenseUrl={constants.licenseUrl}
-      next={undefined}
-      prev={undefined}
-      siteName={constants.site.name}
-      url={constants.site.url}
-    />
-    <main>
-      <Suspense fallback={<div>Loading...</div>}>{props.children}</Suspense>
-    </main>
-    <Footer />
-  </MetaProvider>
-);
+export const RootTemplate: Component<RouteSectionProps> = (props) => {
+  const reduceMotion = createMediaQuery('(prefers-reduced-motion: reduce)');
+  const [isSplash, setSplash] = createSignal<boolean>(!reduceMotion());
+  onMount(() => {
+    themeChange(false);
+    setTimeout(() => setSplash(false), DURATION);
+  });
+  return (
+    <MetaProvider>
+      <Head />
+      <Navbar />
+      <Show when={isSplash()}>
+        <Splash />
+      </Show>
+      <Suspense>
+        <main>
+          {props.children}
+          <Footer />
+        </main>
+      </Suspense>
+    </MetaProvider>
+  );
+};
