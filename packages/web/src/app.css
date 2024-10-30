@@ -4,18 +4,18 @@
 @tailwind components;
 @tailwind utilities;
 
-@responsive {
+@layer utilities {
   .text-stroke-3 {
     text-shadow:
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity)));
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100');
   }
 }
