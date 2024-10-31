@@ -1,0 +1,15 @@
+author:
+  url: https://x.com/kurone_kito
+color:
+  dark: '#15191E'
+  light: '#E5E6E6'
+favicon:
+  type: image/webp
+  path: /favicon.webp
+  size: 1024
+  url: https://kit.black/favicon.webp
+keywords: Kuroné Kito, 黒音キト, VTuber, Virtual YouTuber, Streamer
+licenseUrl: https://github.com/kurone-kito/kit.black/blob/main/LICENSE
+site:
+  name: '🐱 黒音キト -Kuroné Kito- :: official site'
+  url: https://kit.black

@@ -54,11 +54,10 @@ jobs:
         platform:
           - os: ubuntu-latest
             shell: bash
-          # ! The Windows is not supported by the pkl
-          # - os: windows-latest
-          #   shell: bash
-          # - os: windows-latest
-          #   shell: powershell
+          - os: windows-latest
+            shell: bash
+          - os: windows-latest
+            shell: powershell
       fail-fast: false
     timeout-minutes: 30
   deploy:
