@@ -57,7 +57,7 @@
     "@tailwindcss/container-queries": "^0.1.1",
     "@testing-library/jest-dom": "^6.5.0",
     "autoprefixer": "^10.4.20",
-    "daisyui": "^4.12.12",
+    "daisyui": "^4.12.14",
     "jsdom": "^25.0.1",
     "postcss": "^8.4.47",
     "rimraf": "^6.0.1",
