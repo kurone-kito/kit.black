@@ -1,7 +1,7 @@
 import config from '@kurone-kito/prettier-config/.prettierrc.json' with { type: 'json' };
 
-export default {
-  ...config,
+/** @type {import('prettier').Config} */
+const additional = {
   plugins: [
     'prettier-plugin-packagejson',
     'prettier-plugin-sh',
@@ -9,3 +9,5 @@ export default {
     'prettier-plugin-tailwindcss',
   ],
 };
+
+export default { ...config, ...additional };

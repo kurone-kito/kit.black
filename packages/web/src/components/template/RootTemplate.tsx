@@ -1,52 +1,39 @@
+import { createMediaQuery } from '@solid-primitives/media';
 import { MetaProvider } from '@solidjs/meta';
 import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
-import { Suspense } from 'solid-js';
-import constants from '../../constants.json';
-import { LinkList } from '../atoms/meta/LinkList.js';
-import { MetaList } from '../atoms/meta/MetaList.js';
-import { Ogp } from '../atoms/meta/Ogp.js';
-import { Title } from '../atoms/meta/Title.js';
-import { XCard } from '../atoms/meta/XCard.js';
-import { Footer } from '../organisms/Footer';
-
-/** The images for the Open Graph protocol. */
-const images = [constants.favicon.url] as const;
+import { createSignal, onMount, Show, Suspense } from 'solid-js';
+import { themeChange } from 'theme-change';
+import { Footer } from '../organisms/Footer.js';
+import { Head } from '../organisms/Head.js';
+import { Navbar } from '../organisms/Navbar.js';
+import { DURATION, Splash } from '../organisms/Splash.js';
 
 /**
  * The root template component.
  * @param props The properties.
  * @returns The component.
  */
-export const RootTemplate: Component<RouteSectionProps> = (props) => (
-  <MetaProvider>
-    <Title siteName={constants.site.name} />
-    <MetaList
-      author={constants.author.name}
-      description={constants.description}
-      keywords={constants.keywords}
-    />
-    <Ogp
-      imageHeight={constants.favicon.size}
-      images={images}
-      imageType={constants.favicon.type}
-      imageWidth={constants.favicon.size}
-      language="ja"
-      siteName={constants.site.name}
-      url={constants.site.url}
-    />
-    <XCard
-      author={constants.author.name}
-      image={constants.favicon.url}
-      siteName={constants.site.name}
-    />
-    <LinkList
-      faviconType={constants.favicon.type}
-      faviconUrl={constants.favicon.path}
-    />
-    <main>
-      <Suspense fallback={<div>Loading...</div>}>{props.children}</Suspense>
-    </main>
-    <Footer />
-  </MetaProvider>
-);
+export const RootTemplate: Component<RouteSectionProps> = (props) => {
+  const reduceMotion = createMediaQuery('(prefers-reduced-motion: reduce)');
+  const [isSplash, setSplash] = createSignal<boolean>(!reduceMotion());
+  onMount(() => {
+    themeChange(false);
+    setTimeout(() => setSplash(false), DURATION);
+  });
+  return (
+    <MetaProvider>
+      <Head />
+      <Navbar />
+      <Show when={isSplash()}>
+        <Splash />
+      </Show>
+      <Suspense>
+        <main>
+          {props.children}
+          <Footer />
+        </main>
+      </Suspense>
+    </MetaProvider>
+  );
+};

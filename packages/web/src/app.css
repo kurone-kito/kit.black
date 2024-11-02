@@ -4,18 +4,58 @@
 @tailwind components;
 @tailwind utilities;
 
-@responsive {
+@layer utilities {
   .text-stroke-3 {
     text-shadow:
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity))),
-      0 0 0.125rem var(--fallback-b2, oklch(var(--b2) / var(--tw-bg-opacity)));
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100'),
+      0 0 0.125rem theme('colors.base-100');
+  }
+}
+
+@property --splash-logo-conic {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+
+@property --splash-logo-opacity {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 100%;
+}
+
+@property --splash-logo-scale {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 180vmax;
+}
+
+@keyframes splash-logo-conic {
+  from {
+    --splash-logo-conic: 0%;
+  }
+
+  to {
+    --splash-logo-conic: 100%;
+  }
+}
+
+@keyframes splash-logo-scale {
+  from {
+    --splash-logo-opacity: 100%;
+    --splash-logo-scale: 180vmax;
+  }
+
+  to {
+    --splash-logo-opacity: 0%;
+    --splash-logo-scale: 5vmax;
   }
 }

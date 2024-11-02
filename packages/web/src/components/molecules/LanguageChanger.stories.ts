@@ -1,13 +1,13 @@
 import type { Meta, StoryObj } from 'storybook-solidjs';
-import { ProfileItem } from './ProfileItem.js';
+import { LanguageChanger } from './LanguageChanger.js';
 
 /** Type definition for the component. */
-type Target = typeof ProfileItem;
+type Target = typeof LanguageChanger;
 
 /** The default story for the component. */
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { children: 'Children', heading: 'Heading' },
-  component: ProfileItem,
+  args: { enHref: 'https://example.com/', jaHref: 'https://example.com/' },
+  component: LanguageChanger,
 } satisfies Meta<Target>;

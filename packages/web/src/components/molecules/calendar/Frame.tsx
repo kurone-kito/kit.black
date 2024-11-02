@@ -5,13 +5,14 @@ import { IconContainer } from '../../atoms/IconContainer.js';
 /**
  * The main section component for schedule.
  * @param props The properties.
+ * @returns The component.
  */
 export const Frame: Component<Readonly<ParentProps>> = (props) => (
   <section class="flex flex-col justify-center lg:basis-8/12">
     <ul class="text-stroke-3 flex gap-4 pt-2 lg:tracking-tighter">
       <li>JST (+9:00)</li>
       <li>
-        <IconContainer class="text-primary" />
+        <IconContainer class="text-accent" />
         &nbsp;ライブ配信あり
       </li>
       <li>
@@ -19,7 +20,9 @@ export const Frame: Component<Readonly<ParentProps>> = (props) => (
         &nbsp;作品リリースあり
       </li>
     </ul>
-    <Table>{props.children}</Table>
+    <Table date="日付" detail="活動内容" time="時刻">
+      {props.children}
+    </Table>
     <p class="text-stroke-3 drop-shadow">
       お仕事ぱたぱたのため、状況により変更・延期となる場合があります🐱💦
     </p>

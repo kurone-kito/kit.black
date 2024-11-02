@@ -1,50 +1,90 @@
 import type { Component } from 'solid-js';
 import eventMeow from '../../assets/events/meow-meetup.webp';
 import eventUiUx from '../../assets/events/ui-ux-meetup.webp';
+import {
+  attributes as detailEnA,
+  html as detailEn,
+} from '../../assets/texts/events/detail.en.md';
+import {
+  attributes as detailJaA,
+  html as detailJa,
+} from '../../assets/texts/events/detail.ja.md';
+import {
+  attributes as meowEnA,
+  html as meowEn,
+} from '../../assets/texts/events/meow.en.md';
+import {
+  attributes as meowJaA,
+  html as meowJa,
+} from '../../assets/texts/events/meow.ja.md';
+import {
+  attributes as uiUxEnA,
+  html as uiUxEn,
+} from '../../assets/texts/events/ui-ux.en.md';
+import {
+  attributes as uiUxJaA,
+  html as uiUxJa,
+} from '../../assets/texts/events/ui-ux.ja.md';
+import {
+  createI18NDict,
+  createI18NText,
+  useLanguage,
+} from '../../modules/createI18N.js';
 import { Event } from '../atoms/cards/Event.js';
-import { Anchor } from '../atoms/Anchor.js';
 import { Article } from '../atoms/Article.js';
+
+/** The detail translated attributes. */
+const detailAttrTranslator = createI18NDict({ en: detailEnA, ja: detailJaA });
+
+/** The detail translated markdown. */
+const detailBodyTranslator = createI18NText({ en: detailEn, ja: detailJa });
+
+/** The accessor for the meow meetup translated attributes. */
+const meowAttrTranslator = createI18NDict({ en: meowEnA, ja: meowJaA });
+
+/** The accessor for the meow meetup translated markdown. */
+const meowBodyTranslator = createI18NText({ en: meowEn, ja: meowJa });
+
+/** The accessor for the UI/UX meetup translated attributes. */
+const uiUxAttrTranslator = createI18NDict({ en: uiUxEnA, ja: uiUxJaA });
+
+/** The accessor for the UI/UX meetup translated markdown. */
+const uiUxBodyTranslator = createI18NText({ en: uiUxEn, ja: uiUxJa });
 
 /**
  * The events component.
  * @returns The component.
  */
-export const Events: Component = () => (
-  <Article heading="開催している VRChat イベント">
-    <p>
-      黒音キトが VRChat で開催しているイベントをご紹介します。
-      <br />
-      <Anchor class="link link-primary" href="http://vrc.group/KITO.5699">
-        KITO.5699
-      </Anchor>
-      &nbsp;グループで Group+
-      で開催しております。どなたでもご参加いただけますので、ぜひ遊びに来てください！
-      <br />
-      また、集会終了後は同一インスタンスで VR 睡眠もしています。😴
-    </p>
-    <ul class="grid-col-1 grid gap-4 py-20 md:grid-cols-2 lg:grid-cols-1 2xl:grid-cols-2">
-      <Event alt="にゃんにゃん集会" heading="にゃんにゃん集会" src={eventMeow}>
-        <li>
-          猫なりきり、特に猫の声真似をテーマにした、ただ
-          <strong>にゃんにゃん鳴くだけ</strong>の集会。
-        </li>
-        <li>
-          猫ボイスが好きな方、自分を猫だと思っている方、もちろん黒音キトが大好きな方や、無言勢＆デスクトップ勢も大歓迎です。
-        </li>
-      </Event>
-      <Event
-        alt="UI/UX デザイン集会"
-        heading="UI/UX デザイン集会"
-        src={eventUiUx}
-      >
-        <li>
-          Webで！ゲームで！日常生活や業務システムで！！
-          <br />
-          これまで見てきた<strong>クソ UI ・残念デザイン</strong>
-          など、飲み会感覚でお気軽に語り合う集会です。エンジニアの方以外でも、デザインの敗北や
-          Bad UI に思うところや興味があれば、お気軽にご参加ください！
-        </li>
-      </Event>
-    </ul>
-  </Article>
-);
+export const Events: Component = () => {
+  const language = useLanguage();
+  const detailAttr = detailAttrTranslator(language);
+  const detailBody = detailBodyTranslator(language);
+  const meowAttr = meowAttrTranslator(language);
+  const meowBody = meowBodyTranslator(language);
+  const uiUxAttr = uiUxAttrTranslator(language);
+  const uiUxBody = uiUxBodyTranslator(language);
+  return (
+    <Article heading={detailAttr('heading')}>
+      <div
+        class="prose [&_a]:link [&_a]:font-semibold"
+        innerHTML={detailBody('text')}
+      />
+      <ul class="grid-col-1 grid gap-4 py-20 md:grid-cols-2 lg:grid-cols-1 2xl:grid-cols-2">
+        <Event
+          alt={meowAttr('alt')}
+          class="prose [&_a]:link [&_li]:py-2 [&_ul]:list-inside [&_ul]:list-disc"
+          heading={meowAttr('heading')}
+          innerHTML={meowBody('text')}
+          src={eventMeow}
+        />
+        <Event
+          alt={uiUxAttr('alt')}
+          class="prose [&_a]:link [&_li]:py-2 [&_ul]:list-inside [&_ul]:list-disc"
+          heading={uiUxAttr('heading')}
+          innerHTML={uiUxBody('text')}
+          src={eventUiUx}
+        />
+      </ul>
+    </Article>
+  );
+};

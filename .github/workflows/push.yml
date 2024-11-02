@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - '*'
-      - '!master'
+      - '!main'
 permissions:
   contents: read
   pull-requests: write
@@ -54,11 +54,10 @@ jobs:
         platform:
           - os: ubuntu-latest
             shell: bash
-          # ! The Windows is not supported by the pkl
-          # - os: windows-latest
-          #   shell: bash
-          # - os: windows-latest
-          #   shell: powershell
+          - os: windows-latest
+            shell: bash
+          - os: windows-latest
+            shell: powershell
       fail-fast: false
     timeout-minutes: 30
   deploy:
@@ -99,10 +98,11 @@ jobs:
       - env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+          NODE_ENV: production
         name: Deploy to Netlify
         # cspell:disable-next-line
         uses: nwtgck/actions-netlify@v3.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: false
-          publish-dir: './packages/web/.output/public'
+          publish-dir: ./packages/web/dist

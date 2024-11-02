@@ -1,7 +1,7 @@
-import type { IconProps } from 'solid-icons';
 import type { Component } from 'solid-js';
 import { splitProps } from 'solid-js';
 import { twMerge } from 'tailwind-merge';
+import type { IconProps } from './types.js';
 
 /**
  * The marshmallow icon component.

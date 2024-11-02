@@ -1,7 +1,8 @@
 import solidPlugin from 'vite-plugin-solid';
-import { defineConfig } from 'vitest/config';
+import { mergeConfig } from 'vitest/config';
+import defaultConfig from './vite.config.mjs';
 
-export default defineConfig({
+export default mergeConfig(defaultConfig, {
   plugins: [solidPlugin()],
   test: { environment: 'jsdom', setupFiles: ['./vitest.setup.mts'] },
 });

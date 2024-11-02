@@ -1,11 +1,11 @@
-name: The CI workflow on merge as a master branch
+name: Deploy the production to Netlify
 run-name: Merged the main branch by @${{ github.actor }}
 on:
   push:
     branches:
-      - master
+      - main
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 15/8 * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -47,11 +47,12 @@ jobs:
       - env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+          NODE_ENV: production
         name: Deploy to Netlify
         # cspell:disable-next-line
         uses: nwtgck/actions-netlify@v3.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
-          production-branch: master
-          publish-dir: './packages/web/.output/public'
+          production-branch: main
+          publish-dir: ./packages/web/dist

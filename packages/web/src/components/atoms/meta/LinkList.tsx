@@ -33,37 +33,33 @@ export interface LinkListProps {
  */
 export const LinkList: Component<LinkListProps> = (props) => (
   <>
-    <Link rel="preconnect" href="https://fonts.googleapis.com" />
+    <Link href="https://fonts.googleapis.com" rel="preconnect" />
     <Link
-      rel="preconnect"
-      href="https://fonts.gstatic.com"
       crossOrigin="anonymous"
+      href="https://fonts.gstatic.com"
+      rel="preconnect"
     />
-    <Show keyed when={props.authorUrl}>
-      {(href) => <Link rel="author" href={href} />}
+    <Show when={props.authorUrl}>
+      {(href) => <Link href={href()} rel="author" />}
     </Show>
     <Switch>
       <Match when={props.faviconType && props.faviconUrl}>
-        <Link rel="icon" href={props.faviconUrl} type={props.faviconType} />
+        <Link href={props.faviconUrl} rel="icon" type={props.faviconType} />
       </Match>
       <Match when={!props.faviconType && props.faviconUrl}>
-        <Link rel="icon" href={props.faviconUrl} />
+        <Link href={props.faviconUrl} rel="icon" />
       </Match>
     </Switch>
-    <Show keyed when={props.licenseUrl}>
-      {(href) => <Link rel="license" href={href} />}
+    <Show when={props.licenseUrl}>
+      {(href) => <Link href={href()} hreflang="en" rel="license" />}
     </Show>
-    <Show keyed when={props.next}>
-      {(href) => <Link rel="next" href={href} />}
-    </Show>
+    <Show when={props.next}>{(href) => <Link href={href()} rel="next" />}</Show>
     <Index each={props.preloadImages}>
-      {(image) => <Link as="image" rel="preload" href={image()} />}
+      {(image) => <Link as="image" href={image()} rel="preload" />}
     </Index>
-    <Show keyed when={props.prev}>
-      {(href) => <Link rel="prev" href={href} />}
-    </Show>
-    <Show keyed when={props.licenseUrl}>
-      {(href) => <Link rel="terms-of-service" href={href} />}
+    <Show when={props.prev}>{(href) => <Link href={href()} rel="prev" />}</Show>
+    <Show when={props.licenseUrl}>
+      {(href) => <Link href={href()} hreflang="en" rel="terms-of-service" />}
     </Show>
   </>
 );

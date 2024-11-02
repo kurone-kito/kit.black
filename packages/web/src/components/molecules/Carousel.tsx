@@ -17,6 +17,7 @@ export interface SceneCarouselProps {
 
 /**
  * The carousel component.
+ * @param props The properties.
  * @returns The component.
  */
 export const Carousel: Component<SceneCarouselProps> = (props) => (

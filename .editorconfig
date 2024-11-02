@@ -8,5 +8,8 @@ indent_style = space
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-[*.{md,patch}]
+[*.{md,mdx}]
+trim_trailing_whitespace = false
+
+[packages/web/src/i18n/{en,ja}.ts]
 trim_trailing_whitespace = false

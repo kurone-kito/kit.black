@@ -4,6 +4,7 @@
   "explorer.fileNesting.patterns": {
     "*.css": "${capture}.css.*",
     "*.d.mts": "${capture}.d.mts.*, ${capture}.mjs, ${capture}.mjs.*",
+    "*.en.md": "${capture}.ja.md",
     "*.js": "${capture}.js.*",
     "*.md": "${capture}.*.md",
     "*.mjs": "${capture}.mjs.*",

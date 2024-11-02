@@ -1,13 +1,13 @@
-import type { Component, JSX, ParentProps } from 'solid-js';
-import { Show } from 'solid-js';
+import type { Component, JSX } from 'solid-js';
+import { Show, splitProps } from 'solid-js';
 
 /** Type definition for the properties. */
 export interface ActivityProps
   extends Pick<
-      Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
-      'alt' | 'src'
+      Readonly<JSX.HTMLAttributes<HTMLDivElement>>,
+      'class' | 'children' | 'innerHTML'
     >,
-    Readonly<ParentProps> {
+    Pick<Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>, 'alt' | 'src'> {
   /** The activity heading title. */
   readonly heading?: JSX.Element;
 }
@@ -17,20 +17,29 @@ export interface ActivityProps
  * @param props The properties.
  * @returns The component.
  */
-export const Activity: Component<ActivityProps> = (props) => (
-  <li class="card bg-base-300 shadow-xl">
-    <Show when={props.src}>
-      <figure>
-        <img alt={props.alt} height={720} src={props.src} width={1280} />
-      </figure>
-    </Show>
-    <div class="card-body">
-      <Show when={props.heading}>
-        <h3 class="card-title">{props.heading}</h3>
+export const Activity: Component<ActivityProps> = (props) => {
+  const [local, others] = splitProps(props, ['alt', 'heading', 'src']);
+  return (
+    <li class="card bg-base-300 shadow-xl">
+      <Show when={local.src}>
+        <figure>
+          <img
+            alt={local.alt}
+            decoding="async"
+            fetchpriority="low"
+            height={720}
+            loading="lazy"
+            src={local.src}
+            width={1280}
+          />
+        </figure>
       </Show>
-      <Show when={props.children}>
-        <p>{props.children}</p>
-      </Show>
-    </div>
-  </li>
-);
+      <div class="card-body">
+        <Show when={local.heading}>
+          <h3 class="card-title">{local.heading}</h3>
+        </Show>
+        <div {...others} />
+      </div>
+    </li>
+  );
+};

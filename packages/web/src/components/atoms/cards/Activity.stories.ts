@@ -11,6 +11,7 @@ export default {
   args: {
     alt: 'Alt',
     children: 'Children',
+    class: 'prose',
     heading: 'Heading',
     src: 'https://placehold.jp/1280x720.png',
   },
