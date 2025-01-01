@@ -65,6 +65,8 @@ export const toEventFactory =
  * Create the function that converts the raw events to the events.
  * @param span The span of the events.
  * @returns The function that converts the raw events to the events.
+ *
+ * limited to {@link MAX_EVENTS} items in chronological order.
  */
 export const toEventsFactory = (span: ReadonlyTuple<Date, 2>) => {
   const [since, until] = tupleMap(span, (d) => d.getTime());
