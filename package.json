@@ -60,7 +60,7 @@
     "@kurone-kito/typescript-config": "^0.17.0-alpha.3",
     "@tailwindcss/container-queries": "^0.1.1",
     "@types/node": "^22.8.6",
-    "cspell": "^8.15.5",
+    "cspell": "^8.17.1",
     "eslint": "^9.14.0",
     "eslint-formatter-codeframe": "^7.32.1",
     "husky": "^9.1.6",
