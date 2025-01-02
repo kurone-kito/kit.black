@@ -1,5 +1,5 @@
 ---
-alt: “Launchpad Icons”Web ページ
+alt: “Launchpad Icons” Web ページ
 heading: VRChat 風アイコン集 “Launchpad Icons”
 href: https://kurone-kito.github.io/launchpad-icons/ja/
 ---

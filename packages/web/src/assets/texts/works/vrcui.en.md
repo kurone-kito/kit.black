@@ -13,6 +13,6 @@ environment where Visitors can learn interactively. This will be achieved
 by incorporating a mockup of LaunchPad into the UI skin,
 which will be used in tutorial worlds in the future.
 
-It’s designed to work in VRChat worlds, but the contents are just a
+It’s designed to work in VRChat worlds, but the contents are just an
 Unitypackage, so you can use it in Unity projects in general,
 depending on how you modify it.
