@@ -34,7 +34,9 @@ export const ToggleTheme: Component<ToggleThemeProps> = (props) => {
       <label class="swap swap-rotate pointer-events-auto">
         <input
           data-toggle-theme={concProps.themes.join(',')}
+          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.click()}
           ref={concProps.ref}
+          role="switch"
           type="checkbox"
           value="dark"
         />

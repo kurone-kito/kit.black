@@ -7,6 +7,7 @@ export interface IconProps
     JSX.SvgSVGAttributes<SVGSVGElement>,
     | 'children'
     | 'height'
+    | 'role'
     | 'version'
     | 'viewBox'
     | 'width'

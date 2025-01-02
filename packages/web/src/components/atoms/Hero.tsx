@@ -22,7 +22,7 @@ export const Hero: Component<HeroProps> = (props) => {
   const [local, others] = splitProps(props, ['class', 'logo']);
   return (
     <>
-      <section class="hero bg-base-300 lg:pb-20">
+      <section aria-label="Hero section" class="hero bg-base-300 lg:pb-20">
         <div class="hero-content w-full items-stretch px-0">
           {local.logo}
           <div
@@ -35,6 +35,7 @@ export const Hero: Component<HeroProps> = (props) => {
         </div>
       </section>
       <section
+        aria-label="Additional hero section for mobile"
         class={twMerge(
           'container mx-auto flex flex-col items-center gap-8 py-20 leading-loose tracking-wider lg:hidden',
           local.class,

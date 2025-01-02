@@ -18,7 +18,10 @@ export interface TableProps extends Readonly<ParentProps> {
  * @returns The component.
  */
 export const Table: Component<TableProps> = (props) => (
-  <table class="table-xs table w-full border-separate border-spacing-x-0.5 border-spacing-y-1 sm:border-spacing-y-1.5 sm:pr-[10%] md:border-spacing-x-1.5 md:pr-[15%] lg:border-spacing-0.5 lg:pr-0 [&_*]:whitespace-nowrap [&_*]:text-nowrap [&_*]:break-keep [&_*]:text-[2.3cqi] lg:[&_*]:text-[1.9cqi]">
+  <table
+    class="table-xs table w-full border-separate border-spacing-x-0.5 border-spacing-y-1 sm:border-spacing-y-1.5 sm:pr-[10%] md:border-spacing-x-1.5 md:pr-[15%] lg:border-spacing-0.5 lg:pr-0 [&_*]:whitespace-nowrap [&_*]:text-nowrap [&_*]:break-keep [&_*]:text-[2.3cqi] lg:[&_*]:text-[1.9cqi]"
+    role="grid"
+  >
     <colgroup>
       <col class="w-1 tracking-tight" />
       <col class="w-28 tracking-tighter" />
