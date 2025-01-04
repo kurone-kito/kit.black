@@ -16,17 +16,15 @@
   "files": [],
   "scripts": {
     "prebuild": "pnpm run \"/^prebuild:.+/\"",
-    "build": "pnpm run \"/^build:.+/\"",
+    "build": "vinxi build",
     "build:storybook": "storybook build",
-    "build:vinxi": "vinxi build",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi dist node_modules/.cache \"src/*.json\" storybook-static",
     "prebuild:fetcher": "kb-fetcher > src/data.json",
     "prebuild:yaml": "js-yaml src/constants.yaml > src/constants.json",
     "serve": "serve dist",
     "prestart": "pnpm run prebuild",
-    "start": "pnpm run -p \"/^start:.+/\"",
+    "start": "vinxi dev",
     "start:storybook": "storybook dev -p 6006",
-    "start:vinxi": "vinxi dev",
     "test": "vitest run"
   },
   "dependencies": {
