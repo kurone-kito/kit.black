@@ -19,6 +19,8 @@ const defaultProps = { children: '◆' } as const satisfies IconProps;
 export const IconContainer: Component<IconProps> = (props) => {
   const concProps = mergeProps(defaultProps, props);
   return (
-    <i class={twMerge('not-italic', concProps.class)}>{concProps.children}</i>
+    <i class={twMerge('not-italic', concProps.class)} role="img">
+      {concProps.children}
+    </i>
   );
 };

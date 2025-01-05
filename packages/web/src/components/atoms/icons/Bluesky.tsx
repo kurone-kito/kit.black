@@ -9,6 +9,7 @@ import type { IconProps } from './types.js';
 export const Bluesky: Component<IconProps> = (props) => (
   <svg
     height="530"
+    role="img"
     version="1.1"
     viewBox="0 0 600 530"
     width="600"

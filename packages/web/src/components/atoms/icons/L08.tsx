@@ -8,6 +8,7 @@ import type { IconProps } from './types.js';
  */
 export const L08: Component<IconProps> = (props) => (
   <svg
+    role="img"
     viewBox="0 0 104.92 104.92"
     xmlns="http://www.w3.org/2000/svg"
     {...props}

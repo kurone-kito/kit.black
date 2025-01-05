@@ -58,8 +58,5 @@ export const LinkList: Component<LinkListProps> = (props) => (
       {(image) => <Link as="image" href={image()} rel="preload" />}
     </Index>
     <Show when={props.prev}>{(href) => <Link href={href()} rel="prev" />}</Show>
-    <Show when={props.licenseUrl}>
-      {(href) => <Link href={href()} hreflang="en" rel="terms-of-service" />}
-    </Show>
   </>
 );

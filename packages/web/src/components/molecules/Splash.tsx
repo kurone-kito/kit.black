@@ -12,7 +12,11 @@ export interface SplashProps {
  * @returns The component.
  */
 export const Splash: Component<SplashProps> = (props) => (
-  <section class="absolute h-[100lvh] w-[100lvw]">
+  <section
+    aria-label="Loading the website"
+    class="absolute h-[100lvh] w-[100lvw]"
+    role="status"
+  >
     <div class="bg-base-300 relative z-50 flex h-[100lvh] items-center justify-center overflow-hidden">
       <div
         class="text-base-content font-Lato animate-[splash-logo-scale_1.5s_ease-in_1.5s] text-[length:--splash-logo-scale] font-black uppercase opacity-[--splash-logo-opacity] [animation-fill-mode:forwards]"

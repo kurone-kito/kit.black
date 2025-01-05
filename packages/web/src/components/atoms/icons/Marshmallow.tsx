@@ -14,6 +14,7 @@ export const Marshmallow: Component<IconProps> = (props) => {
     <svg
       class={twMerge('isolate', local.class)}
       height="310.882pt"
+      role="img"
       viewBox="265.504 142.199 310.882 310.882"
       width="310.882pt"
       xmlns="http://www.w3.org/2000/svg"
