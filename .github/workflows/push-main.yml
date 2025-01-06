@@ -42,6 +42,7 @@ jobs:
           ID_RELEASE: ${{ secrets.ID_RELEASE }}
           ID_STREAMING: ${{ secrets.ID_STREAMING }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          TZ: Asia/Tokyo
         name: Run the build
         run: pnpm run build
       - env:
