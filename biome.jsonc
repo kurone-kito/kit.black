@@ -1,4 +1,22 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "extends": ["./node_modules/@kurone-kito/biome-config/biome.json"]
+  "extends": ["./node_modules/@kurone-kito/biome-config/biome.json"],
+  "files": { "ignore": ["docs/**/*"] },
+  "linter": {
+    "rules": {
+      "a11y": {
+        "noInteractiveElementToNoninteractiveRole": "warn",
+        "noSvgWithoutTitle": "warn",
+        "useAltText": "warn",
+        "useAriaPropsForRole": "warn",
+        "useHtmlLang": "warn",
+        "useSemanticElements": "warn"
+      },
+      "complexity": { "noForEach": "warn" },
+      "correctness": { "noUnknownFunction": "warn" },
+      "performance": { "noAccumulatingSpread": "warn" },
+      "style": { "noNonNullAssertion": "warn" },
+      "suspicious": { "noAssignInExpressions": "warn", "noExplicitAny": "warn" }
+    }
+  }
 }
