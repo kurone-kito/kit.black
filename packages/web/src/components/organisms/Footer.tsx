@@ -1,6 +1,6 @@
-import type { Component } from 'solid-js';
 import { FaBrandsGithub } from 'solid-icons/fa';
 import { SiNetlify } from 'solid-icons/si';
+import type { Component } from 'solid-js';
 import { useTranslator } from '../../modules/createI18N.js';
 import { now } from '../../modules/datetime.js';
 import { FooterItem } from '../molecules/FooterItem.js';

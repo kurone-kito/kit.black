@@ -2,36 +2,36 @@ import type { Component } from 'solid-js';
 import eventMeow from '../../assets/events/meow-meetup.webp';
 import eventUiUx from '../../assets/events/ui-ux-meetup.webp';
 import {
-  attributes as detailEnA,
   html as detailEn,
+  attributes as detailEnA,
 } from '../../assets/texts/events/detail.en.md';
 import {
-  attributes as detailJaA,
   html as detailJa,
+  attributes as detailJaA,
 } from '../../assets/texts/events/detail.ja.md';
 import {
-  attributes as meowEnA,
   html as meowEn,
+  attributes as meowEnA,
 } from '../../assets/texts/events/meow.en.md';
 import {
-  attributes as meowJaA,
   html as meowJa,
+  attributes as meowJaA,
 } from '../../assets/texts/events/meow.ja.md';
 import {
-  attributes as uiUxEnA,
   html as uiUxEn,
+  attributes as uiUxEnA,
 } from '../../assets/texts/events/ui-ux.en.md';
 import {
-  attributes as uiUxJaA,
   html as uiUxJa,
+  attributes as uiUxJaA,
 } from '../../assets/texts/events/ui-ux.ja.md';
 import {
   createI18NDict,
   createI18NText,
   useLanguage,
 } from '../../modules/createI18N.js';
-import { Event } from '../atoms/cards/Event.js';
 import { Article } from '../atoms/Article.js';
+import { Event } from '../atoms/cards/Event.js';
 
 /** The detail translated attributes. */
 const detailAttrTranslator = createI18NDict({ en: detailEnA, ja: detailJaA });

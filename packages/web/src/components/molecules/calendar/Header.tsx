@@ -1,9 +1,9 @@
 import { FaBrandsYoutube } from 'solid-icons/fa';
 import type { Component, JSX } from 'solid-js';
 import { Show } from 'solid-js';
-import { X } from '../../atoms/icons/X.js';
 import { Anchor } from '../../atoms/Anchor.js';
 import { Logo } from '../../atoms/Logo.js';
+import { X } from '../../atoms/icons/X.js';
 import { HeaderItem } from './HeaderItem.js';
 
 /** Type definition for the properties. */

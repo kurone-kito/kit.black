@@ -6,10 +6,10 @@ import {
   weekDates,
 } from '@kurone-kito/kit.black-lib';
 import type { calendar_v3 } from 'googleapis';
-import type { EventType } from './constants.mjs';
-import { eventTypes, MAX_EVENTS } from './constants.mjs';
-import type { EventDetail } from './types.mjs';
 import type { ReadonlyTuple } from 'type-fest';
+import type { EventType } from './constants.mjs';
+import { MAX_EVENTS, eventTypes } from './constants.mjs';
+import type { EventDetail } from './types.mjs';
 
 /**
  * Check if the event is available.

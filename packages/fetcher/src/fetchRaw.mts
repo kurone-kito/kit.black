@@ -1,11 +1,11 @@
+import { tupleMap } from '@kurone-kito/kit.black-lib';
 import type { BaseExternalAccountClient, JWTInput } from 'google-auth-library';
 import type { calendar_v3 } from 'googleapis';
 import { google } from 'googleapis';
 import type { Except, ReadonlyTuple, SetRequired } from 'type-fest';
-import { getCalendarIds, getJwtInput } from './env.mjs';
 import type { EventType } from './constants.mjs';
 import { eventTypes } from './constants.mjs';
-import { tupleMap } from '@kurone-kito/kit.black-lib';
+import { getCalendarIds, getJwtInput } from './env.mjs';
 
 /**
  * Get the calendar client.

@@ -35,5 +35,6 @@ export default defineConfig({
     prerender: { autoSubfolderIndex: false, routes: [] },
     preset: 'netlify-static',
   },
+  // @ts-expect-error
   vite,
 });

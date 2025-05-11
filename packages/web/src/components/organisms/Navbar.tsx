@@ -14,7 +14,6 @@ export const Navbar: Component = () => {
     <header
       aria-label="Main navigation"
       class="navbar pointer-events-none fixed top-0 z-50 justify-end"
-      role="navigation"
     >
       <ul
         aria-expanded={expanded()}

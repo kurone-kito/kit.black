@@ -1,4 +1,5 @@
-import { Mapper, formatWeek } from '@kurone-kito/kit.black-lib';
+import type { Mapper } from '@kurone-kito/kit.black-lib';
+import { formatWeek } from '@kurone-kito/kit.black-lib';
 import type { EventDetail, EventDetailRow } from './types.mjs';
 
 /**

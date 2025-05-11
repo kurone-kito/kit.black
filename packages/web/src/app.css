@@ -12,33 +12,33 @@
 @layer utilities {
   .text-stroke-3 {
     text-shadow:
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100'),
-      0 0 0.125rem theme('colors.base-100');
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100"),
+      0 0 0.125rem theme("colors.base-100");
   }
 }
 
 @property --splash-logo-conic {
-  syntax: '<percentage>';
+  syntax: "<percentage>";
   inherits: false;
   initial-value: 0%;
 }
 
 @property --splash-logo-opacity {
-  syntax: '<percentage>';
+  syntax: "<percentage>";
   inherits: false;
   initial-value: 100%;
 }
 
 @property --splash-logo-scale {
-  syntax: '<length>';
+  syntax: "<length>";
   inherits: false;
   initial-value: 180vmax;
 }

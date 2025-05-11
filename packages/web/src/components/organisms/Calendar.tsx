@@ -1,4 +1,4 @@
-import { tupleMap, weekRange, formatDate } from '@kurone-kito/kit.black-lib';
+import { formatDate, tupleMap, weekRange } from '@kurone-kito/kit.black-lib';
 import type { Component } from 'solid-js';
 import rows from '../../data.json';
 import { useTranslator } from '../../modules/createI18N.js';

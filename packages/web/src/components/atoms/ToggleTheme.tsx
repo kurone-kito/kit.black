@@ -1,5 +1,6 @@
 import { FaSolidMoon, FaSolidSun } from 'solid-icons/fa';
-import { Component, mergeProps, Ref } from 'solid-js';
+import type { Component, Ref } from 'solid-js';
+import { mergeProps } from 'solid-js';
 
 /** Type definition for the properties. */
 export interface ToggleThemeProps {

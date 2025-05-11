@@ -1,35 +1,35 @@
 import type { Component } from 'solid-js';
 import {
-  attributes as dantalionEnA,
   html as dantalionEn,
+  attributes as dantalionEnA,
 } from '../../assets/texts/works/dantalion.en.md';
 import {
-  attributes as dantalionJaA,
   html as dantalionJa,
+  attributes as dantalionJaA,
 } from '../../assets/texts/works/dantalion.ja.md';
 import {
-  attributes as graphigEnA,
   html as graphigEn,
+  attributes as graphigEnA,
 } from '../../assets/texts/works/graphig.en.md';
 import {
-  attributes as graphigJaA,
   html as graphigJa,
+  attributes as graphigJaA,
 } from '../../assets/texts/works/graphig.ja.md';
 import {
-  attributes as liEnA,
   html as liEn,
+  attributes as liEnA,
 } from '../../assets/texts/works/launchpad-icons.en.md';
 import {
-  attributes as liJaA,
   html as liJa,
+  attributes as liJaA,
 } from '../../assets/texts/works/launchpad-icons.ja.md';
 import {
-  attributes as vrcuiEnA,
   html as vrcuiEn,
+  attributes as vrcuiEnA,
 } from '../../assets/texts/works/vrcui.en.md';
 import {
-  attributes as vrcuiJaA,
   html as vrcuiJa,
+  attributes as vrcuiJaA,
 } from '../../assets/texts/works/vrcui.ja.md';
 import { html as asideEn } from '../../assets/texts/works/works.en.md';
 import { html as asideJa } from '../../assets/texts/works/works.ja.md';

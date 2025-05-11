@@ -18,7 +18,7 @@ export interface LanguageChangerProps extends Pick<AnchorProps, 'as'> {
  * @returns The component.
  */
 export const LanguageChanger: Component<LanguageChangerProps> = (props) => (
-  <details class="dropdown" role="listbox">
+  <details class="dropdown">
     <summary class="btn btn-ghost">
       <TbLanguageHiragana
         aria-label="Language selection"

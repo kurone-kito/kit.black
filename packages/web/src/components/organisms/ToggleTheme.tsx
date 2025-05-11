@@ -1,8 +1,8 @@
 import type { Component } from 'solid-js';
 import { onMount } from 'solid-js';
-import { ToggleTheme as InternalToggleTheme } from '../atoms/ToggleTheme.js';
 import { createDarkMode } from '../../modules/createDarkMode.js';
 import { useTranslator } from '../../modules/createI18N.js';
+import { ToggleTheme as InternalToggleTheme } from '../atoms/ToggleTheme.js';
 
 /** The dark theme value. */
 const VALUE_DARK = 'dark';

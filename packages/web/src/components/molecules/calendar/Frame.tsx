@@ -1,6 +1,6 @@
 import type { Component, ParentProps } from 'solid-js';
-import { Table } from '../../atoms/calendar/Table.js';
 import { IconContainer } from '../../atoms/IconContainer.js';
+import { Table } from '../../atoms/calendar/Table.js';
 
 /**
  * The main section component for schedule.

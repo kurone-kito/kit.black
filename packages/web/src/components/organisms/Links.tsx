@@ -10,9 +10,9 @@ import { ImNpm } from 'solid-icons/im';
 import type { Component } from 'solid-js';
 import kito3 from '../../assets/avatars/kito3.webp';
 import { useTranslator } from '../../modules/createI18N.js';
+import { Article } from '../atoms/Article.js';
 import { Marshmallow } from '../atoms/icons/Marshmallow.js';
 import { X } from '../atoms/icons/X.js';
-import { Article } from '../atoms/Article.js';
 import { LinkItem } from '../molecules/LinkItem.js';
 
 /** The random links component. */

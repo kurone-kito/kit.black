@@ -1,7 +1,7 @@
 import type { EventDetailRow } from '@kurone-kito/kit.black-fetcher';
 import type { ReadonlyRecord, Week } from '@kurone-kito/kit.black-lib';
 import type { Component } from 'solid-js';
-import { mergeProps, Show } from 'solid-js';
+import { Show, mergeProps } from 'solid-js';
 import type { Except } from 'type-fest';
 
 /** Type definition for the properties. */

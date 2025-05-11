@@ -15,9 +15,7 @@
   "type": "module",
   "exports": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "vite build",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" coverage dist node_modules/.cache",

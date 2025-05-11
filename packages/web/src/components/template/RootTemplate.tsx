@@ -2,7 +2,7 @@ import { createMediaQuery } from '@solid-primitives/media';
 import { MetaProvider } from '@solidjs/meta';
 import type { RouteSectionProps } from '@solidjs/router';
 import type { Component } from 'solid-js';
-import { createSignal, onMount, Show, Suspense } from 'solid-js';
+import { Show, Suspense, createSignal, onMount } from 'solid-js';
 import { themeChange } from 'theme-change';
 import { Footer } from '../organisms/Footer.js';
 import { Head } from '../organisms/Head.js';

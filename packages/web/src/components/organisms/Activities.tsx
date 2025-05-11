@@ -1,39 +1,39 @@
 import type { Component } from 'solid-js';
-import sceneApexLegends from '../../assets/activities/apex-legends.webp';
 import sceneAmebient from '../../assets/activities/amebient.webp';
+import sceneApexLegends from '../../assets/activities/apex-legends.webp';
 import sceneLaunchpadIcons from '../../assets/activities/launchpad-icons.webp';
 import sceneUiUxLightningTalk from '../../assets/activities/ui-ux-lightning-talk.webp';
 import {
-  attributes as devEnA,
   html as devEn,
+  attributes as devEnA,
 } from '../../assets/texts/activities/dev.en.md';
 import {
-  attributes as devJaA,
   html as devJa,
+  attributes as devJaA,
 } from '../../assets/texts/activities/dev.ja.md';
 import {
-  attributes as gamesEnA,
   html as gamesEn,
+  attributes as gamesEnA,
 } from '../../assets/texts/activities/games.en.md';
 import {
-  attributes as gamesJaA,
   html as gamesJa,
+  attributes as gamesJaA,
 } from '../../assets/texts/activities/games.ja.md';
 import {
-  attributes as meetupEnA,
   html as meetupEn,
+  attributes as meetupEnA,
 } from '../../assets/texts/activities/meetup.en.md';
 import {
-  attributes as meetupJaA,
   html as meetupJa,
+  attributes as meetupJaA,
 } from '../../assets/texts/activities/meetup.ja.md';
 import {
-  attributes as othersEnA,
   html as othersEn,
+  attributes as othersEnA,
 } from '../../assets/texts/activities/others.en.md';
 import {
-  attributes as othersJaA,
   html as othersJa,
+  attributes as othersJaA,
 } from '../../assets/texts/activities/others.ja.md';
 import {
   createI18NDict,
@@ -41,8 +41,8 @@ import {
   useLanguage,
   useTranslator,
 } from '../../modules/createI18N.js';
-import { Activity } from '../atoms/cards/Activity.js';
 import { Article } from '../atoms/Article.js';
+import { Activity } from '../atoms/cards/Activity.js';
 
 /** The translated attributes for the development activity. */
 const devAttrTranslator = createI18NDict({ en: devEnA, ja: devJaA });

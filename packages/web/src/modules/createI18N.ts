@@ -1,3 +1,4 @@
+import type { ReadonlyRecord } from '@kurone-kito/kit.black-lib';
 import type {
   BaseRecordDict,
   Flatten,
@@ -11,7 +12,6 @@ import { createMemo } from 'solid-js';
 import en from '../i18n/en.js';
 import ja from '../i18n/ja.js';
 import type { Resources } from '../i18n/types.js';
-import type { ReadonlyRecord } from '@kurone-kito/kit.black-lib';
 
 /** Type definition for the dictionary. */
 export type Dictionary = Flatten<Resources>;

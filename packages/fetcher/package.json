@@ -18,9 +18,7 @@
   "bin": {
     "kb-fetcher": "./dist/bin.mjs"
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "vite build",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" coverage dist node_modules/.cache",
