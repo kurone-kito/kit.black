@@ -139,8 +139,8 @@ importers:
         specifier: workspace:^
         version: link:../lib
       '@kurone-kito/launchpad-icons-solid':
-        specifier: 0.8.2
-        version: 0.8.2(solid-js@1.9.7)
+        specifier: 0.14.0
+        version: 0.14.0(solid-js@1.9.7)
       '@solid-primitives/date':
         specifier: ^2.1.0
         version: 2.1.0(solid-js@1.9.7)
@@ -1207,9 +1207,9 @@ packages:
       cspell:
         optional: true
 
-  '@kurone-kito/launchpad-icons-solid@0.8.2':
-    resolution: {integrity: sha512-o1/+MJQWKh7QncX4rPfJtcSMq1zTNM6EhwRzLDUalSfGHNdOEfB8XYEqQ648frx5kt+VN+8PiJpbQCs/mQrHIQ==}
-    engines: {node: ^18.20 || ^20.10 || >=22}
+  '@kurone-kito/launchpad-icons-solid@0.14.0':
+    resolution: {integrity: sha512-9wMYQMHDtXCvEozB/OnnCnalFTIPb4riRDJrmL89iwgVSM52mDObL8JX9EI5wugyJPC4R8oUNqeDtNVP3d0C3w==}
+    engines: {node: ^20.11 || >=22}
     peerDependencies:
       solid-js: '>=1.x.x'
 
@@ -6772,7 +6772,7 @@ snapshots:
     optionalDependencies:
       cspell: 9.2.0
 
-  '@kurone-kito/launchpad-icons-solid@0.8.2(solid-js@1.9.7)':
+  '@kurone-kito/launchpad-icons-solid@0.14.0(solid-js@1.9.7)':
     dependencies:
       solid-js: 1.9.7
 

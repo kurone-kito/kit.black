@@ -75,7 +75,7 @@ export const LinksRandom: Component = () => {
     {
       caption: 'KITO.5699',
       children: (
-        <Group class="[&_*]:!fill-accent-content [&_*]:!stroke-accent-content inline h-[4.5rem] w-[4.5rem]" />
+        <Group class="[&_*]:!fill-accent-content [&_*]:!fill-accent-content inline h-[4.5rem] w-[4.5rem]" />
       ),
       href: 'https://vrc.group/KITO.5699',
       title: 'VRChat Group',

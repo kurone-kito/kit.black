@@ -29,7 +29,7 @@ export const HamburgerButton: Component<HamburgerButtonProps> = (props) => (
       type="checkbox"
       value="expanded"
     />
-    <Hamburger class="swap-off [&_line]:stroke-primary-content h-5 w-5" />
-    <CrossThin class="swap-on [&_line]:stroke-primary-content h-5 w-5" />
+    <Hamburger class="swap-off [&_*]:fill-primary-content h-5 w-5" />
+    <CrossThin class="swap-on [&_*]:fill-primary-content h-5 w-5" />
   </label>
 );

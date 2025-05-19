@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@kurone-kito/kit.black-lib": "workspace:^",
-    "@kurone-kito/launchpad-icons-solid": "0.8.2",
+    "@kurone-kito/launchpad-icons-solid": "0.14.0",
     "@solid-primitives/date": "^2.1.0",
     "@solid-primitives/i18n": "^2.2.0",
     "@solid-primitives/media": "^2.3.0",
