@@ -1,10 +1,36 @@
 # Website of kurone-kito
 
-## Debug
+## Development
 
-```sh
-pnpm install && pnpm run start
-```
+1. Install dependencies
+
+   ```sh
+   pnpm install
+   ```
+
+2. Start the development server
+
+   ```sh
+   pnpm run start
+   ```
+
+3. Build the project
+
+   ```sh
+   pnpm run build
+   ```
+
+## Environment Variables
+
+`packages/fetcher` uses these values. Create a `.env` file or set them in
+your environment.
+
+- `CLIENT_ID`
+- `CLIENT_SECRET`
+- `ID_OTHERS`
+- `ID_RELEASE`
+- `ID_STREAMING`
+- `REFRESH_TOKEN`
 
 ## System Requirements
 
