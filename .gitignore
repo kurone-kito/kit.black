@@ -268,11 +268,16 @@ $RECYCLE.BIN/
 # JSON
 packages/web/src/*.json
 
-# Solid.js
-packages/web/.output
-packages/web/.vinxi
-packages/web/app.config.timestamp_*.js
-packages/web/app.config.timestamp_*.mjs
+# Playwright
+test-results/
 
-# Vitest
-packages/web/vitest.config.mts.timestamp-*
+# pnpm
+pnpm-lock.yaml.*
+
+# Vinxi
+.output/
+.vinxi/
+
+# Vite / Vitest
+v8-compile-cache-*
+*.config.timestamp_*

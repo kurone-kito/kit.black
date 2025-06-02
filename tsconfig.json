@@ -1,5 +1,8 @@
 {
-  "compilerOptions": { "noEmit": true, "types": ["node"] },
-  "extends": "@kurone-kito/typescript-config/tsconfig.json",
-  "include": ["*.config.mjs"]
+  "files": [],
+  "references": [
+    { "path": "./packages/fetcher/tsconfig.test.json" },
+    { "path": "./packages/lib/tsconfig.test.json" },
+    { "path": "./packages/web/tsconfig.test.json" }
+  ]
 }

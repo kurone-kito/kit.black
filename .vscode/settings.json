@@ -8,16 +8,18 @@
     "*.js": "${capture}.js.*",
     "*.md": "${capture}.*.md",
     "*.mjs": "${capture}.mjs.*",
+    "*.mts": "${capture}.*.mts, ${capture}.*.tsx",
+    "*.tsx": "${capture}.*.mts, ${capture}.*.tsx",
     ".gitattributes": ".gitignore",
     ".markdownlint.*": ".markdownlint-cli2.*",
     ".tool-versions": ".node-version, .nvmrc",
     "package.json": ".npmrc, pnpm-lock.yaml, pnpm-workspace.yaml",
-    "prettier.config.*": ".prettierignore",
-    "stylelint.config.*": ".stylelintignore",
-    "tsconfig.json": "*.tsbuildinfo"
+    "tsconfig.json": "*.tsbuildinfo, tsconfig.*.json",
+    "vite.config.mts": "vitest.config.mts"
   },
   "files.associations": {
     "*.css": "tailwindcss",
+    "*.map": "json",
     ".imgbotconfig": "json",
     "LICENSE": "plaintext"
   },
@@ -25,7 +27,6 @@
     "**/node_modules/**/*": true
   },
   "files.watcherExclude": {
-    "**/.eslintcache": true,
     "**/node_modules/**/*": true
   },
   "git.branchProtection": ["main"],

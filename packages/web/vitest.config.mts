@@ -4,5 +4,9 @@ import defaultConfig from './vite.config.mjs';
 
 export default mergeConfig(defaultConfig, {
   plugins: [solidPlugin()],
-  test: { environment: 'jsdom', setupFiles: ['./vitest.setup.mts'] },
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.spec.{ts,tsx,mts}'],
+    setupFiles: ['./vitest.setup.mts'],
+  },
 });

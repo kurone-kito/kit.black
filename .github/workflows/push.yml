@@ -1,4 +1,7 @@
-name: The CI workflow on push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+name: The CI workflow on push as a feature branch
 on:
   push:
     branches:
@@ -6,7 +9,7 @@ on:
       - '!main'
 permissions:
   contents: read
-  pull-requests: write
+run-name: Pushed the feature branch by @${{ github.actor }}
 jobs:
   build:
     defaults:
@@ -23,23 +26,23 @@ jobs:
           git config --global core.eol lf
       - name: Stages the pushed branch
         uses: actions/checkout@v4
-      - name: Pre-prepare the Node.js environment
+      - name: Pre-prepare the Node.js version ${{ matrix.node-version }} environment for the Corepack
         uses: actions/setup-node@v4
         with:
-          node-version-file: .node-version
-      - name: Install the latest corepack explicitly
-        run: npm install --force -g corepack@latest
-      - name: Enable the corepack because of the pnpm
+          check-latest: true
+          node-version: ${{ matrix.node-version }}
+      - name: Enable the corepack
         run: corepack enable
-      - name: Post-prepare the Node.js environment
+      - name: Post-prepare the Node.js version ${{ matrix.node-version }} environment
         uses: actions/setup-node@v4
         with:
           cache: ${{ !env.ACT && 'pnpm' || '' }}
-          node-version-file: .node-version
+          check-latest: true
+          node-version: ${{ matrix.node-version }}
       - env:
           HUSKY: 0
         name: Install the dependencies
-        run: pnpm install --prefer-frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline
       - env:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
@@ -47,14 +50,19 @@ jobs:
           ID_RELEASE: ${{ secrets.ID_RELEASE }}
           ID_STREAMING: ${{ secrets.ID_STREAMING }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
-        name: Run the build
+        name: Build the project
         run: pnpm run build
-      - name: Run the linting
+      - name: Check the code style
         run: pnpm run lint
       - name: Run the tests
         run: pnpm run test
+      - name: Run the end-to-end tests
+        run: pnpm run test:e2e
     strategy:
       matrix:
+        node-version:
+          - 22.x
+          - 24.x
         platform:
           - os: ubuntu-latest
             shell: bash
@@ -75,23 +83,23 @@ jobs:
           git config --global core.eol lf
       - name: Stages the pushed branch
         uses: actions/checkout@v4
-      - name: Pre-prepare the Node.js environment
+      - name: Pre-prepare the Node.js environment for the Corepack
         uses: actions/setup-node@v4
         with:
+          check-latest: true
           node-version-file: .node-version
-      - name: Install the latest corepack explicitly
-        run: npm install --force -g corepack@latest
       - name: Enable the corepack because of the pnpm
         run: corepack enable
       - name: Post-prepare the Node.js environment
         uses: actions/setup-node@v4
         with:
           cache: ${{ !env.ACT && 'pnpm' || '' }}
+          check-latest: true
           node-version-file: .node-version
       - env:
           HUSKY: 0
         name: Install the dependencies
-        run: pnpm install --prefer-frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline
       - env:
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}

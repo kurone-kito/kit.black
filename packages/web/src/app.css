@@ -1,4 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;900&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Lato:wght@300;900&display=swap");
+@import "tailwindcss";
+@import "@kurone-kito/vrc-icons-tw";
+@plugin "@tailwindcss/container-queries";
+@plugin "daisyui";
+@plugin "tailwindcss-safe-area";
 
 @tailwind base;
 @tailwind components;
