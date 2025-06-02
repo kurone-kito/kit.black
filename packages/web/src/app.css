@@ -5,24 +5,22 @@
 @plugin "daisyui";
 @plugin "tailwindcss-safe-area";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@theme {
+  --font-lato: "Lato", sans-serif;
+}
 
-@layer utilities {
-  .text-stroke-3 {
-    text-shadow:
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100"),
-      0 0 0.125rem theme("colors.base-100");
-  }
+@utility text-stroke-3 {
+  text-shadow:
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100),
+    0 0 0.125rem var(--color-base-100);
 }
 
 @property --splash-logo-conic {

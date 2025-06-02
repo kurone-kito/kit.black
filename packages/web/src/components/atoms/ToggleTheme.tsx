@@ -29,7 +29,7 @@ export const ToggleTheme: Component<ToggleThemeProps> = (props) => {
   const concProps = mergeProps({ themes: [] } as const, props);
   return (
     <span
-      class="tooltip tooltip-bottom btn btn-ghost pointer-events-none flex h-10 items-center"
+      class="tooltip tooltip-bottom btn btn-ghost btn-primary pointer-events-none flex h-10 items-center"
       data-tip={concProps.toggleTooltip}
     >
       <label class="swap swap-rotate pointer-events-auto">

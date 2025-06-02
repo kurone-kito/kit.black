@@ -30,7 +30,7 @@ export const Logo: Component<LogoProps> = (props) => {
   return (
     <div
       class={twMerge(
-        'font-Lato text-base-content @container-[size]/logo flex aspect-[47/50] cursor-default select-none flex-row-reverse uppercase drop-shadow-md',
+        'font-lato text-base-content @container-[size]/logo flex aspect-[47/50] cursor-default select-none flex-row-reverse uppercase drop-shadow-md',
         local.class,
       )}
       translate="no"

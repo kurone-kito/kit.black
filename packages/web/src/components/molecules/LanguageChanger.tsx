@@ -19,7 +19,7 @@ export interface LanguageChangerProps extends Pick<AnchorProps, 'as'> {
  */
 export const LanguageChanger: Component<LanguageChangerProps> = (props) => (
   <details class="dropdown">
-    <summary class="btn btn-ghost">
+    <summary class="btn btn-ghost btn-primary">
       <TbLanguageHiragana
         aria-label="Language selection"
         class="stroke-primary-content h-6 w-6"

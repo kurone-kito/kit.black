@@ -23,7 +23,7 @@ export const Frame: Component<Readonly<ParentProps>> = (props) => (
     <Table date="日付" detail="活動内容" time="時刻">
       {props.children}
     </Table>
-    <p class="text-stroke-3 drop-shadow">
+    <p class="text-stroke-3 drop-shadow-sm">
       お仕事ぱたぱたのため、状況により変更・延期となる場合があります🐱💦
     </p>
   </section>

@@ -30,7 +30,7 @@ export const Links: Component = () => {
       heading={t('links')}
       style={{ '--image-kito-url': `url('${kito3}')` }}
     >
-      <ul class="bg-base-100/80 grid grid-cols-3 justify-items-center gap-y-12 rounded-3xl bg-opacity-10 px-4 py-20 backdrop-blur-sm backdrop-filter md:grid-cols-4 md:gap-y-20 lg:gap-y-24 lg:backdrop-blur-md xl:gap-y-32 2xl:gap-y-40">
+      <ul class="bg-base-100/80 grid grid-cols-3 justify-items-center gap-y-12 rounded-3xl px-4 py-20 backdrop-blur-xs backdrop-filter md:grid-cols-4 md:gap-y-20 lg:gap-y-24 lg:backdrop-blur-md xl:gap-y-32 2xl:gap-y-40">
         <LinkItem
           caption="@kurone_kito"
           href="https://x.com/kurone_kito"

@@ -12,9 +12,9 @@ import { FooterItem } from '../molecules/FooterItem.js';
 export const Footer: Component = () => {
   const t = useTranslator();
   return (
-    <footer class="footer footer-center bg-base-300 text-base-content px-safe pb-safe-or-6 pt-6 font-extralight">
+    <footer class="footer sm:footer-horizontal footer-center bg-base-300 text-base-content px-safe pb-safe-or-6 pt-6 font-extralight">
       <aside class="flex font-thin tracking-wide" translate="no">
-        <p>
+        <p class="grow">
           &copy; 2018-{now().getFullYear()} {t('author')}
         </p>
         <ul class="menu menu-horizontal">

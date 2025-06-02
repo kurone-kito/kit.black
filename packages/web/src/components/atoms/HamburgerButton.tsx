@@ -20,7 +20,9 @@ export interface HamburgerButtonProps {
  * @returns The component.
  */
 export const HamburgerButton: Component<HamburgerButtonProps> = (props) => (
-  <label class={twMerge('btn btn-ghost swap swap-rotate', props.class)}>
+  <label
+    class={twMerge('btn btn-ghost btn-primary swap swap-rotate', props.class)}
+  >
     <input
       aria-label="Menu"
       onClick={props.onClick}
