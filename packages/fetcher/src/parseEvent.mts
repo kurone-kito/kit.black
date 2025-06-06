@@ -42,7 +42,7 @@ export const createVacationEventsFactory = (since: DateParsable) => {
 };
 
 /**
- * create thee function that converts the raw event to the event.
+ * Create the function that converts a raw event to an {@link EventDetail}.
  * @param type The type of the event.
  * @returns The function that converts the raw event to the event.
  */
@@ -66,7 +66,7 @@ export const toEventFactory =
  * @param span The span of the events.
  * @returns The function that converts the raw events to the events.
  *
- * limited to {@link MAX_EVENTS} items in chronological order.
+ * The result is limited to {@link MAX_EVENTS} items in chronological order.
  */
 export const toEventsFactory = (span: ReadonlyTuple<Date, 2>) => {
   const [since, until] = tupleMap(span, (d) => d.getTime());

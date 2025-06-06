@@ -2,7 +2,7 @@ import { useLocation } from '@solidjs/router';
 import { createMemo } from 'solid-js';
 import type { Language } from './createI18N.js';
 
-/**The regular expression for the language. */
+/** The regular expression for the language. */
 const regexp = /^\/?(en|ja)/;
 
 /**

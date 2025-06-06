@@ -4,8 +4,8 @@ import type { EventType } from './constants.mjs';
 import { eventTypes } from './constants.mjs';
 
 /**
- * get the calendar IDs for each event type from the environment variables.
- * @returns the calendar IDs for each event type.
+ * Gets the calendar IDs for each event type from the environment variables.
+ * @returns The calendar IDs for each event type.
  */
 export const getCalendarIds = (): ReadonlyRecord<EventType, string> =>
   eventTypes.reduce<Partial<ReadonlyRecord<EventType, string>>>((acc, cur) => {
@@ -21,8 +21,8 @@ const keys = [
 ] as const satisfies readonly (keyof JWTInput)[];
 
 /**
- * Get the input to the JWT arguments from the environment variables.
- * @returns the input to the JWT arguments.
+ * Gets the input to the JWT arguments from the environment variables.
+ * @returns The input to the JWT arguments.
  */
 export const getJwtInput = (): JWTInput =>
   keys.reduce<JWTInput>(

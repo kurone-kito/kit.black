@@ -12,7 +12,7 @@ export interface CreateDarkModeOptions {
 }
 
 /**
- * creates the dark mode state.
+ * Creates the dark mode state.
  * @param options The options.
  * @returns The accessor for the dark mode state.
  */
