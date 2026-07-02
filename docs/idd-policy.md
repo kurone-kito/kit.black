@@ -7,6 +7,39 @@ during onboarding (roadmap #110). The machine-readable mirror lives in
 [`.github/idd/config.json`](../.github/idd/config.json); keep the two
 aligned in the same change.
 
+## Import verification
+
+**IDD import verified on 2026-07-03** (onboarding roadmap #110, tracks
+# 111–#115). The Step 6 checklist in
+[`docs/onboarding/agent-entry-and-verification.md`](onboarding/agent-entry-and-verification.md)
+passed:
+
+- All 18 `.github/instructions/idd-*.instructions.md`, the imported
+  `docs/` set, and the four `profiles/` READMEs are present.
+- `.github/idd/config.json` is valid and records the confirmed policies
+  (marker prefix `kit-black`, `fully_autonomous_merge`,
+  `copilot-advisory`, `fast-agent-resolve`, claim/CI-wait defaults,
+  approval gate enabled / `owners-and-maintainers-only`,
+  `helperRuntime.profile: instructions-only`,
+  `worktreeGuard.enabled: true`, `trustedMarkerActors: [kurone-kito]`).
+- `idd-overview-core.instructions.md` frontmatter has `applyTo: '**'` and
+  `excludeAgent: 'code-review'`; the `kit-black` marker names resolve in
+  `idd-discover.instructions.md`.
+- `.githooks/pre-commit` and `pre-push` are mode 100755.
+- `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` reference `docs/idd-workflow.md`;
+  the issue-authoring companion is installed at
+  `.claude/skills/issue-authoring/`.
+- All seven onboarding placeholders are resolved. The only remaining
+  `{{...}}` token is the literal doc example `{{placeholder}}` in
+  vendored upstream onboarding docs (routed upstream in
+  kurone-kito/idd-skill#1207), not an unresolved onboarding placeholder.
+
+From this point the repository's own `.github/instructions/` are
+authoritative; the upstream ("theirs") bootstrap flow is no longer
+required. Known follow-ups: #117 (run `push.yml` on `issue/*` branches)
+and the helper-runtime upgrade to `package-manager` once a reviewed
+helper spec is published.
+
 ## Merge Policy
 
 **Policy**: `fully_autonomous_merge`
