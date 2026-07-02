@@ -1,0 +1,1320 @@
+# IDD Helper Script Evaluation
+
+This document records the current decision on optional helper scripts for
+the IDD workflow. It exists so future reviews can reference the trade-off
+directly instead of re-evaluating the same suggestion from scratch.
+
+## Decision
+
+In the idd-skill source repository, the following optional helpers were adopted:
+
+**Discover & Claim Phase Helpers (Phase 1):**
+
+- `scripts/discover-orphan-filter.mjs` for A0-O orphan issue detection and
+  filtering (referenced in
+  [kurone-kito/idd-skill#390](https://github.com/kurone-kito/idd-skill/issues/390))
+- `scripts/discover-roadmap-graph.mjs` for A1.5/A2 recursive roadmap graph
+  enumeration and classification
+- `scripts/discover-readiness-check.mjs` for A3 readiness criterion
+  evaluation (referenced in
+  [kurone-kito/idd-skill#391](https://github.com/kurone-kito/idd-skill/issues/391))
+- `scripts/discover-viability-gate.mjs` for A4 viability gate evaluation
+  across limited scope, clear verification, and autonomous completion
+  criteria (referenced in
+  [kurone-kito/idd-skill#505](https://github.com/kurone-kito/idd-skill/issues/505))
+- `scripts/discover-shared-file-overlap.mjs` for read-only A4 Step 2
+  high-contention shared-file overlap evidence: it flags candidate issues
+  whose `## Candidate files` collide with actively-claimed / open-PR work on
+  the F-phase bundle instruction files (referenced in
+  [kurone-kito/idd-skill#1019](https://github.com/kurone-kito/idd-skill/issues/1019))
+- `scripts/suitability-triage.mjs` for A4.5 seven-check suitability
+  evaluation (referenced in
+  [kurone-kito/idd-skill#392](https://github.com/kurone-kito/idd-skill/issues/392))
+- `scripts/claim-approval-gate.mjs` for A5(a) issue-author approval
+  verification; A5(d) open-PR conflict checks remain manual by design
+  (referenced in
+  [kurone-kito/idd-skill#393](https://github.com/kurone-kito/idd-skill/issues/393))
+- `scripts/branch-name.mjs` for the A5(e) canonical
+  `issue/<number>-<slug>` branch-name slug computation; deterministic and
+  network-free (referenced in
+  [kurone-kito/idd-skill#901](https://github.com/kurone-kito/idd-skill/issues/901))
+- `scripts/emit-marker.mjs` for emitting the per-cycle `claimed-by` /
+  `review-watermark` / `review-baseline` marker bodies (emit-only, no
+  network write; referenced in
+  [kurone-kito/idd-skill#900](https://github.com/kurone-kito/idd-skill/issues/900))
+- `scripts/post-idd-marker.mjs` for rendering and POSTing any operational
+  marker (`claim` / `unclaim` / `watermark` / `baseline` / `advisory` /
+  `advisory-recovery`) via the reliable JSON path that HTML-comment-first
+  bodies require (referenced in
+  [kurone-kito/idd-skill#1047](https://github.com/kurone-kito/idd-skill/issues/1047))
+- `scripts/resume-claim-routing.mjs` for Resume Step 1 claim-state
+  evaluation and takeover routing (referenced in
+  [kurone-kito/idd-skill#394](https://github.com/kurone-kito/idd-skill/issues/394))
+- `scripts/resume-route-selection.mjs` for Resume Step 3 PR/CI/review
+  state routing (referenced in
+  [kurone-kito/idd-skill#395](https://github.com/kurone-kito/idd-skill/issues/395))
+
+**Work & Submit Phase Helpers:**
+
+- `scripts/branch-conflict-state.mjs` for read-only branch conflict and
+  synchronization state classification; used by D/E/F routing to decide
+  whether `merge-main`, `hold-unknown`, or no action is needed without
+  mutating the worktree or PR branch (added in 0.2.0)
+
+**Review & Merge Phase Helpers:**
+
+- `scripts/review-activity-snapshot.mjs` for read-only E/F review
+  activity and CI snapshot metrics
+- `scripts/advisory-wait-state.mjs` for read-only advisory-wait evidence
+  collection and AW outcome reporting
+- `scripts/ci-wait-policy.mjs` for read-only CI wait policy resolution
+  and rerun-budget decisions
+- `scripts/pre-merge-readiness.mjs` for read-only F2/F3 readiness
+  evidence collection
+- `scripts/idd-merge-execute.mjs` for the F3 merge gate: a dry-run
+  verdict by default and, with `--apply`, the bound merge execution; it
+  wraps `pre-merge-readiness` and adds no new decision authority
+- `scripts/live-status-digest.mjs` for issue or PR live status digest
+  discovery, rendering, dry-run, and claim-checked upsert
+- `scripts/audit-pr-cleanup.mjs` for post-merge comment cleanup auditing
+- `scripts/minimize-superseded-markers.mjs` for in-flight per-marker
+  `minimizeComment` of strictly superseded `review-watermark`,
+  `advisory-wait`, or `claimed-by` markers — called by E1 (Step 2),
+  advisory-wait AW3-H, and claim takeover after the replacement
+  marker is verified
+
+  Per-helper trust model: `minimize-superseded-markers` resolves its
+  trusted-author gate with the same `flag > env > config` ladder as the
+  evidence helpers (the singular `trustedMarkerActorsSource` names the
+  winning source) and stays self-contained so the template copy works
+  without `protocol-helpers.mjs`. `audit-pr-cleanup` and
+  `forced-handoff-marker` instead **union** the configured sources —
+  viewer, flag (where accepted), `IDD_TRUSTED_MARKER_ACTORS`, and the
+  config `trustedMarkerActors` list — with the optional
+  collaborator-permission trust; their JSON evidence reports the
+  resolved viewer-plus-configured list and the plural
+  `trustedMarkerActorsSources` mix. Collaborator trust never appears in
+  the list itself: both helpers add a `collaborators` source tag when
+  collaborator permission actually trusted an author, and
+  `audit-pr-cleanup` additionally reports the capability as
+  `collaboratorTrustEnabled`. Config-listed actors therefore widen
+  trust explicitly while collaborator-permission trust stays opt-in
+  (the `IDD_TRUST_COLLABORATOR_MARKERS` environment variable or the
+  `trustCollaboratorMarkers` config field)
+
+- `scripts/review-disposition-verify.mjs` for read-only E7 disposition
+  marker presence verification across PATH A and PATH B items
+- `scripts/disposition-non-review-notices.mjs` for dry-run/apply
+  dispositioning of advisory non-review notices (rate-limit / usage-limit)
+  and the CodeRabbit summary walkthrough on a PR — emitting or posting the
+  canonical E6 `**Rejected** — {bot} did not review HEAD …` per notice and
+  `**Accepted** — {bot} summary walkthrough …` per current summary,
+  marker-first, idempotently and fail-closed (only classifier-recognized
+  notices and the exact summary marker)
+- `scripts/resolve-review-thread.mjs` for the E13 write-side disposition:
+  post the reply to the review thread that owns a review comment **and**
+  resolve that thread in one invocation — dry-run by default, `--apply`
+  re-validates the active claim and posts the reply before resolving
+  (a failed reply never leaves a silently-resolved thread)
+
+**Operator Recovery Helpers:**
+
+- `scripts/external-check-waiver.mjs` for dry-run/apply generation of
+  maintainer-authorized external-check waiver comments tied to an active
+  PR claim
+- `scripts/force-handoff.mjs` for the interactive TTY-only
+  `idd-force-handoff` operator facade that drives issue input, optional
+  PR confirmation from live branch state, and final `y/N` consent
+- `scripts/forced-handoff-marker.mjs` for low-level forced-handoff
+  marker rendering and inspection when maintainers need the canonical
+  payload without the interactive facade
+
+**Post-Merge Audit Helpers:**
+
+- `scripts/merged-pr-feedback-sweep.mjs` for read-only detection of
+  unresolved / unaddressed advisory feedback on merged PRs, fed manually to
+  the issue-authoring skill (referenced in
+  [kurone-kito/idd-skill#931](https://github.com/kurone-kito/idd-skill/issues/931))
+
+**Utility and Diagnostic Commands:**
+
+The following commands are shipped alongside the issue-loop helpers but are
+not phase helpers. They are support utilities and are distinguished here so
+future inventory reviews do not need to re-infer their role from code.
+
+- `scripts/idd-doctor.mjs` (`idd-doctor`) — onboarding and configuration
+  diagnostics; reads repository config and helper runtime wiring, reports
+  gaps without mutating any state. Its post-merge cleanup-backlog check
+  scans merged PRs in a default 14-day window with one serial `gh api`
+  call per PR and streams per-PR progress to stderr (stdout, including
+  `--json`, stays clean). For a local run during a merge burst, pass
+  `--cleanup-backlog-window-days 1` to keep it fast, mirroring CI.
+- `scripts/helper-runtime-manifest.mjs` (`idd-helper-bundle-manifest`) —
+  import helper and manifest inspector; emits machine-readable helper wiring
+  for `package-manager`, `vendored-node`, and `ephemeral-npx` profiles.
+- `scripts/phase-id-resolver.mjs` (`idd-phase-id-resolver`) — phase ID
+  normalization utility; resolves canonical phase IDs from aliases and
+  validates token format.
+
+### Discover Roadmap Graph Contract
+
+`scripts/discover-roadmap-graph.mjs` evaluates the recursive A1.5/A2
+roadmap graph for one selected roadmap issue. It also offers an additive
+cross-roadmap autopilot discovery mode (`--all-roadmaps`) that unions the
+open execution leaves across every open roadmap root; the single-root
+default below is unchanged.
+
+- **Inputs**: `--issue <number>`, with optional `--owner <owner>`,
+  `--repo <repo>`, and `--policy <path>`. `--issue` and `--all-roadmaps`
+  are mutually exclusive; exactly one mode must be selected. Passing both,
+  or neither, is an error.
+- **JSON output**:
+  - `root`: `{ number: number, title: string, state: string,`
+    `classification: "roadmap" | "execution", roadmapMarkerId: string }`
+  - `nodes`: `[{ number: number, title: string, state: string,`
+    `labels: string[], classification: "roadmap" | "execution",`
+    `roadmapMarkerId: string, depth: number }]`
+  - `edges`: `[{ source: number, target: number, relationship: string,`
+    `evidence: string }]`
+  - `provenancePaths`: `[{ target: number, path: number[] }]`
+  - `roadmapNodes`: `number[]` — nested roadmap nodes discovered through
+    traversal; **excludes** the root roadmap (A1 traversal entry point)
+  - `executionCandidates`: `number[]`
+  - `diagnostics`: `{ duplicateReferences: object[], cycles: object[],`
+    `inaccessibleReferences: object[], unresolvedReferences: object[] }`
+  - `summary`: `{ rootNumber: number, nodeCount: number, edgeCount: number,`
+    `roadmapNodeCount: number, executionCandidateCount: number,`
+    `duplicateReferenceCount: number, cycleCount: number,`
+    `inaccessibleReferenceCount: number, unresolvedReferenceCount: number,`
+    `maxDepth: number }`
+- **Cross-roadmap autopilot mode (`--all-roadmaps`)**: discovers every
+  **open** roadmap root (an open issue carrying the `roadmap` label **or**
+  an `<!-- kit-black-roadmap-id: ... -->` marker), runs the
+  single-root enumeration above from each root, and returns a **union** of
+  open execution leaves. The output shape differs from single-root mode:
+  - `mode`: `"all-roadmaps"`
+  - `roots`: `[{ number: number, title: string, state: string,`
+    `roadmapMarkerId: string }]` — every open roadmap root enumerated
+  - `leaves`: `[{ number: number, title: string, state: string,`
+    `labels: string[], classification: "execution",`
+    `roadmapMarkerId: string, autopilotSuitability: number | null,`
+    `effort: "S" | "M" | "L" | null, sourceRoots: number[] }]` — the union of
+    open execution leaves. Each leaf records every roadmap root it is reachable
+    from in `sourceRoots` (provenance); a leaf shared by sibling epics appears
+    **once** and is never double-counted.
+  - **Opt-in leaf annotations** (additive; absent flags leave the leaf shape
+    byte-stable and make no extra API call). `--with-claim-state` adds
+    `activeClaim` (always an object: `{ present, stale, claimId, agentId }`,
+    plus `ownedByCurrentSession` when `--current-claim-id` is passed) and
+    `claimEligible: boolean` on each open leaf. `--with-readiness` adds
+    `readiness: { ready: boolean, reasons: string[], authoringHeld: boolean,`
+    `startable: boolean }` — the A3 startability of each open leaf (dependency
+    resolution across visible `Blocked by #N` / `Depends on #N` / task-list refs
+    and hidden `kit-black-blocked-by` markers, plus
+    authoring-hold), where `reasons` lists the sorted filter reasons (e.g.
+    `blocked_by_open_issue:#N`) and is empty when `ready`, and `startable` is
+    `ready` **and** not claim-blocked (it folds
+    in `claimEligible` when `--with-claim-state` also ran; otherwise claim
+    eligibility is unknown and treated as non-blocking). `authoringHeld`
+    reports label **presence** only — `--with-readiness` does not compute the
+    stale-authoring warning (it would cost a discarded per-leaf timeline fetch
+    and does not change startability). Both annotations are **soft** discovery
+    hints — the A3/A4/A4.5/A5 gates remain authoritative.
+  - `diagnostics`: same four buckets as single-root mode, deduped across
+    every per-root enumeration.
+  - `summary`: `{ rootCount: number, leafCount: number,`
+    `scoredLeafCount: number, sharedLeafCount: number,`
+    `duplicateReferenceCount: number, cycleCount: number,`
+    `inaccessibleReferenceCount: number, unresolvedReferenceCount: number }`.
+    Under `--with-readiness` the summary additionally carries
+    `startableCount` and `readyCount` (integers aggregating the leaves'
+    `readiness.startable` / `readiness.ready`), so a swarm controller reads
+    "is there more startable work?" without iterating every leaf; both are
+    absent otherwise so the flag-absent shape stays byte-stable.
+  - **Ranking** (global-by-score): `leaves` is sorted by
+    `autopilotSuitability` **descending**, tie-broken by issue number
+    **ascending** (stable). A missing or out-of-range score is treated as
+    the configured suitability floor for ordering so unscored work is not
+    buried, but a coherently scored leaf never ranks below an unscored leaf
+    at the same effective value — scored work always sorts first at a tie.
+    The score is an advisory ranking hint only; it never replaces the
+    A4.5 suitability gate or the A5 claim safety checks.
+- **Error conditions**: missing `--issue` (and no `--all-roadmaps`),
+  combining `--issue` with `--all-roadmaps`, unknown flags, an unreadable
+  root roadmap, or incomplete `subIssues` GraphQL data throw. Missing or
+  inaccessible descendants are reported in `diagnostics` instead of
+  crashing.
+- **Behavior boundary**: the helper is evidence-only. It may read issue
+  bodies and GitHub sub-issue relationships, but it must not claim
+  issues, edit roadmap bodies, close roadmap nodes, or decide readiness
+  by itself.
+- **Runtime / read timing**: the helper is **long-running** on large
+  roadmaps — it issues many sequential API calls and emits the whole graph
+  in a single final stdout write, with no progress line or completion
+  sentinel. Redirect stdout to a file and wait for process exit before
+  parsing; a zero-byte or partial read from a still-running (or
+  just-finished) helper means **"still running," not** an A2 enumeration
+  failure.
+
+### Discover Readiness Sweep (`--swarm-floor`)
+
+`scripts/discover-readiness-check.mjs --swarm-floor <N>` is the canonical
+end-of-session "is any startable work left?" one-liner. It ignores
+`--issue` / `--issues`, sweeps **every** open issue in the repository
+(orphans included, pull requests excluded), runs the same A3 readiness plus
+autopilot-suitability evaluation, and reports the issues that are ready
+**and** at or above floor `N`:
+
+```sh
+node scripts/discover-readiness-check.mjs --swarm-floor <N>
+```
+
+- **Output**: `{ eligible, eligible_count, total }` — `eligible` is the
+  ready-and-at/above-floor set (each `{ number, title, autopilotSuitability,
+belowFloor }`), `eligible_count` its length, and `total` the number of open
+  issues swept. A "no score" issue is never below floor, matching the
+  discovery ranker, so it stays eligible.
+- **Use**: an `eligible_count == 0` result means Discover has no startable
+  work at floor `N`, so an autopilot / swarm loop may stop scriptably.
+- **Floor range**: `N` is the autopilot-suitability 1-5 band. A non-integer
+  or out-of-range `N` is a **hard error**, not a silent coercion to the
+  default floor — otherwise a typo (e.g. `--swarm-floor 50`) would quietly
+  answer at floor 3 and be misread as "floor-50 work exists."
+- **Boundary**: read-only and advisory — selecting the next issue still runs
+  the A3/A4/A4.5/A5 gates. Optional flags: `--owner` / `--repo` / `--policy`
+  / `--now`.
+
+### Discover Viability Gate Contract
+
+`scripts/discover-viability-gate.mjs` evaluates the A4 viability gate for
+one or more issues.
+
+- **Inputs**: `--issue <number>` (repeatable) or `--issues <n1,n2,...>`,
+  with optional `--csv`, `--owner <owner>`, and `--repo <repo>`.
+- **JSON output**:
+  - `viable`: `[{ number: number, title: string }]`
+  - `discarded`: `[{ number: number, title: string,`
+    `failedCriteria: string[], criteria?: [{ id: string, name: string,`
+    `result: "pass" | "fail", evidence: string }] }]`
+  - `summary`: `{ total: number, viableCount: number,`
+    `discardedCount: number, discardedByCriterion: Record<string, number> }`
+- **Error conditions**: missing issue arguments or unknown flags throw;
+  loader or GitHub failures surface as errors; not-found or non-open
+  issues are reported in `discarded` with `failedCriteria` instead of
+  crashing.
+- **Example**:
+
+  ```json
+  {
+    "discarded": [
+      {
+        "number": 124,
+        "title": "rewrite workflow",
+        "failedCriteria": ["limited_scope", "autonomous_completion"]
+      }
+    ],
+    "summary": {
+      "total": 2,
+      "viableCount": 1,
+      "discardedCount": 1,
+      "discardedByCriterion": { "limited_scope": 1, "autonomous_completion": 1 }
+    },
+    "viable": [{ "number": 123, "title": "trim helper docs" }]
+  }
+  ```
+
+### Discover Shared File Overlap Contract
+
+`scripts/discover-shared-file-overlap.mjs` is the read-only file-contention
+companion to the `discover-roadmap-graph` `--with-claim-state` claim-eligibility
+annotation. For a set of candidate issues it reports the high-contention shared
+files each would touch (parsed from its `## Candidate files` section) and
+whether any overlap an actively-claimed or open-PR issue, and it emits the soft
+A4 Step 2 de-prioritization order. Evidence-only: it claims nothing.
+
+- **Inputs**: `--candidate <number>` (repeatable) or `--candidates <n1,n2>`,
+  with optional `--owner <owner>`, `--repo <repo>`, `--policy <path>`,
+  `--manifest <path>` (default `audit/sync-manifest.json`), `--bundles
+<id1,id2>` (default `bundle-review,bundle-merge`), `--now <ISO8601>`, and
+  `--check-overlap`. The cross-issue active-set discovery (open PRs plus the
+  claim comments of issues that have a remote `issue/<n>-*` branch, resolved
+  with the shared claim-state rules and the configured claim stale age) is
+  **gated behind `--check-overlap`** because it adds GitHub API cost; without it
+  each candidate's high-contention files are still reported. **Coverage**
+  (best-effort, no repo-wide comment scan): open-PR overlap scans open PRs
+  (bounded by the `gh pr list` page cap); active-claim overlap covers every
+  issue that has a remote `issue/<n>-*` branch (every IDD claim creates one once
+  pushed, paginated to the end), so a non-stale claim held by another session is
+  detected even when it is outside the unclaimed candidate set being ranked. A
+  claim whose branch is not yet pushed is picked up once it appears remotely.
+- **High-contention set**: the union of the named bundles' member files plus
+  `audit/sync-manifest.json`. Instruction files are keyed by their repo-wide
+  unique basename so a source path, mirror path, or bare citation all match.
+- **JSON output**:
+  - `repository`: `{ owner: string, repo: string }`
+  - `checkedOverlap`: `boolean`
+  - `highContentionFiles`: `string[]` (sorted)
+  - `candidates`: `[{ number: number, score: number | null,`
+    `effectiveScore: number, candidateFiles: string[],`
+    `highContentionTouched: string[], overlaps: [{ number: number,`
+    `reason: "claim" | "pr", files: string[] }], overlapFlag: boolean }]`
+  - `recommendedOrder`: `number[]` — candidate numbers after the soft
+    tie-breaker (score desc, then non-overlapping first within a score band,
+    then issue number). It does **not** apply `discover.selectionDesync`; the
+    agent layers the overlap nudge after its own desync pick. Advisory only;
+    never a hard gate.
+  - `summary`: `{ candidateCount: number, flaggedCount: number,`
+    `activeIssueCount: number }`
+- **Behavior boundary**: evidence-only and heuristic. `## Candidate files` are
+  advisory cues, not an exhaustive manifest, so the overlap signal must stay a
+  soft A4 Step 2 tie-breaker — never a claim gate. The written discover
+  instructions remain authoritative.
+
+The exported template remains portable without a `scripts/` directory.
+Adopters can copy the helper separately when they want the same
+repository-local convenience, otherwise the documented GraphQL fallback
+remains the portable path.
+
+Absent helper runtime configuration means `instructions-only`. Repositories
+that do not opt into helper support should still be able to copy the
+Markdown instructions, run the portable shell / `gh` / `jq` procedures,
+and complete the workflow without a Node.js dependency.
+
+## Helper Runtime Profiles
+
+When a repository imports the IDD template, helper support should be
+selected from one of these profiles:
+
+| Profile             | Intended use                                                                                                                | Dependency model                                                               | Portability expectation                                                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `package-manager`   | The adopter already uses pnpm, npm, or yarn for the repository.                                                             | Reuse the repository's existing package manager and pre-resolved dependencies. | Preferred when a package manager project already exists; do not fall back to ad hoc `npx` in this mode.                                 |
+| `vendored-node`     | The adopter has Node.js available but does not want helper execution to depend on registry resolution at runtime.           | Copy a local helper bundle into the repository during import.                  | Keeps helper execution repository-local while remaining optional.                                                                       |
+| `ephemeral-npx`     | The adopter has Node.js available, does not vend helper files, and can resolve a runnable helper command at execution time. | Resolve helper execution through one-shot `npx` commands.                      | Reserved for cases where a published or otherwise resolvable helper command already exists; otherwise fall back to `instructions-only`. |
+| `instructions-only` | The adopter does not want or cannot use helper scripts.                                                                     | No helper runtime. Agents follow the Markdown instructions directly.           | First-class supported fallback; no helper config is required.                                                                           |
+
+## Import-Time Selection Order
+
+Helper runtime choice is an import-time policy decision. Use repository
+evidence to decide whether helper support should be proposed for
+operator confirmation. If helper support is not confirmed, keep
+`instructions-only`.
+
+1. If supported `packageManager` metadata or exactly one supported
+   lockfile is present, propose `package-manager`.
+2. Otherwise, if Node.js is available and the import flow is allowed to
+   copy helper files, propose `vendored-node`.
+3. Otherwise, if Node.js is available and a published or otherwise
+   resolvable helper command exists for one-shot execution, propose
+   `ephemeral-npx`.
+4. Otherwise, use `instructions-only`.
+
+This selection order exists to keep helper support optional without
+turning every adopter into a Node.js-first repository. The written
+decision tables remain the canonical protocol regardless of which helper
+profile is selected.
+
+## Profile Wiring Surface
+
+Use `idd-helper-bundle-manifest` as the canonical import helper for these
+profiles. It is published from this source repository as both
+`scripts/helper-runtime-manifest.mjs` and the package bin
+`idd-helper-bundle-manifest`, so adopters can inspect one machine-readable
+manifest instead of hand-maintaining helper file lists. The manifest's
+top-level `recommendation` field uses the same package-manager evidence
+class as onboarding: supported `packageManager` metadata or exactly one
+supported lockfile can recommend `package-manager`; ambiguous
+package-manager signals can still recommend `vendored-node`; otherwise
+it stays fail-closed at `instructions-only` and never treats bare
+`package.json` presence as enough evidence to assume npm or a real
+Node.js helper path.
+
+- `package-manager`: run the manifest from the target repository root and
+  let it detect npm, pnpm, or yarn (or pass `--package-manager` if
+  detection is ambiguous). The output includes the package-manager
+  install command, the `@kurone-kito/idd-skill` helper dependency, and a
+  `package.json` scripts block that calls stable `idd-*` bins without
+  assuming pnpm.
+- `vendored-node`: use the manifest's `managedFiles` list to copy the
+  helper bundle into matching paths in the target repository, then run
+  the emitted local `node scripts/...` commands. The profile output also
+  carries a `recommendedGitattributes` list — one
+  `<path> linguist-vendored` line per managed file — to append to the
+  adopter's `.gitattributes`, so the vendored bundle is treated as the
+  third-party code it is: `linguist-vendored` drops it from language
+  statistics and de-prioritizes it in code search. This is the
+  adopter-side counterpart of the source repository's own
+  `linguist-generated` artifacts; only `vendored-node` vends files, so
+  only it emits the recommendation.
+- `ephemeral-npx`: use the manifest's one-shot `npx --yes --package
+<helper-package-spec> idd-*` commands without copying helper files
+  into the repository. The default helper package spec is an HTTPS
+  archive URL, and `--package-spec` lets adopters pin a reviewed tarball
+  or mirror URL explicitly.
+- `instructions-only`: keep helper dependencies, helper files, and helper
+  wrapper scripts out of the target repository entirely.
+
+**Authoritative invocation surface per profile.** Under `vendored-node`, the
+canonical invocation is `node scripts/<name>.mjs`; the `package-manager` / `npx`
+`bin/` facade (the `idd-*` bin wrappers) is **redundant** in this profile and
+may be skipped — keeping it only adds a second surface to align with the
+instruction files for no portability gain. Under `package-manager` and
+`ephemeral-npx`, the `bin/` facade (`idd-*` bins, invoked through the
+`package.json` scripts or `npx`) **is** the authoritative surface and should be
+retained. `instructions-only` uses neither. When an instruction shows a
+`node scripts/...` command, resolve it to your profile's authoritative surface
+rather than maintaining both.
+
+To switch profiles later, rerun the manifest with both
+`--profile <target-profile>` and `--from-profile <current-profile>`. The
+switch section reports the files, dependency entries, and `package.json`
+scripts to add or remove for that transition.
+
+The adopted helper boundaries are intentionally narrow:
+
+- `claim-approval-gate.mjs` is read-only, evaluates only the A5(a)
+  issue-author approval gate, and emits machine-readable approval
+  evidence
+- it resolves collaborator permission, ready-label freshness, and
+  approval-comment freshness under repository policy, then fails closed
+  when ambiguity remains
+- it does not claim issues, inspect A5(d) open-PR conflicts, or bypass
+  the written claim rules; live PR conflict checks remain manual until a
+  stable contract can cover inheritable-branch and linked-issue
+  exceptions
+
+- `force-handoff.mjs` is intentionally operator-facing and interactive;
+  it asks for the issue number before any mutation, derives whether PR
+  input is required from live open PR state on the active claim branch,
+  previews the generated marker and successor IDs, and posts only after
+  an explicit `y` confirmation
+- it must fail closed outside a TTY and is not available to autopilot
+  or unattended agent contexts
+- it does not replace the forced-handoff policy contract; it is the
+  recommended maintainer workflow for producing canonical evidence under
+  that contract
+
+- `forced-handoff-marker.mjs` is a lower-level render and inspection
+  helper that can plan or emit the canonical marker body for a specific
+  issue, claim, branch, and optional PR context
+- it is useful for audited debugging and manual inspection, but normal
+  maintainer recovery should prefer `idd-force-handoff`
+- it does not authorize handoff on its own; the same human-gated policy
+  and live-claim validation rules still apply
+
+- `review-activity-snapshot.mjs` is read-only, emits machine-readable
+  metrics, and does not evaluate accept/reject dispositions or merge
+  decisions
+- it does not replace the E/F gate decision tables; it only reduces
+  command-copy variance when collecting canonical snapshot fields
+
+- `advisory-wait-state.mjs` is read-only, emits machine-readable AW1-AW3
+  evidence plus the computed AW outcome, and never requests reviewers,
+  posts markers, or mutates PR state
+- it does not replace the advisory-wait decision table; it only reduces
+  command-copy variance when collecting canonical AW evidence
+
+- `ci-wait-policy.mjs` is read-only, resolves `ciWait.*` defaults from
+  `.github/idd/config.json`, and can evaluate whether the current rerun
+  count still permits an automatic rerun
+- it does not poll CI, rerun workflows, or replace the CI decision
+  table; it only reduces config-copy variance when callers need the
+  shared CI wait defaults
+
+- `pre-merge-readiness.mjs` is read-only, emits machine-readable F2/F3
+  evidence including review currency, unresolved-thread state,
+  unreplied comments, reviewer states, advisory state, CI, claim
+  validation, and `waiverEvidence` (parsed external-check waiver comments
+  classified as `valid`, `expired`, `wrongHead`, `wrongClaim`,
+  `unauthorized`, `malformed`, or `notConfigured` — the last for a valid
+  waiver naming a check the policy never declared waivable in
+  `ciGate.externalChecks.waivable`; only a `valid` waiver for a
+  configured-waivable check is reported with `coveredByWaiver: true` and
+  treated as passing by the CI gate)
+- it does not replace the pre-merge or merge decision tables; it only
+  reduces command-copy variance when collecting canonical merge-gate
+  evidence
+
+- `idd-merge-execute.mjs` defaults to dry-run and stays read-only in
+  that mode: it reuses `pre-merge-readiness` to evaluate the F3 gates and
+  prints `{ ready, blockers, mergeCommand }` without merging
+- apply mode (`--apply`) is the only mutating path: when `ready` it
+  re-fetches the head SHA and re-validates the claim immediately before
+  merging, fails closed (no merge) on head drift or lost claim, and runs
+  a merge commit bound to the validated head — never squash or rebase
+- it adds no new decision authority (`decisionAuthority: instructions`):
+  it does not replace the written F3 gate checklist or decision table,
+  and on any helper failure or evidence conflict the agent falls back to
+  the manual F3 steps
+
+- `live-status-digest.mjs` defaults to dry-run, supports issue and PR
+  targets, and mutates only with explicit `--apply`
+- apply mode re-validates an active claim unless a maintainer explicitly
+  uses `--skip-claim-check`
+- it creates or updates only the single current digest comment and
+  refuses duplicate marked digests with repair URLs instead of choosing
+  one, deleting, or minimizing audit history
+- digest text remains non-authoritative UI state; phase decisions still
+  come from trusted markers and GitHub state
+
+- `audit-pr-cleanup.mjs` defaults to dry-run and prints stable JSON
+  unless `--format table` is requested
+- apply mode is explicit and can re-validate an active claim before
+  every minimization mutation
+- known review-bot regular comments are considered only after merge and
+  only when they match a completed-review or stale-notification signal
+- cleanup remains best-effort and never becomes a merge gate
+- direct GraphQL fallback commands remain documented in
+  `docs/idd-comment-minimization.md`
+
+- `review-disposition-verify.mjs` is read-only, takes a JSON array of
+  ReviewItems_snapshot items, and emits per-item verification evidence
+- it checks E7 disposition requirements: decision recorded, marker
+  present and matching, and thread resolution correct per path and type
+- it never posts replies, resolves threads, or mutates any GitHub state
+- thread-resolution checks are gated on `type === "review_thread"`;
+  non-thread items must have `threadResolved: null`, not `true`/`false`
+- PATH A AMD items must have the thread unresolved; PATH A Rejected and
+  PATH B items must have review threads resolved
+- PATH A Accepted items pass without a marker (reply is handled in
+  review-fix, not triage)
+- written E7 rules in `idd-review-triage.instructions.md` remain
+  authoritative; this helper only reduces command-copy variance when
+  confirming marker presence before triage exits
+
+### Non-review-notice disposition (E6 helper-first)
+
+- Command:
+  `node scripts/disposition-non-review-notices.mjs --pr <number>`
+  (dry-run); add `--apply --claim-issue <n> --claim-id <id>` to post.
+  Pass `--advisory-bot-logins` / `--trusted-marker-logins` to override the
+  defaults.
+- Detects advisory-bot regular comments that the single-sourced
+  `isAdvisoryNonReviewNotice` classifier (`protocol-helpers`) recognizes
+  (rate-limit / usage-limit), and emits / posts the canonical
+  `**Rejected** — {bot-login} did not review HEAD {sha} ({reason}); this
+is not a completed review` — marker-first, one comment per notice,
+  naming the bot login so the carry-forward attributes it author-scoped.
+- **Idempotent**: per advisory bot, existing trusted
+  `isNonReviewNoticeDisposition` comments naming that bot already cover
+  that many of its notices, so a re-run posts nothing new.
+- **CodeRabbit summary walkthrough (#1122)**: it also auto-posts a
+  marker-first `**Accepted** — {bot-login} summary walkthrough at HEAD
+{sha} …` for the CodeRabbit summary marker
+  (`<!-- This is an auto-generated comment: summarize by coderabbit.ai -->`),
+  which the gate scores through its general updatedAt-aware pairing rather
+  than the notice carry-forward. Because CodeRabbit edits the summary on each
+  re-review, the acceptance is re-dispositioned **per HEAD** by timestamp
+  (skipped only while a trusted acceptance naming the bot is strictly newer
+  than the summary's activity and no older undispositioned non-agent comment
+  could consume it under the gate's global pairing), and is skipped outright
+  when CodeRabbit
+  already reports "No actionable comments were generated" (the gate classifies
+  that RESOLVED). It never resolves a review thread — actionable findings stay
+  their own threads, gated independently. The body names the bot by its login
+  (never the standalone word "CodeRabbit") so per-HEAD re-disposition is
+  preserved.
+- **Fail-closed**: only classifier-recognized notices are dispositioned;
+  real reviews and review threads are never touched. `--apply`
+  re-validates the active claim and retries once on a transient post
+  failure.
+- Stable contract: [`disposition-non-review-notices.schema.json`][disposition-non-review-notices-schema].
+- The written E6 non-review-notice rule in
+  `idd-review-triage.instructions.md` stays authoritative; this helper is
+  the helper-first convenience path with the manual `gh api` fallback
+  retained.
+
+### E13 reply-and-resolve (resolve-review-thread)
+
+- Command:
+  `node scripts/resolve-review-thread.mjs --pr <number> --comment-id <id>`
+  (dry-run); add `--body "<disposition>" --apply --claim-issue <n>
+--claim-id <id>` to post the reply and resolve the thread. Optional
+  `--owner` / `--repo` / `--agent-id` / `--trusted-marker-logins`.
+- Maps `--comment-id` (the review comment's REST id) to its owning review
+  thread by matching it against the `databaseId` of the comments inside each
+  GraphQL `reviewThreads` node (both the threads and the nested comments
+  connections are paginated to completion), then in
+  `--apply` posts the reply against the thread's **top-level** comment (REST
+  `pulls/.../comments/{root-id}/replies` — GitHub does not support replies to
+  replies, so a `--comment-id` naming a later reply still resolves the right
+  thread) and resolves the thread (GraphQL `resolveReviewThread`). Reply
+  first, resolve second, so a failed reply never resolves the thread without a
+  disposition.
+- **Dry-run** reports the resolved `threadId` and current `alreadyResolved`
+  state without posting; a comment with no owning thread omits `threadId`
+  and includes an `error` note.
+- **Fail-closed**: `--apply` requires `--body` and the
+  `--claim-issue` / `--claim-id` pair, re-validates the active claim before
+  **each** of the reply and the resolve (scoped to trusted marker authors,
+  aborting on a targeting `forced-handoff`), and binds the mutation to the
+  claimed PR by requiring the active claim's branch to equal the PR's head
+  branch. GraphQL `errors` fail fast rather than masquerading as a missing
+  thread, and a partial apply (reply posted, resolve not confirmed) still
+  reports the posted `replyId`.
+- Stable contract: [`resolve-review-thread.schema.json`][resolve-review-thread-schema].
+- The written E13 reply-and-resolve rule in
+  `idd-review-fix.instructions.md` stays authoritative; this helper is the
+  helper-first convenience path with the manual REST + GraphQL fallback
+  retained.
+
+## Stable Helper Evidence Outputs
+
+### Operator forced-handoff helpers
+
+- Command: `node scripts/force-handoff.mjs`
+- Published bin: `idd-force-handoff`
+- Contract:
+
+  - interactive TTY only
+  - asks for issue input before any mutation
+  - asks for PR input only when a live open PR exists on the active
+    claim branch and PR-scoped evidence is required
+  - prints the generated successor IDs and marker preview before the
+    final confirmation
+  - posts nothing unless the final confirmation is exactly `y`
+
+- Command: `node scripts/forced-handoff-marker.mjs --issue <number> --plan ...`
+- Published bin: `idd-forced-handoff-marker`
+- Stable contract:
+  [`schemas/forced-handoff-marker.schema.json`](../schemas/forced-handoff-marker.schema.json)
+- Intended use:
+  - render or inspect canonical forced-handoff marker payloads
+  - support audited debugging or manual review of the exact body
+  - stay distinct from the interactive operator facade above
+
+The references in this subsection apply only when a repository
+explicitly installs the matching helpers and records a human-gated
+forced-handoff policy. Repositories that stay on the default disabled
+policy must not expose either helper as an active recovery path.
+
+The references in this section apply only when a repository explicitly
+installs the matching helper scripts. Repositories that stay on the
+default `instructions-only` profile keep using the written shell /
+`gh` / `jq` procedures in the phase instructions and do not need a
+`scripts/` directory.
+
+### External-check waiver helper
+
+- Command:
+  `node scripts/external-check-waiver.mjs --pr <number> --check
+<selector> --reason <text> (--expires <iso8601> | --expires-in
+<duration>)`
+- Published bin: `idd-external-check-waiver`
+- Contract:
+  - dry-run is the default; the helper prints the canonical comment body
+    plus claim/check/authority evidence before any mutation
+  - `--apply` posts the PR comment only after verifying the linked
+    issue's active claim, the current PR HEAD SHA, the live check state,
+    waivable-selector coverage, and maintainer/admin authority
+  - non-interactive apply is refused unless `--yes` is provided after a
+    prior dry-run review; interactive TTY runs may confirm with `y/N`
+  - the helper fails closed when authority cannot distinguish owner,
+    Maintain, or Admin from plain Write access, when the requested check
+    is not configured in `ciGate.externalChecks.waivable`, or when the
+    expiry exceeds `ciGate.externalCheckWaivers.maxValidity`
+
+### External-check waiver contract
+
+Issue `#666` defines the policy and marker contract before the operator
+facade and F-phase consumer land. The contract is intentionally
+auditable and fail-closed.
+
+```md
+<!-- idd-external-check-waiver: {agent-id} {claim-id} {head-sha} check:{check-selector} reason:{reason-token} expires:{iso8601} -->
+
+_{actor}: external check waiver for IDD F phase._
+```
+
+Interpretation rules:
+
+- `agent-id`, `claim-id`, `head-sha`, `check`, `reason`, and `expires`
+  come from the marker body.
+- The issuer is the GitHub comment author and the issued timestamp is
+  the comment `created_at`. Do not duplicate either field inside the
+  marker body.
+- `check` may be an exact selector or a glob pattern, matching the
+  `ciGate.externalChecks.*[].selector` plus `matchMode` contract.
+- Missing or unparseable body fields, unknown selectors, expired
+  comments, wrong HEAD, wrong claim, or untrusted authors must fail
+  closed.
+- A valid waiver can apply only to checks listed in
+  `ciGate.externalChecks.waivable` and only when
+  `ciGate.externalCheckWaivers.mode` enables maintainer authorization.
+- Repo-owned required checks and GitHub-required checks remain
+  non-waivable at the contract layer. An IDD waiver never substitutes
+  for GitHub ruleset bypass.
+- When the optional facade is installed, prefer helper-first usage:
+
+  - dry-run:
+
+    ```sh
+    idd-external-check-waiver --pr 123 \
+      --check "CodeRabbit" \
+      --reason "rate limit" \
+      --expires-in PT2H
+    ```
+
+  - apply after review:
+
+    ```sh
+    idd-external-check-waiver --pr 123 \
+      --check "CodeRabbit" \
+      --reason "rate limit" \
+      --expires-in PT2H \
+      --apply --yes
+    ```
+
+  - inspect the rendered body first; do not hand-write or copy raw
+    marker comments into the PR
+  - in solo-maintainer repositories, this helper-generated comment is
+    the authorization path; a normal PR approval is not equivalent
+
+### A4 viability gate
+
+- Command: `node scripts/discover-viability-gate.mjs --issue <number>`
+  (repeatable; or `--issues <n1,n2,...>`)
+- Optional CSV output: append `--csv` flag
+- Stable output schema (JSON mode):
+
+  ```json
+  {
+    "discarded": [
+      { "number": 124, "title": "...", "failedCriteria": ["limited_scope"] }
+    ],
+    "summary": {
+      "total": 2,
+      "viableCount": 1,
+      "discardedCount": 1,
+      "discardedByCriterion": { "limited_scope": 1 }
+    },
+    "viable": [{ "number": 123, "title": "..." }]
+  }
+  ```
+
+- Stable fields consumed by A4: `viable[].number`, `discarded[].number`,
+  `discarded[].failedCriteria`, and `summary.viableCount`
+- The helper evaluates the three A4 viability criteria (limited scope, clear
+  verification, autonomous completion) against fetched issue bodies; it does
+  not post claims or mutate any state
+
+### Claim approval evidence
+
+- Source repo / vendored-node command:
+  `node scripts/claim-approval-gate.mjs --issue <issue-number>`
+- Package-manager / ephemeral-npx command: use the
+  profile-selected `idd:claim-approval-gate` command from the helper
+  runtime manifest wiring above
+- Optional freshness override: append
+  `--generated-plan-updated-at <ISO8601>` when the caller already has
+  authoritative generated-plan freshness evidence to reuse
+- Stable fields consumed by the instructions: `approved`, `reason`,
+  `gateEnabled`, `policy.skipIssueAuthorApprovalGate`,
+  `policy.maintainerApprovalActorPolicy`, `policy.approvalSignals`,
+  `checks`, and `timelineAvailable`
+- `checks` remain stable by `id`: `gate_enabled`,
+  `author_self_authorized`, `ready_label_present`,
+  `ready_comment_fresh`, and `ambiguity_guard`
+- the helper is intentionally scoped to A5(a); A5(d) open-PR conflict
+  checks stay on the written live GitHub path because inheritable-branch
+  and linked-issue exceptions do not yet have a supported helper
+  contract
+
+### Canonical branch name
+
+- Source repo / vendored-node command:
+  `node scripts/branch-name.mjs --number <issue-number> --title <issue-title>`
+- Package-manager / ephemeral-npx command: use the profile-selected
+  `idd:branch-name` command from the helper runtime manifest wiring above
+- Prints a single plain line `issue/<number>-<slug>`, implementing the
+  `idd-claim.instructions.md` pre-check (e) slug algorithm exactly
+  (lowercase, replace `[^a-z0-9]` with `-`, drop empty tokens and the
+  whole-token stop-words, rejoin with `-`, apply the 40-character
+  mid-token-aware cut, then fall back to `task` when empty)
+- Deterministic and network-free; the agent keeps branch-naming authority
+  and the written algorithm stays the canonical fallback
+- The `tests/branch-name.test.mts` drift test re-derives the pre-check (e)
+  "Worked examples" table, so the prose and the helper cannot diverge
+
+### Per-cycle marker bodies
+
+- Source repo / vendored-node command:
+  `node scripts/emit-marker.mjs --type <type> <fields...>` where `<type>` is
+  `claimed-by`, `review-watermark`, or `review-baseline`
+- Package-manager / ephemeral-npx command: use the profile-selected
+  `idd:emit-marker` command from the helper runtime manifest wiring above
+- Prints the exact ready-to-post marker body (HTML token + visible "Do not
+  edit" note) to stdout; **emit-only, no network write** — the agent posts
+  it via the documented HTTP path
+- Fields per type: `claimed-by` takes `--agent-id --claim-id --supersedes
+--timestamp --branch`; `review-watermark` takes `--agent-id --claim-id
+--head-sha --max-activity-at --total-item-count --ci-completed-at`;
+  `review-baseline` takes `--agent-id --claim-id --sha`
+- The written marker formats in `idd-overview-core` (claim) and
+  `idd-review-snapshot` (watermark/baseline) stay canonical; the render
+  functions live in `protocol-helpers` with byte-shape tests
+
+### Post operational markers (write-side)
+
+- Source repo / vendored-node command:
+  `node scripts/post-idd-marker.mjs --type <type> --target <issue|pr> <number> <fields...>`
+  (dry-run prints a JSON envelope whose `body` field is the marker); add
+  `--apply` to POST it.
+- Package-manager / ephemeral-npx command: use the profile-selected
+  `idd:post-idd-marker` command from the helper runtime manifest wiring above
+- Write-side companion to `emit-marker`: it renders the canonical body for
+  each operational marker `<type>` (`claim`, `unclaim`, `watermark`,
+  `baseline`, `advisory`, `advisory-recovery`) by reusing the single-sourced
+  `protocol-helpers` renderers, then POSTs it as a JSON document
+  (`{"body": …}`) via `gh api --method POST .../comments --input -`. The JSON
+  path is mandatory because `gh issue comment` / `gh api -f body=` silently
+  reject the HTML-comment-first claim-family bodies.
+- The `claim` / `unclaim` / `watermark` / `baseline` bodies are
+  HTML-comment-first with a visible "Do not edit" note; `advisory` /
+  `advisory-recovery` are the **plain-text** `advisory-wait:` /
+  `advisory-wait-recovery:` forms (no visible note) so the AW2 / shell-fallback
+  recognizers still match.
+- Fields per type: `claim` takes `--agent-id --claim-id --supersedes
+--timestamp --branch`; `unclaim` takes `--agent-id --claim-id --timestamp`;
+  `watermark` takes `--agent-id --claim-id --head-sha --max-activity-at
+--total-item-count --ci-completed-at`; `baseline` takes `--agent-id
+--claim-id --sha`; `advisory` / `advisory-recovery` take `--agent-id
+--head-sha --timestamp`.
+- One-command watermark (`watermark` only): `--from-pr <n>` derives
+  `--head-sha` / `--max-activity-at` / `--total-item-count` /
+  `--ci-completed-at` from a fresh `review-activity-snapshot` of PR `<n>` and
+  posts the marker to PR `<n>`, so only `--agent-id` / `--claim-id` (+ `--apply`)
+  are still supplied (it always targets the PR; an explicit non-pr `--target`
+  is rejected). It maps the snapshot's
+  `latestPassingCiCompletedAt` to `--ci-completed-at` (the latest _passing_ CI
+  completion, matching the E1 `{latest-ci-completed-at}` contract), forwards
+  optional `--trusted-marker-logins` / `--advisory-bot-logins` to the snapshot
+  child so its counts match the manual path, and rejects the four manual
+  snapshot fields as ambiguous. Unlike the manual dry-run it reads from GitHub
+  (it spawns the snapshot), but still posts nothing without `--apply`.
+- **No claim/state gating** (the `emit-marker` philosophy): this is a
+  single-marker render+POST primitive, so the calling phase must run its
+  claim-revalidation gate before `--apply`, exactly as the manual POST path it
+  replaces already requires.
+- Stable contract: [`post-idd-marker.schema.json`][post-idd-marker-schema].
+
+### Resume claim and route evidence
+
+- Claim routing command:
+  `node scripts/resume-claim-routing.mjs --issue <issue-number>`
+- Stable fields consumed by resume instructions: `state`, `action`,
+  `reason`, `active_claim`, `claim_id_checked`, `stale_age_ms`, `now`,
+  `warnings`, and `evidence`
+- Stable enums:
+
+  - `state`:
+    `unclaimed|already_owned|stale|non_inheritable|disputed`
+  - `action`: `re_claim|takeover|keep|stop`
+
+- Step 3 route command:
+  `node scripts/resume-route-selection.mjs --issue <issue-number>`
+- Stable fields consumed by resume instructions: `route`, `reason`,
+  `state`, and `evidence`
+- Stable enum:
+  - `route`: `D1|D4|E1|E15|Esync|F1|F2|stop`
+
+### Advisory-wait evidence
+
+- Command: `node scripts/advisory-wait-state.mjs --pr <pr-number>`
+- Stable contract:
+  [`advisory-wait-state.schema.json`][advisory-wait-state-schema]
+- Stable fields consumed by the instructions: `prHeadSha`,
+  `lastCopilotCommit`, `copilotPending`,
+  `copilotPendingCoversHead`, `outcome`, `f3Outcome`,
+  `earliestSameHeadAt`, `requestMarkerCount`, `requestCap`,
+  `pendingWindowMinutes`, `settledWindowMinutes`,
+  `pollIntervalMinutes`, `capExhaustedRoute`, and
+  `trustedMarkerSummary`
+
+### CI wait policy resolution
+
+- Source repo / vendored-node command:
+  `node scripts/ci-wait-policy.mjs`
+- Package-manager / ephemeral-npx command: use the
+  profile-selected `idd:ci-wait-policy` command from the helper runtime
+  manifest wiring above
+- Optional rerun-budget evaluation: append
+  `--rerun-count <count>` to the selected command
+- Stable fields consumed by instructions or helpers:
+  `policy.runningTimeout`, `policy.runningTimeoutMs`,
+  `policy.generationTimeout`, `policy.generationTimeoutMs`,
+  `policy.rerunPolicy`, and optional `rerunDecision.action` /
+  `rerunDecision.reason`
+- it remains read-only; the command does not poll CI, rerun workflows,
+  or post any GitHub comment
+
+### Merge-gate evidence
+
+- When helper runtime is enabled, these commands are the preferred
+  evidence collection path for E1/F2/F3 review-currency and merge-gate
+  checks.
+- Snapshot command: `node scripts/review-activity-snapshot.mjs`
+  with `--pr <pr-number>` and
+  `--trusted-marker-logins "<trusted-login-1>,<trusted-login-2>"`
+  (optionally `--advisory-bot-logins "<bot-1>,<bot-2>"`; the identity
+  also resolves from `IDD_ADVISORY_BOT_LOGINS` or the config
+  `advisoryBotLogins` field, with the source echoed in
+  `ackOnly.source`)
+- Stable E1/F2/F3 snapshot tuple: `headSha`,
+  `maxActivityUpdatedAt`, `totalItemCount`,
+  `latestPassingCiCompletedAt`, and `counts`
+- Additional CI completion field: `latestCiCompletedAt` reports the
+  latest terminal run of any state; watermark and merge-gate checks use
+  `latestPassingCiCompletedAt`
+- Structural ack-only evidence (requires a current helper copy): the
+  snapshot and `reviewCurrency.live` emit `ackOnly` (configured bots,
+  source, `dispositionsPresent`, `latestDispositionAt`, per-item list)
+  and `effective` activity values; `comparisonReason:
+ack-only-post-disposition` marks a review-currency pass that relied
+  on them. The semantic residual stays with the agent per the
+  courtesy-ack convergence rule, and the disposition-evidence and
+  unreplied-comment gates are unaffected
+- Readiness command: `node scripts/pre-merge-readiness.mjs`
+  with `--pr <pr-number>`, `--claim-issue <issue-number>`,
+  `--claim-id <claim-id>`, and
+  `--trusted-marker-logins "<trusted-login-1>,<trusted-login-2>"`
+- Stable contract:
+  [`pre-merge-readiness.schema.json`][pre-merge-readiness-schema]
+- Stable sections consumed by the instructions: `reviewCurrency`,
+  `threads`, `unrepliedComments`, `reviewerStates`,
+  `advisoryWait` (including the effective advisory policy fields), `ci`,
+  `claim`, and optional `dispositionEvidence`
+- Authoritative phase role: the live `pre-merge-readiness` run on the
+  current HEAD is the **authoritative source for the final-merge CI and
+  activity fields** at F2/F3. The `review-activity-snapshot` helper builds
+  the **E-phase** activity universe (E1) for review currency; do not reuse
+  its CI/activity values as the F-phase merge decision (they can diverge in
+  the pre-merge window)
+- `reviewerStates.codeownerSelfApproval` diagnoses whether CODEOWNER
+  approval can be satisfied by an eligible non-author owner or an
+  applicable ruleset or classic pull-request bypass. `deadlock` and
+  `possible_deadlock` statuses should be surfaced in F2 evidence and
+  hold comments, but they do not grant bypass permission. The
+  `currentUserCanBypass` token records the known GitHub ruleset value
+  (`unknown`, `never`, `always`, `pull_requests_only`, `exempt`, or
+  `mixed`).
+- A `clear` diagnostic means the helper found a GitHub topology that
+  appears satisfiable for the current actor; it is still evidence for
+  the written F2/F3 gates, not an IDD policy override or permission to
+  skip review, CI, freshness, advisory, unresolved-thread, or claim
+  checks.
+- `reviewCurrency.comparisonRoute` remains advisory evidence only. Agents
+  must still apply written instruction checks against live GitHub state.
+- Fail closed: if helper execution fails, output is invalid JSON,
+  required fields/sections are missing, or helper evidence conflicts with
+  live GitHub state, discard helper output and use the portable manual
+  fetch path.
+
+### Merge execution (F3)
+
+- Preferred F3 path when helper runtime is enabled: dry-run first to
+  inspect the verdict, then `--apply` to execute the bound merge.
+- Command: `node scripts/idd-merge-execute.mjs --pr <pr-number>
+--claim-issue <issue-number> --claim-id <claim-id>` plus the same
+  optional flags as `pre-merge-readiness` (`--agent-id`, `--owner`,
+  `--repo`, `--trusted-marker-logins`, `--advisory-bot-logins`); add
+  `--apply` to merge.
+- Stable contract:
+  [`idd-merge-execute.schema.json`][idd-merge-execute-schema]
+- It WRAPS the read-only `pre-merge-readiness` collector and adds no new
+  decision authority (`decisionAuthority: instructions`). `ready` is
+  `true` only when every F3 gate holds: review-currency
+  `comparisonRoute == "proceed"`, `threads.actionableCount == 0`,
+  advisory `f3Outcome == "SATISFIED"`, CI all-passing (the F2/F3
+  no-required-checks fallback included), required/CODEOWNER reviews
+  satisfied, claim ownership matches, and disposition evidence both
+  routes proceed and is unblocked (`dispositionEvidence.route ==
+"proceed"` **and** `dispositionEvidence.blockingCount == 0`; `route`
+  alone is not sufficient). Each failing gate is listed in `blockers[]`
+  as `{ gate, detail }`.
+- Dry-run (default) is read-only: it prints `ready`, `blockers`, and
+  `mergeCommand` (a `gh pr merge <pr> --merge --match-head-commit
+<validated-head>` bound to the freshly fetched head) and never merges.
+  It exits non-zero when not ready.
+- `--apply` is the only mutating path. If not `ready` it exits non-zero
+  without merging. If `ready` it re-fetches the head SHA and re-validates
+  the claim immediately before merging and **fails closed** (exit
+  non-zero, no merge, clear message) on any head drift or lost claim.
+  Otherwise it runs the merge commit bound to the validated head and
+  reports the result. It never squash- or rebase-merges.
+- Fail closed: if helper execution fails, output is invalid JSON,
+  required fields are missing, or helper evidence conflicts with live
+  GitHub state, discard helper output and run the manual F3 gate +
+  merge steps in `idd-merge.instructions.md`. The written F3 decision
+  table and gate checklist remain canonical.
+
+### E7 disposition verification
+
+- Preferred command when helper runtime is enabled:
+  `idd-review-disposition-verify --items '<json>'`
+- Source repository equivalent:
+  `node scripts/review-disposition-verify.mjs --items '<json>'`
+- Input: JSON array of ReviewItems_snapshot items, each with `id`,
+  `path` (`"A"` or `"B"`), `type`, `decision`, `markerReply`, and
+  `threadResolved`
+- Output schema (stable fields):
+
+  ```json
+  {
+    "failedCount": 0,
+    "items": [
+      {
+        "id": "...",
+        "path": "A",
+        "checks": {
+          "decisionRecorded": true,
+          "markerPresent": true,
+          "markerMatchesDecision": true,
+          "threadResolutionCorrect": true
+        },
+        "passed": true,
+        "issues": []
+      }
+    ],
+    "passed": true,
+    "passedCount": 3,
+    "summary": "All 3 items verified.",
+    "totalCount": 3
+  }
+  ```
+
+- Stable fields consumed at E7: `passed`, `items[].passed`,
+  `items[].checks`, and `items[].issues`
+- Read-only boundary: the helper never posts replies, resolves threads,
+  or performs any E6 mutation.
+- Fail closed: if execution fails, output is invalid JSON, required
+  fields are missing, or output conflicts with observed triage evidence,
+  discard helper output and apply written E7 checks directly.
+
+### Branch conflict and synchronization state evidence
+
+- Preferred command when helper runtime is enabled:
+  `idd-branch-conflict-state --pr <pr-number>`
+- Source repository equivalent:
+  `node scripts/branch-conflict-state.mjs --pr <pr-number>`
+- Output schema (stable fields):
+
+  ```json
+  {
+    "branchState": "clean",
+    "diagnostics": {
+      "mergeableSource": "github-mergeable",
+      "conflictFiles": [],
+      "notes": []
+    },
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "prBaseSha": "def...",
+    "prHeadSha": "abc...",
+    "prNumber": 123,
+    "protocolVersion": "1",
+    "published": true,
+    "readOnly": true,
+    "syncRecommendation": "none",
+    "worktreeUnchanged": true
+  }
+  ```
+
+- `branchState` values: `clean`, `behind-no-conflict`, `content-conflict`,
+  `dirty`, `force-push-exception`, `computing`, `unknown` (`computing` is the
+  transient still-computing mergeability that callers re-poll; `unknown` stays
+  terminal)
+- `syncRecommendation` values: `none`, `merge-main`, `policy-required-update`,
+  `force-push-exception`, `recheck`, `hold-unknown` (`recheck` pairs with
+  `computing`)
+- Stable fields consumed by D/E/F routing: `branchState`,
+  `syncRecommendation`, `published`, `readOnly`, `worktreeUnchanged`
+- Read-only boundary: the helper never runs `git merge`, `git rebase`, or
+  any command that leaves merge state, index changes, or working-tree
+  changes. The `readOnly` and `worktreeUnchanged` fields confirm this.
+- Fail closed: if execution fails, output is invalid JSON, or required
+  fields are missing, discard helper output and apply written D4/E-phase
+  branch-sync checks directly.
+
+### S2 quiet-window evidence
+
+- When helper runtime is enabled, Resume/S2 should call the
+  profile-selected `idd-stalled-session-quiet-check --pr <pr-number>`
+  command first. `node scripts/stalled-session-quiet-check.mjs --pr
+<pr-number>` is the vendored equivalent.
+- Optional parameters: `--now <ISO8601>`, `--quiet-window-ms <ms>`,
+  `--claim-created-at <ISO8601>`, and `--policy <path>`
+- Stable fields consumed by the instructions: `quiet_window_met`,
+  `quiet_window_ms`, `window_start`, `now`, `latest_activity`,
+  `latest_activity_type`, `reason`, and `evidence`
+  (`activity_count_in_window`, `blocking_activities`,
+  `has_heartbeat_in_window`, `has_ci_running`,
+  `has_branch_tip_movement`)
+- `ci-running` activities always break the quiet window regardless
+  of their timestamp; all other types are checked against
+  `window_start = now - quiet_window_ms`
+- Before takeover, re-run the helper against live GitHub state and pair
+  it with the written Resume/S2-S4 checks for the same active claim,
+  stale-threshold gating, closed/merged guards, and A5 race-safe claim
+  verification. `quiet_window_met = true` alone is never sufficient.
+
+### Merged-PR feedback sweep
+
+- Source repo / vendored-node command:
+  `node scripts/merged-pr-feedback-sweep.mjs`
+- Package-manager / ephemeral-npx command: use the profile-selected
+  `idd-merged-pr-feedback-sweep` command
+- A **manually-invoked**, read-only detector (no schedule, no mutation). It
+  scans MERGED PRs and surfaces feedback that was left unattended at merge:
+  - **Window selector**: `--since <ISO8601>` and/or `--days <N>`, or
+    `--pr <n>` (repeatable) / `--prs <n1,n2,...>`; `--limit <N>` caps the
+    `--since`/`--days` enumeration. When both `--since` and `--days` are
+    given, the later (more recent) cutoff wins, narrowing the window to the
+    intersection; `--pr`/`--prs` bypass the date window entirely, so the
+    reported `sweepWindow.since` and `days` are then `null`. Optional
+    `--owner`, `--repo`,
+    `--trusted-marker-logins`, and `--advisory-bot-logins` (same convention
+    as `review-activity-snapshot`). `--idd-agent-logins` (or
+    `IDD_AGENT_LOGINS`) names the agent accounts whose comments are
+    dispositions / are not feedback — distinct from trusted-marker actors so a
+    human maintainer who is a trusted-marker actor still has their review
+    feedback surfaced; it defaults to the trusted-marker actors. Numeric flags
+    reject non-integer values, and the PR connections are paged to completion
+    so large PRs do not silently truncate.
+  - **Surfaces**: review threads with `isResolved == false` (excluding
+    threads the IDD agent itself opened; each carries a `dispositioned` flag
+    from the in-thread disposition check), and regular comments /
+    `CHANGES_REQUESTED` review bodies from non-IDD-agent authors that have
+    **no later IDD-agent disposition** (`**Accepted**` / `**Rejected**` /
+    `**Awaiting maintainer decision**`). Trusted IDD operational markers, IDD
+    disposition comments, and any HTML comment beginning with `<!-- idd-` (for
+    example cleanup-evidence, excluded regardless of author — including CI
+    automation such as `github-actions[bot]`) are excluded from the feedback
+    set. Each finding carries an `advisoryBot` flag (`isKnownReviewBot` or a
+    configured `advisoryBotLogins` author) so the operator can prioritize human
+    feedback over capricious advisory-bot noise.
+- JSON output keys: `sweepWindow`, `trustedMarkerActors`,
+  `advisoryBotLogins`, `iddAgentLogins`, `prs` (each entry has `number`,
+  `mergedAt`, `mergeCommit`, `unresolvedThreads`, and `unaddressedComments`),
+  and `summary` (`prCount`, `flaggedPrCount`, `unresolvedThreadCount`,
+  `unaddressedCommentCount`).
+- Read-only boundary: the helper performs no minimization, no posting, and no
+  issue creation. **Handoff**: the JSON is the input an operator hands to the
+  issue-authoring skill, which re-verifies each candidate against current
+  `main` (reuse-first / not-already-fixed) and drafts follow-up issues
+  bucketed by readiness. The helper does deterministic detection; the
+  judgment-heavy re-verification, drafting, and publish stay operator-gated.
+
+## Friction Inventory
+
+The workflow areas most likely to benefit from optional helpers are:
+
+| Candidate                       | Status             | Helper level                       | Mutation risk | Canonical fallback path                                                 | Drift risk                                                                               | Estimated payoff / byte reduction                                       |
+| ------------------------------- | ------------------ | ---------------------------------- | ------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| A4 viability gate               | Adopted helper     | Read-only evaluator                | Low           | A4 viability criteria table in `idd-discover.instructions.md`           | Low — criteria are deterministic pattern matches against issue body text                 | Low to medium — roughly 100 to 200 bytes of repeated A4 criterion prose |
+| Claim-state parsing             | Reserve candidate  | Read-only parser                   | Low           | Claim rules in `.github/instructions/idd-overview-core.instructions.md` | High — claim parsing is subtle and any divergence would create false ownership decisions | Medium — roughly 200 to 400 bytes of repeated marker-parsing prose      |
+| Review activity snapshots       | Adopted helper     | Read-only evidence collector       | Low           | E1/F2/F3 activity-universe fetches via `gh` / GitHub API                | Medium — helper output must keep matching the review-currency rules exactly              | High — roughly 600 to 900 bytes of repeated multi-surface fetch prose   |
+| Live status digest edits        | Adopted helper     | Dry-run by default, explicit apply | Medium        | Phase-specific digest discovery and update flow                         | Medium — digest text must remain UI-only and never look authoritative                    | Medium — roughly 300 to 500 bytes of repeated digest-upsert prose       |
+| Advisory-wait state             | Adopted helper     | Read-only evidence collector       | Low           | `.github/instructions/idd-advisory-wait.instructions.md`                | Medium — helper must expose evidence without hiding the canonical decision table         | Very high — roughly 900 to 1400 bytes of repeated AW command prose      |
+| Pre-merge readiness             | Adopted helper     | Read-only evidence collector       | Low           | `.github/instructions/idd-pre-merge.instructions.md` and F3 live fetch  | Medium — helper must stay evidence-only and preserve the written merge gates             | Very high — roughly 1200 to 1800 bytes of repeated merge-evidence prose |
+| Post-merge cleanup candidates   | Adopted helper     | Dry-run by default, explicit apply | High          | GraphQL minimize-comment fallback flow                                  | Medium — minimization safety still depends on exact review/marker rules                  | Medium — roughly 400 to 700 bytes of repeated GraphQL audit prose       |
+| E7 disposition verification     | Adopted helper     | Read-only evidence verifier        | Low           | E7 verification steps in `idd-review-triage.instructions.md`            | Low — verification logic is deterministic and path/type rules are stable                 | Low to medium — roughly 150 to 300 bytes of repeated E7 pre-exit checks |
+| Branch protection/ruleset reads | Deferred candidate | Read-only API adapter              | Low           | Direct ruleset / branch-protection API reads                            | Medium — repository support varies and incomplete coverage could create false confidence | Low to medium — roughly 150 to 300 bytes of repeated ruleset prose      |
+| Branch conflict state           | Adopted helper     | Read-only evidence collector       | Low           | D4/E-phase branch-sync checks in `idd-pr-submit.instructions.md`        | Medium — helper must stay evidence-only and preserve the written sync gates              | Medium — roughly 300 to 500 bytes of repeated branch-state prose        |
+
+### Ranked roadmap candidate list for the source roadmap
+
+The ranking distinguishes immediate roadmap picks from documented
+reserve candidates:
+
+1. **Advisory-wait state** — **implemented now**. The AW protocol had
+   the highest command-copy burden, a stable read-only evidence shape,
+   and a clear non-goal boundary, so the source roadmap landed it first
+   as
+   [kurone-kito/idd-skill#308](https://github.com/kurone-kito/idd-skill/issues/308).
+2. **Pre-merge readiness** — **implemented now**. F2/F3 collect the
+   largest evidence set in the workflow and already compose existing
+   pure protocol logic, making a read-only helper valuable without
+   moving merge authority out of the instructions. This maps directly to
+   the source follow-up issue
+   [kurone-kito/idd-skill#309](https://github.com/kurone-kito/idd-skill/issues/309).
+3. **Claim-state parsing** — **reserve, defer for now**. The payoff is
+   real, but claim ownership drift would be more dangerous than
+   shell-copy variance, so this should wait until helper runtime
+   profiles and the higher-payoff read-only gates are settled.
+
+### Explicit deferrals
+
+- **Branch protection/ruleset reads** stay deferred for this roadmap.
+  They are useful support data, but repository variance and narrower
+  byte savings make them a worse first investment than AW/F2 helpers.
+- **Live status digest** and **post-merge cleanup** are already adopted
+  in narrow forms, so they are inventory baselines rather than new
+  roadmap targets.
+
+### Inventory Non-goals
+
+- Do not turn this inventory into a commitment to helperize every phase.
+- Do not rank mutating merge or review actions ahead of read-only
+  evidence collectors.
+- Do not let helper candidates replace the written decision tables.
+- Do not use this inventory to justify a separate npm package before the
+  local/template profile path is proven.
+
+## Trade-off
+
+Helper scripts can improve copy/paste reliability and make some
+review-state checks easier to audit locally. That benefit is real,
+especially for advisory-wait, review-snapshot, and post-merge cleanup
+commands.
+
+The portability cost is also real. The exported IDD template is meant to
+work in repositories that can copy Markdown instruction files without
+adopting a runtime, package manager, or repository-local script
+directory. If helper scripts are introduced too early, every operational
+rule must be maintained twice: once in the instructions that agents read,
+and once in code that agents run.
+
+For now, the safer balance is to keep pre-merge and advisory
+instructions canonical while allowing three read-only evidence helpers,
+one live digest upsert helper, and one post-merge cleanup helper. Merge
+safety still depends on the written checks, not on helper output alone.
+
+## Non-goals
+
+This helper policy does **not** imply the following:
+
+- Node.js becomes mandatory for repositories that only copy the Markdown
+  instructions
+- helper output becomes authoritative over the written decision tables
+- helpers perform mutating review or merge actions by default; mutation
+  must remain explicit in the written instructions
+- the project is committed to publishing a separate npm package before
+  the local and templated helper profiles are proven
+
+## Future Adoption Criteria
+
+If additional helper scripts are revisited, they should satisfy all of
+the following:
+
+- They are optional and never required to execute the exported template.
+- They are read-only by default; mutating actions remain explicit in the
+  phase instructions.
+- They output stable machine-readable JSON that can be inspected and
+  compared by agents.
+- They keep the shell / `gh` / `jq` fallback documented beside the helper
+  path.
+- They have a small test fixture set for marker parsing and snapshot
+  filtering.
+- They are introduced only after the corresponding instruction protocol
+  has stabilized enough that drift risk is lower than command-copy risk.
+
+Good future candidates remain read-only evidence collectors for
+pre-merge readiness or later claim-state inspection. They should not
+replace the written decision tables.
+
+[advisory-wait-state-schema]: https://kurone-kito.github.io/idd-skill/schemas/advisory-wait-state.schema.json
+[disposition-non-review-notices-schema]: https://kurone-kito.github.io/idd-skill/schemas/disposition-non-review-notices.schema.json
+[idd-merge-execute-schema]: https://kurone-kito.github.io/idd-skill/schemas/idd-merge-execute.schema.json
+[post-idd-marker-schema]: https://kurone-kito.github.io/idd-skill/schemas/post-idd-marker.schema.json
+[pre-merge-readiness-schema]: https://kurone-kito.github.io/idd-skill/schemas/pre-merge-readiness.schema.json
+[resolve-review-thread-schema]: https://kurone-kito.github.io/idd-skill/schemas/resolve-review-thread.schema.json

@@ -12,11 +12,20 @@ version: '0.2'
 words:
   - amebient
   - cresteaju
+  - desync
+  - desynced
+  - esync
   - graphig
   - momoneko
   - pixiv
+  - pylint
   - solidjs
+  - toctou
   - towa
+  - undispositioned
+  - unpushed
+  - unreplied
+  - unscored
   - unstub
   - vgeek
   - vinxi
