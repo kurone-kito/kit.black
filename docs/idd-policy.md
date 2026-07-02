@@ -9,8 +9,8 @@ aligned in the same change.
 
 ## Import verification
 
-**IDD import verified on 2026-07-03** (onboarding roadmap #110, tracks
-# 111–#115). The Step 6 checklist in
+**IDD import verified on 2026-07-03** (onboarding roadmap #110, covering
+tracks #111 through #115). The Step 6 checklist in
 [`docs/onboarding/agent-entry-and-verification.md`](onboarding/agent-entry-and-verification.md)
 passed:
 
