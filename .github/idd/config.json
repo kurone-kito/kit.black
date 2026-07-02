@@ -1,0 +1,30 @@
+{
+  "$schema": "https://kurone-kito.github.io/idd-skill/schemas/policy.schema.json",
+  "autopilotSuitability": {
+    "floor": 3
+  },
+  "claimTiming": {
+    "staleAge": "PT24H",
+    "heartbeatInterval": "PT12H"
+  },
+  "commands": {
+    "install-deps": "pnpm install --prefer-frozen-lockfile",
+    "fix-validate": "pnpm run lint:fix && pnpm run lint",
+    "pre-push-validate": "pnpm run lint && pnpm run test",
+    "post-fix-validate": "pnpm run lint:fix && pnpm run lint && pnpm run test"
+  },
+  "helperRuntime": {
+    "profile": "package-manager"
+  },
+  "iddVersion": "0.3.0",
+  "issueScope": "roadmap-first",
+  "markerPrefix": "kit-black",
+  "mergePolicy": "fully_autonomous_merge",
+  "orphanFirstPolicy": "none",
+  "reviewPolicy": "copilot-advisory",
+  "threadResolutionPolicy": "fast-agent-resolve",
+  "trustedMarkerActors": ["kurone-kito"],
+  "workshop": {
+    "exampleRepository": ""
+  }
+}
