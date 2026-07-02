@@ -3,6 +3,11 @@
   "autopilotSuitability": {
     "floor": 3
   },
+  "ciWait": {
+    "runningTimeout": "PT30M",
+    "generationTimeout": "PT10M",
+    "rerunPolicy": "rerun-once"
+  },
   "claimTiming": {
     "staleAge": "PT24H",
     "heartbeatInterval": "PT12H"
@@ -14,10 +19,11 @@
     "post-fix-validate": "pnpm run lint:fix && pnpm run lint && pnpm run test"
   },
   "helperRuntime": {
-    "profile": "package-manager"
+    "profile": "instructions-only"
   },
   "iddVersion": "0.3.0",
   "issueScope": "roadmap-first",
+  "maintainerApprovalActorPolicy": "owners-and-maintainers-only",
   "markerPrefix": "kit-black",
   "mergePolicy": "fully_autonomous_merge",
   "orphanFirstPolicy": "none",
@@ -26,5 +32,8 @@
   "trustedMarkerActors": ["kurone-kito"],
   "workshop": {
     "exampleRepository": ""
+  },
+  "worktreeGuard": {
+    "enabled": true
   }
 }
