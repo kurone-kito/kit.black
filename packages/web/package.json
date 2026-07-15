@@ -32,7 +32,7 @@
     "@kurone-kito/launchpad-icons-solid": "0.8.2",
     "@solid-primitives/date": "^2.1.0",
     "@solid-primitives/i18n": "^2.2.0",
-    "@solid-primitives/media": "^2.3.0",
+    "@solid-primitives/media": "^2.3.3",
     "@solid-primitives/storage": "^4.3.1",
     "@solidjs/meta": "^0.29.4",
     "@solidjs/router": "^0.15.3",
