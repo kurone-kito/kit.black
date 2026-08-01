@@ -108,7 +108,7 @@ jobs:
           NODE_ENV: production
         name: Deploy to Netlify
         # cspell:disable-next-line
-        uses: nwtgck/actions-netlify@v3.0
+        uses: nwtgck/actions-netlify@v4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: false
