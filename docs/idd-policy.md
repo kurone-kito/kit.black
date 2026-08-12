@@ -36,9 +36,8 @@ passed:
 
 From this point the repository's own `.github/instructions/` are
 authoritative; the upstream ("theirs") bootstrap flow is no longer
-required. Known follow-ups: #117 (run `push.yml` on `issue/*` branches)
-and the helper-runtime upgrade to `package-manager` once a reviewed
-helper spec is published.
+required. Known follow-ups: the helper-runtime upgrade to
+`package-manager` once a reviewed helper spec is published.
 
 ## Merge Policy
 
@@ -91,11 +90,14 @@ or advisory feedback.
 - **rerun policy**: `rerun-once`
 
 > **Repository note.** `.github/workflows/push.yml` (build/lint/test)
-> currently does not run on `issue/*` branches because its branch filter
-> uses `'*'`, which does not match branch names containing `/`. Until
-> that is fixed (tracked in #117), IDD PRs are validated by lint + test
-> run locally in the worktree (pre-push-validate) plus CodeQL, Copilot,
-> and CodeRabbit; the build is exercised by the post-merge `main` deploy.
+> now runs on `issue/*` branches: its branch filter explicitly lists
+> `'issue/*'` alongside the slash-free `'*'` (fixed in #117 — GitHub
+> Actions branch-filter globs otherwise treat `*` as not matching `/`,
+> and a blanket `'**'` was rejected because it would also match
+> `dependabot/*` branches, which run without repository secrets and
+> would fail the build). IDD PRs now carry real build/lint/test CI
+> signal in addition to lint + test run locally in the worktree
+> (pre-push-validate), CodeQL, Copilot, and CodeRabbit.
 
 ## Issue-Author Approval Gate
 
