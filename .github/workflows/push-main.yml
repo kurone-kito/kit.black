@@ -16,7 +16,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.compare.outputs.changed }}
+    permissions:
+      actions: write
+      contents: read
     steps:
+      - continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: Keep the scheduled workflow enabled
+        run: gh api --include -X PUT repos/${{ github.repository }}/actions/workflows/push-main.yml/enable
       - name: Set git to use LF
         run: |
           git config --global core.autocrlf false
