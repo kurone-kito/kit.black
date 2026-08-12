@@ -8,7 +8,7 @@ pnpm install && pnpm run start
 
 ## System Requirements
 
-- Node.js `>=23.6.1`
+- Node.js `>=24.2.0`
 
 ## Rules for Development
 
