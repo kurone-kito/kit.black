@@ -6,13 +6,17 @@ contract in `docs/issue-authoring-skill.md`.
 
 ## Target marker prefix
 
-Resolve the target repository's hidden marker prefix before drafting any
-roadmap or blocked-by marker.
+**Prefix-first**: resolve the target repository's hidden marker prefix
+before emitting _any_ authoring marker — `roadmap-id`, `blocked-by`,
+`autopilot-suitability`, or `effort`. Resolve it once, up front, not as
+an afterthought once a marker is already half-drafted.
 
 - Use the prefix documented by the target repository's onboarding or
   IDD instructions.
 - In this source repository the prefix is `idd-skill`, but installed
-  bundles must not assume that value elsewhere.
+  bundles must not assume that value elsewhere. Never default to
+  `idd-skill` in an installed bundle; use it only when the target
+  repository actually configured that value.
 - If the prefix is not discoverable from the repository docs or user
   context, stop and ask instead of emitting a guessed marker.
 
@@ -58,6 +62,15 @@ locally. Clarification must be bounded; use the repository-local
 otherwise default to 3 rounds. If safe drafting is still impossible
 after that, stop and report the remaining blockers instead of looping
 indefinitely.
+
+**Under-clarification stop rule.** If, after bounded clarification, you
+still cannot name the concrete surface to edit or an objective
+verification for a candidate task, route it to `needs-decision` or ask
+— do not publish a confidently-vague `ready` issue. Reliability over
+speed. This is distinct from the "Under-specified" specificity band
+below: that band judges an already-drafted body's wording, while this
+rule stops publication earlier, during Intake, before a body is even
+drafted.
 
 ### 2. Decompose and Draft
 
@@ -120,6 +133,52 @@ issue that passes those gates can still be under-specified if it leaves
 too much implementation shape implicit. The drafting target is therefore
 "ready and stable for a middle-tier model," not "maximally detailed."
 
+## Executability gate for code spec-units
+
+For a **code spec-unit** — a drafted unit whose acceptance criteria are
+objectively executable (a script, function, or test the drafted issue
+itself specifies) — an authoring session can validate the draft before
+publishing by building a throwaway reference implementation against its
+own stated acceptance check and accepting the draft only if that
+reference implementation passes. This reuses the downstream execution
+loop as an upstream ground-truth gate: it catches drafts whose
+acceptance criteria are internally inconsistent, non-trivially
+unsatisfiable, or otherwise not actually implementable, before a
+downstream executor ever claims the issue. The reference implementation
+is a discarded validation probe, never published — it does not cross the
+Publication boundary below; only the drafted issue itself is published,
+and building the probe does not start the IDD execution loop.
+
+This is a **recommended practice for repositories or domains where a
+drafted code spec-unit has an objectively executable acceptance
+check**, not a change to this repository's own mechanical
+`bin/idd-audit-authored-issue.mjs` checks or a new requirement on this
+repository's own issue-authoring practice — most of this repository's
+issues are multi-file engineering changes without a single executable
+acceptance check to validate against.
+
+- **Weak-model semantic self-review stays advisory.** When a weak
+  authoring model reviews its own draft for semantic quality, treat the
+  verdict as advisory only, never a hard veto on publishing — mirroring
+  the narrow-question guidance for weak-model judgment calls in
+  `docs/idd-workflow.md`'s Weak-model guardrails section.
+- **Decompose and draft want different model traits.** Decomposition
+  (judgment about scope and structure) tolerates a verbose reasoning
+  model; the structured draft step (emitting the exact spec/acceptance-
+  criteria block) is more reliable on a leaner, more literal model,
+  whose chain-of-thought does not compete with the drafted block for
+  token budget. Pick the model per sub-task, not per pipeline, when both
+  are available.
+- **Redraft and re-decomposition are limited rescue mechanisms, not
+  reliable fixes.** A bounded redraft loop tends to re-roll rather than
+  converge, because a weak author regenerates rather than incrementally
+  fixes. Re-decomposing a repeatedly-failing unit is usually low-value
+  too: most authoring failures are hard-but-atomic rather than
+  over-broad, and splitting a hard-but-atomic unit tends to produce
+  incoherent sub-units that do not recompose. Treat a code spec-unit
+  that repeatedly fails this gate as a candidate for `needs-decision` or
+  human/stronger-model authoring instead of looping indefinitely.
+
 ## Reuse-first issue policy
 
 Before creating any new issue, check whether the work already has a
@@ -149,7 +208,14 @@ Then apply these checks in order:
    refine task-list entries there instead of creating a competing
    umbrella.
 3. If an existing issue is close but too broad, split follow-up work
-   out of it rather than widening the original issue further.
+   out of it rather than widening the original issue further. When the
+   issue being split is itself a roadmap child, update the parent
+   roadmap's `## Tracks` list in the same authoring action — add the
+   new issue's link and adjust any sequencing notes (a short dated note
+   is the observed good pattern) — subject to the claim-state
+   precondition above applied to the roadmap issue's own claim/PR
+   state, and record the provenance in the new issue's body (e.g.,
+   `Split out of #<n>`).
 4. If an existing issue has an **active claim**, an open PR, or is
    otherwise being actively executed, do **not** edit its body or
    repurpose it (see the claim-state precondition, which exempts
@@ -160,6 +226,35 @@ Then apply these checks in order:
 
 Report when the bundle reuses, extends, or declines to reuse an issue
 so a later session can follow the reasoning.
+
+**Recent-window scan for just-discovered problems.** The checks above
+assume the work already has a candidate home to reuse or extend. When
+instead authoring an ad hoc issue for a problem **just discovered**
+during the current session — a build-breaking regression noticed
+mid-session, for example, rather than a task drafted from an existing
+backlog — run a recent-window duplicate scan immediately before
+publishing: list the newest issues regardless of state and check
+whether a concurrent session already authored the same problem.
+
+```sh
+gh issue list --repo <owner>/<repo> --state all --limit 20
+# or, scoped to a recency window:
+gh issue list --repo <owner>/<repo> --state all --search "created:>=<YYYY-MM-DD>"
+```
+
+A hit routes back into the checks above: extend the discovered issue
+instead of publishing a duplicate. When the race slips past this scan
+anyway (near-simultaneous discovery), the outcome is **anticipated and
+self-resolving, not a coordination failure**: both sessions proceed
+independently through their own claim and implementation cycle;
+whichever PR merges first wins; the other session manually verifies
+the fix already landed on the default branch, then closes its own
+issue and (unmerged) PR as superseded, citing the verifying evidence.
+This is the same manual verify-then-close judgment call the execution
+loop's B2.0 supersession re-check (`idd-work.instructions.md`) applies
+after claim — this scan only adds an earlier, pre-publish checkpoint.
+A fast enough race can still surface even after B2.0; when it does, it
+resolves the same way.
 
 ## Output chooser
 
@@ -393,6 +488,8 @@ Validation expectations:
   `issue-scope` setting
 - exactly one autopilot-suitability footer with an integer 1-5
   marker; a score of `1` also carries `status:blocked-by-human`
+- passes the `audit-authored-issue` mechanical pre-publish gate for the
+  `orphan` shape (see [Mechanical pre-publish gate](#mechanical-pre-publish-gate))
 
 ### Roadmap issue
 
@@ -420,6 +517,8 @@ Validation expectations:
   instead of normal execution leaves
 - exactly one autopilot-suitability footer with an integer 1-5
   marker; a score of `1` also carries `status:blocked-by-human`
+- passes the `audit-authored-issue` mechanical pre-publish gate for the
+  `roadmap` shape (see [Mechanical pre-publish gate](#mechanical-pre-publish-gate))
 
 ### Child issue under a roadmap
 
@@ -444,6 +543,8 @@ Validation expectations:
 - the issue can be claimed independently without absorbing sibling work
 - exactly one autopilot-suitability footer with an integer 1-5
   marker; a score of `1` also carries `status:blocked-by-human`
+- passes the `audit-authored-issue` mechanical pre-publish gate for the
+  `child` shape (see [Mechanical pre-publish gate](#mechanical-pre-publish-gate))
 
 ## A4.5 Suitability Gate Alignment
 
@@ -472,10 +573,139 @@ Pre-publish validation checklist:
 4. **Human dependency isolation**: Ready issues do not hide unresolved
    decisions, credentials, subjective approvals, or mid-implementation
    human handoffs
+5. **Mechanical audit**: the drafted body passes the
+   `audit-authored-issue` linter for its declared shape (see
+   [Mechanical pre-publish gate](#mechanical-pre-publish-gate))
 
 If any check is uncertain, route the issue to `needs-decision` or
 `blocked-by-human` during drafting instead of publishing a
 marginally-ready issue.
+
+## Mechanical pre-publish gate
+
+Before publishing a drafted `ready` **orphan, roadmap, or child** body
+(the shapes the linter supports — not the non-ready buckets below,
+which are not audited by this gate), run the
+`audit-authored-issue` linter against it when a helper runtime is
+available. It mechanically re-checks a subset of the structural rules
+this contract states in prose — the autopilot-suitability marker's
+exactly-one/coherent-value rule, the one-directional check that a
+suitability score of `1` carries the configured `blocked-by-human`
+label (it does not check the reverse: a non-`1` score paired with the
+label still passes), markerPrefix consistency across every authoring
+marker, the declared shape's required section headings, the
+roadmap-id/blocked-by dependency-marker rules, and visible/hidden line
+agreement for the suitability and effort footers — so a weak model does
+not have to hold every rule in its head at once while drafting.
+
+The linter also emits one **advisory, warning-severity-only** finding
+(`prose-dependency`): it flags an issue/PR reference (`#<digits>` or a
+full GitHub issue/PR URL) that appears near coordination language (for
+example "before", "after", "once", "until", "predates", "gate"/"gated",
+"requires", "lands first") with no corresponding encoding for that
+reference as one of the three recognized forms: a `Blocked by #NNN`
+line, a `Depends on #NNN` line, or a task-list checkbox item
+(`- [ ] #NNN`) — the same three forms `extractBlockedByIssueNumbers` /
+`extractDependencyIssueNumbers` already recognize elsewhere in this
+contract. A task-list checkbox counts regardless of which heading it
+sits under, so a roadmap's own `## Tracks` membership list already
+satisfies this — it is not a separate "dependency-only" list. This
+catches the pattern this contract's own
+[Hidden human-dependency validation](#hidden-human-dependency-validation)
+check 4 warns about in prose — a hard precondition stated only in
+narrative text, not encoded as a real dependency marker. A full-URL
+reference is inherently local only when it actually names the current
+repository, since a cross-repo dependency cannot be encoded with these
+repository-local markers at all — flagging it would recommend an
+impossible fix. When the caller supplies the current `owner/repo`
+(`--current-repo`, defaulting to `$GITHUB_REPOSITORY` in CI), a
+full-URL reference naming a different repository is never flagged;
+without that context, a full-URL reference is still flagged by
+default (unchanged behavior) — unless its issue/PR number happens to
+already appear as a local `Blocked by` / `Depends on` / task-list
+marker elsewhere in the body, in which case it is treated as already
+encoded like any other match. A Markdown link's target may carry
+trailing content after the issue/PR number and before the link's
+closing paren — a URL fragment (`#issuecomment-123`), a trailing `/`,
+or a quoted link title (`"..."` or `'...'`) — and the link is still
+recognized as one match; without this, the label's own bare `#NNN`
+would otherwise leak through to the bare-`#` check and be misjudged
+independently of the link's (possibly cross-repo) target. A local
+`owner/repo#N` shorthand (e.g. `kurone-kito/idd-skill#4321`) is also
+recognized, but with the reverse default from the full-URL case above:
+it is flagged only when `--current-repo` is supplied **and**
+case-insensitively matches `owner/repo`; naming a different repository,
+or omitting `--current-repo`, always excludes it, since this shorthand
+was never recognized at all before and a bare `owner/repo` cannot be
+assumed local without confirmation. A reference-style Markdown link
+(`[text][ref]` with a separate `[ref]: target` definition elsewhere in
+the body) is recognized the same way as the inline-link form above,
+including the same `currentRepo`-based local/cross-repo comparison; a
+`ref` with no matching definition is left as literal text and falls
+through to the bare-`#` check like any other unrecognized shape. A
+quoted link title may contain a backslash-escaped quote matching its own
+delimiter (`\"` inside a `"..."` title, or `\'` inside a `'...'` title)
+without ending the title early and losing the rest of the link. An empty
+or whitespace-only `--current-repo` (or `$GITHUB_REPOSITORY`) is treated
+the same as omitting it entirely, rather than as a known repository that
+can never match. A nested/child list item's reference is evaluated
+together with its full ancestor chain's coordination-language text
+instead of being scoped away from it, while a sibling bullet at the same
+indentation — nested or top-level — still starts its own separate scope,
+preserving the tight-list sentence-conflation fix mentioned above. This
+holds for every nested child under a given parent, at any depth — not
+only the first. A continuation line resuming at an ancestor's own
+indentation, after a deeper child has already opened, is attributed to
+that ancestor rather than the deepest open child. A loose list (a blank
+line between sibling items) preserves the same ancestor scope across
+the blank line, as long as the following item's own marker is no deeper
+than whatever is still open at the end of the preceding item — a
+same-depth sibling, or a resumption at a shallower ancestor's own
+level — and the preceding item ends in a list marker rather than
+trailing plain prose (once plain prose follows the last marker, the
+list reads as already having ended, so the blank line is not bridged).
+A blank line directly followed by a more deeply indented marker is also
+not bridged, to avoid grafting an unrelated item onto an open ancestor
+as a false child. Unlike every other check above, a
+`prose-dependency` warning never flips `passed` to `false` and never
+changes the linter's exit code: it prompts the author to either
+convert the prose into a proper dependency marker or consciously
+confirm the reference is a mere breadcrumb.
+
+```sh
+node scripts/audit-authored-issue.mjs --shape <orphan|roadmap|child> \
+  --marker-prefix <resolved-target-prefix> \
+  --body-file <path-to-drafted-body> [--label <label>]...
+```
+
+Or, for npx/package-manager profiles, the equivalent
+`idd-audit-authored-issue` command. Pass `--stdin` instead of
+`--body-file` when the drafted body is not yet written to disk.
+**Always pass `--marker-prefix`** with the prefix resolved under
+[Target marker prefix](#target-marker-prefix): without it, the linter
+falls back to reading `.github/idd/config.json` from the current
+working directory, and if that file is missing or unreadable — for
+example when running from an installed bundle without a local
+checkout of the target repository's config — it silently defaults to
+this source repository's own `idd-skill` prefix, which produces a
+false pass or fail against the wrong prefix instead of an error.
+
+**No helper runtime available (`instructions-only` profile).** The
+linter cannot run without Node.js and the vendored `scripts/`
+directory, and an `instructions-only` install is a first-class
+supported fallback, not a degraded one. Unavailability is never a
+waiver: manually re-verify the same checks listed above against this
+contract's prose and the [Draft schemas](#required-draft-content)
+before publishing.
+
+A `passed: false` report (or non-zero exit, or a failed manual
+re-verification) means the draft is not ready to publish yet,
+regardless of how complete the narrative reads — fix every reported
+finding and re-run before treating the issue as `ready`. The linter (or
+its manual equivalent) is a mechanical structural check, not a
+substitute for the judgment-based checks above (human-dependency
+isolation, codebase fidelity, reuse-first) — passing it is necessary,
+not sufficient, for `ready`.
 
 ## Autopilot-suitability score
 
@@ -556,11 +786,24 @@ Effort is distinct from the autopilot-suitability score: suitability
 captures _autonomy_ (can an agent finish unattended), while effort
 captures _size_ (a fully-autonomous issue can still be large).
 
-| Hint | Meaning | Typical signals                                                                                     |
-| ---- | ------- | --------------------------------------------------------------------------------------------------- |
-| S    | Small   | One module / a few files; a single reviewable change; little or no review back-and-forth expected   |
-| M    | Medium  | A helper plus its callers, or one instruction surface with mirrors and tests                        |
-| L    | Large   | A new helper family, multi-file instruction rewrites, or work that tends to span many review rounds |
+| Hint         | Scope                                                                                             | Uncertainty                                                                                        | Example signals                                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **S** Small  | Touches one module or a small, contained file set                                                 | Little to no open design decision remains once the plan is drafted                                 | One module / a few files; a single reviewable change; little or no review back-and-forth expected   |
+| **M** Medium | Touches a helper plus its callers, or one instruction surface together with its mirrors and tests | At most one open design decision remains, resolvable during planning without a separate hold       | A helper plus its callers, or one instruction surface with mirrors and tests                        |
+| **L** Large  | Touches a new helper family, or spans a multi-file rewrite across several instruction surfaces    | Two or more open design decisions remain, or one decision whose resolution could reshape the scope | A new helper family, multi-file instruction rewrites, or work that tends to span many review rounds |
+
+**Calibration note.** Observed agent token usage or wall-clock duration
+from previously completed issues may be used to sanity-check a chosen
+band, but those are calibration observations only, never the unit
+itself: model speed shifts release to release, and concurrent agent
+runs distort wall-clock comparison. Do not anchor a hint to a specific
+token count or duration.
+
+**Mis-scope routing.** An estimate that does not fit even the `L`
+row's scope-and-uncertainty definition is a mis-scope smell: the draft
+likely bundles multiple intents. Return to
+[Decompose and Draft](#2-decompose-and-draft) and split at intent level
+instead of publishing one oversized issue labeled `L`.
 
 The hint is recorded as a **footer at the end of the issue body** — a
 visible line paired with a hidden, prefix-aware machine marker, beside
@@ -598,7 +841,41 @@ Binding rules:
 Backfill is opportunistic and follows the same claim-state precondition
 as the suitability footer.
 
+## Authoring hold and release
+
+Issue authoring uses a two-stage contract: drafting and publishing
+happen together under an authoring hold; release from that hold is the
+only approval boundary.
+
+- **Stage 1 — author-and-publish.** Once a drafted `ready` body passes
+  the mechanical `audit-authored-issue` gate (see
+  [Mechanical pre-publish gate](#mechanical-pre-publish-gate)) and the
+  critique pass, publish it directly under the configured authoring
+  label (`issueAuthoring.authoringLabelName`, defaulting to
+  `status:authoring`) — no separate user approval of the drafted body
+  is required. The label doubles as the draft marker for the held
+  issue and the claim-suppression lock that keeps Discover from
+  selecting it: held issues ARE the drafts, so in-place edits, roadmap
+  relationship wiring, and re-lint of already-published bodies all
+  happen under that same lock. If a session is interrupted before the
+  set is fully wired, leave the label in place — that alone keeps
+  Discover from selecting the unfinished set until a later session
+  finishes the work.
+- **Stage 2 — release.** Before removing the authoring label, run a
+  release checklist: every child issue is referenced from its parent
+  roadmap's `## Tracks` list; no unsubstituted placeholder remains in
+  any published body; the `audit-authored-issue` linter (or its manual
+  fallback) is green on every published body in the set. Remove the
+  label only after that checklist passes and the user explicitly
+  requests release from the authoring hold. Release is a human action;
+  nothing in this bundle auto-releases a held issue set.
+
 ## Publication boundary
 
-Drafting issues does not authorize publishing them or starting the IDD
-execution loop unless the user explicitly asked for that next step.
+Publishing a drafted `ready` body under the authoring hold does not
+need a separate user approval once it passes the mechanical
+`audit-authored-issue` gate and the critique pass — see
+[Authoring hold and release](#authoring-hold-and-release) above for the
+full two-stage contract. Removing the authoring label and starting the
+IDD execution loop both require the user's explicit hold-release
+request; nothing else authorizes either.

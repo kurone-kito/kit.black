@@ -9,3 +9,9 @@
 
 # Pnpm
 pnpm-lock.yaml
+
+### THE REPOSITORY SPECIFIES ################################################
+
+# Vendored Claude Code skill bundles (re-synced verbatim from upstream;
+# reformatting on every re-sync makes the diff noisy for no benefit)
+.claude/skills/
