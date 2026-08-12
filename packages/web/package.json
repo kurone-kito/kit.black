@@ -20,6 +20,7 @@
     "prebuild:yaml": "js-yaml src/constants.yaml > src/constants.json",
     "build": "vinxi build",
     "build:storybook": "storybook build",
+    "postbuild": "cp src/data.json dist/data.json",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi dist node_modules/.cache \"src/*.json\" storybook-static",
     "serve": "serve dist",
     "prestart": "pnpm run prebuild",
