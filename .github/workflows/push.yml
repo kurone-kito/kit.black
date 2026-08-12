@@ -2,7 +2,8 @@ name: The CI workflow on push
 on:
   push:
     branches:
-      - '**'
+      - '*'
+      - 'issue/*'
       - '!main'
 permissions:
   contents: read
