@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - '*'
+      - 'issue/*'
       - '!main'
 permissions:
   contents: read
