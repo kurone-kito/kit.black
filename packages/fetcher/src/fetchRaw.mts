@@ -34,12 +34,17 @@ export const fetchRawEventsFactory =
   async (
     params: Except<
       SetRequired<calendar_v3.Params$Resource$Events$List, 'calendarId'>,
-      'singleEvents' | 'timeZone'
+      'orderBy' | 'singleEvents' | 'timeZone'
     >,
   ): Promise<readonly calendar_v3.Schema$Event[]> => {
     const { data } = await client.events.list({
       singleEvents: true,
       timeZone: 'Asia/Tokyo',
+      // `orderBy: 'startTime'` requires `singleEvents: true` (set
+      // above) and keeps equal-epoch ties from flapping between
+      // fetches, which would otherwise cause false "changed" verdicts
+      // in the schedule-deploy change detector.
+      orderBy: 'startTime',
       ...params,
     });
     const { items = [] } = data;
