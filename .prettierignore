@@ -4,5 +4,8 @@
 # Ignorefiles
 .*ignore
 
+# Husky (generated shim scripts; nested .gitignore is not read by Prettier)
+.husky/_/
+
 # Pnpm
 pnpm-lock.yaml
