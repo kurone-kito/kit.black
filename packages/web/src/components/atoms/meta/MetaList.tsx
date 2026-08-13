@@ -48,7 +48,7 @@ export const MetaList: Component<MetaListProps> = (props) => (
     <Show when={props.keywords}>
       <Meta name="keywords" content={props.keywords} />
     </Show>
-    <Meta name="referer" content="strict-origin-when-cross-origin" />
+    <Meta name="referrer" content="strict-origin-when-cross-origin" />
     <Show when={props.colorLight}>
       <Meta
         name="theme-color"

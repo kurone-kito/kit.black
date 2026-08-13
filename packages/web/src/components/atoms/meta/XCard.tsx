@@ -46,9 +46,6 @@ export const XCard: Component<XCardProps> = (props) => (
     <Show when={props.image && props.imageAlt}>
       <Meta name="twitter:image:alt" content={props.imageAlt} />
     </Show>
-    <Show when={props.author}>
-      <Meta name="twitter:author" content={props.author} />
-    </Show>
     <Show
       fallback={<Meta name="twitter:title" content={props.siteName} />}
       when={props.title}

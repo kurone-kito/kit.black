@@ -79,4 +79,52 @@ describe('LinkList', () => {
       '/site.webmanifest',
     );
   });
+
+  it('renders no canonical or alternate links when unset', () => {
+    render(() => (
+      <MetaProvider>
+        <LinkList />
+      </MetaProvider>
+    ));
+    expect(document.head.querySelector('link[rel="canonical"]')).toBeNull();
+    expect(document.head.querySelector('link[rel="alternate"]')).toBeNull();
+  });
+
+  it('renders the canonical link when provided', () => {
+    render(() => (
+      <MetaProvider>
+        <LinkList canonicalUrl="https://kit.black/en/" />
+      </MetaProvider>
+    ));
+    expect(
+      document.head.querySelector('link[rel="canonical"]'),
+    ).toHaveAttribute('href', 'https://kit.black/en/');
+  });
+
+  it('renders one alternate link per entry, each with its own hreflang', () => {
+    render(() => (
+      <MetaProvider>
+        <LinkList
+          alternates={[
+            { hreflang: 'ja', href: 'https://kit.black/ja/' },
+            { hreflang: 'en', href: 'https://kit.black/en/' },
+            { hreflang: 'x-default', href: 'https://kit.black/' },
+          ]}
+        />
+      </MetaProvider>
+    ));
+    const alternates = document.head.querySelectorAll('link[rel="alternate"]');
+    expect(alternates).toHaveLength(3);
+    expect(document.head.querySelector('link[hreflang="ja"]')).toHaveAttribute(
+      'href',
+      'https://kit.black/ja/',
+    );
+    expect(document.head.querySelector('link[hreflang="en"]')).toHaveAttribute(
+      'href',
+      'https://kit.black/en/',
+    );
+    expect(
+      document.head.querySelector('link[hreflang="x-default"]'),
+    ).toHaveAttribute('href', 'https://kit.black/');
+  });
 });

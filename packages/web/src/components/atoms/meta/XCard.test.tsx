@@ -56,4 +56,29 @@ describe('XCard', () => {
       document.head.querySelector('meta[name="twitter:image:alt"]'),
     ).toBeNull();
   });
+
+  it('never emits twitter:author, even when author is set', () => {
+    render(() => (
+      <MetaProvider>
+        <XCard author="Example Author" siteName="Example" />
+      </MetaProvider>
+    ));
+    expect(
+      document.head.querySelector('meta[name="twitter:author"]'),
+    ).toBeNull();
+    expect(
+      document.head.querySelector('meta[name="twitter:creator"]'),
+    ).toHaveAttribute('content', 'Example Author');
+  });
+
+  it('does not emit twitter:creator when author is unset', () => {
+    render(() => (
+      <MetaProvider>
+        <XCard siteName="Example" />
+      </MetaProvider>
+    ));
+    expect(
+      document.head.querySelector('meta[name="twitter:creator"]'),
+    ).toBeNull();
+  });
 });
