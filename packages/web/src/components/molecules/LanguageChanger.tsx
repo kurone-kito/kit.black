@@ -10,6 +10,9 @@ export interface LanguageChangerProps extends Pick<AnchorProps, 'as'> {
 
   /** The Japanese language URL. */
   readonly jaHref: string;
+
+  /** The accessible label for the language selection control. */
+  readonly label: string;
 }
 
 /**
@@ -21,7 +24,7 @@ export const LanguageChanger: Component<LanguageChangerProps> = (props) => (
   <details class="dropdown" role="listbox">
     <summary class="btn btn-ghost">
       <TbLanguageHiragana
-        aria-label="Language selection"
+        aria-label={props.label}
         class="stroke-primary-content h-6 w-6"
         role="img"
       />

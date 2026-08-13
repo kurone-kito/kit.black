@@ -8,6 +8,9 @@ export interface HamburgerButtonProps {
   /** The CSS classes. */
   readonly class?: string | undefined;
 
+  /** The accessible label for the toggle input. */
+  readonly label: string;
+
   /** The click event handler. */
   readonly onClick?:
     | JSX.EventHandlerUnion<HTMLInputElement, MouseEvent>
@@ -22,7 +25,7 @@ export interface HamburgerButtonProps {
 export const HamburgerButton: Component<HamburgerButtonProps> = (props) => (
   <label class={twMerge('btn btn-ghost swap swap-rotate', props.class)}>
     <input
-      aria-label="Menu"
+      aria-label={props.label}
       onClick={props.onClick}
       type="checkbox"
       value="expanded"

@@ -8,6 +8,6 @@ type Target = typeof Splash;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { animation: true },
+  args: { animation: true, label: 'Loading the website' },
   component: Splash,
 } satisfies Meta<Target>;

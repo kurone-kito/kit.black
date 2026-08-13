@@ -8,16 +8,23 @@ const resources: Resources = {
   author: 'Kuroné Kito',
   calendar:
     'The following live streaming schedule is automatically generated based on information extracted from the Calendar app eight times daily.',
+  hamburgerMenu: 'Menu',
+  heroAbout: 'About Kuroné Kito',
+  heroIntroduction: 'Kuroné Kito’s introduction',
   language: '🇬🇧',
+  languageSelection: 'Language selection',
   learnMore: 'Learn more',
   links: 'Kuroné Kito’s SNS links',
   marshmallow: 'Send an anonymous question',
+  navbarLabel: 'Main navigation',
   netlify: 'Hosted by Netlify',
   released: 'Released in {{ year }}',
   repository: 'This web page’s repository',
   siteDescription:
     'The official site of Kuroné Kito (くろねきと), a black cat VTuber.',
+  splashLoading: 'Loading the website',
   toDark: 'Switch to dark mode',
+  toggleTheme: 'Toggle theme',
   toLight: 'Switch to light mode',
   wishlist: 'Wishlist',
   worksDescription:

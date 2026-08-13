@@ -8,6 +8,10 @@ type Target = typeof LanguageChanger;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { enHref: 'https://example.com/', jaHref: 'https://example.com/' },
+  args: {
+    enHref: 'https://example.com/',
+    jaHref: 'https://example.com/',
+    label: 'Language selection',
+  },
   component: LanguageChanger,
 } satisfies Meta<Target>;

@@ -23,12 +23,14 @@ export const Hero: Component = () => {
     <AtomsHero
       class="prose [&_strong]:text-base-content/80 [&_a]:link [&_a]:lg:link-hover [&_blockquote]:font-serif [&_blockquote]:text-lg [&_blockquote]:italic [&_blockquote]:opacity-80 [&_blockquote]:xl:text-2xl [&_strong]:font-bold [&_ul]:list-inside [&_ul]:list-disc"
       innerHTML={md('text')}
+      label={t('heroIntroduction')}
       logo={
         <KitoWithLogo
           altKito={t('avatarKito')}
           altMomoneko={t('avatarMomoneko')}
         />
       }
+      secondaryLabel={t('heroAbout')}
     />
   );
 };

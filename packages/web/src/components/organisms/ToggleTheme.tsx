@@ -28,7 +28,7 @@ export const ToggleTheme: Component = () => {
       labelToLight={t('toLight')}
       ref={ref}
       themes={themes}
-      toggleTooltip="Toggle theme"
+      toggleTooltip={t('toggleTheme')}
     />
   );
 };
