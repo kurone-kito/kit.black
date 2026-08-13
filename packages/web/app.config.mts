@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { parse } from 'node:path';
 import { defineConfig } from '@solidjs/start/config';
-import { createSentryVitePlugins } from './sentryVitePlugin.mts';
+import { createSentryVitePlugins } from './sentryVitePlugin.mjs';
 import vite from './vite.config.mjs';
 
 /**

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createSentryVitePlugins } from './sentryVitePlugin.mts';
+import { createSentryVitePlugins } from './sentryVitePlugin.mjs';
 
 const { sentryVitePluginMock } = vi.hoisted(() => ({
   sentryVitePluginMock: vi.fn(() => [{ enforce: 'pre', name: 'sentry-vite' }]),
@@ -46,10 +46,13 @@ describe('createSentryVitePlugins', () => {
     expect(result).toEqual([{ enforce: 'pre', name: 'sentry-vite' }]);
   });
 
-  it('omits the release name and falls back to git auto-detection when GITHUB_SHA is absent', () => {
+  it('omits the release, org, and project options and falls back to the plugin defaults when only the token is set', () => {
     createSentryVitePlugins({ SENTRY_AUTH_TOKEN: 'token' });
-    expect(sentryVitePluginMock).toHaveBeenCalledWith(
-      expect.objectContaining({ release: undefined }),
-    );
+    expect(sentryVitePluginMock).toHaveBeenCalledWith({
+      authToken: 'token',
+      sourcemaps: {
+        filesToDeleteAfterUpload: ['.vinxi/**/*.map', 'dist/**/*.map'],
+      },
+    });
   });
 });

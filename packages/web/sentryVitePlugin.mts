@@ -1,4 +1,5 @@
 import { sentryVitePlugin } from '@sentry/vite-plugin';
+import type { Plugin } from 'vite';
 
 /** The subset of `process.env` the Sentry sourcemap upload reads. */
 export interface SentryVitePluginEnv {
@@ -6,18 +7,18 @@ export interface SentryVitePluginEnv {
    * The Sentry auth token. Skips the plugin entirely when empty or
    * undefined.
    */
-  readonly SENTRY_AUTH_TOKEN?: string;
+  readonly SENTRY_AUTH_TOKEN?: string | undefined;
   /** The Sentry organization slug. */
-  readonly SENTRY_ORG?: string;
+  readonly SENTRY_ORG?: string | undefined;
   /** The Sentry project slug. */
-  readonly SENTRY_PROJECT?: string;
+  readonly SENTRY_PROJECT?: string | undefined;
   /**
    * The commit SHA to key the Sentry release to, so scheduled rebuilds of
    * an unchanged commit group under the same release instead of piling up
    * new ones. Falls back to the plugin's own git-HEAD auto-detection when
    * absent (e.g. local builds).
    */
-  readonly GITHUB_SHA?: string;
+  readonly GITHUB_SHA?: string | undefined;
 }
 
 /**
@@ -37,13 +38,13 @@ export const createSentryVitePlugins = ({
   SENTRY_ORG: org,
   SENTRY_PROJECT: project,
   GITHUB_SHA: release,
-}: SentryVitePluginEnv) =>
+}: SentryVitePluginEnv): Plugin[] =>
   authToken
     ? sentryVitePlugin({
         authToken,
-        org,
-        project,
-        release: release ? { name: release } : undefined,
+        ...(org ? { org } : {}),
+        ...(project ? { project } : {}),
+        ...(release ? { release: { name: release } } : {}),
         sourcemaps: {
           // The build never publishes sourcemaps to Netlify: delete every
           // map this build produced, in both the vinxi per-router staging
