@@ -30,6 +30,7 @@ export const Hero: Component = () => {
           altMomoneko={t('avatarMomoneko')}
         />
       }
+      secondaryLabel={t('heroAbout')}
     />
   );
 };

@@ -9,6 +9,7 @@ const resources: Resources = {
   calendar:
     'The following live streaming schedule is automatically generated based on information extracted from the Calendar app eight times daily.',
   hamburgerMenu: 'Menu',
+  heroAbout: 'About Kuroné Kito',
   heroIntroduction: 'Kuroné Kito’s introduction',
   language: '🇬🇧',
   languageSelection: 'Language selection',

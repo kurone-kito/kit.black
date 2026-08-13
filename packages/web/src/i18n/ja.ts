@@ -9,6 +9,7 @@ const resources: Resources = {
   calendar:
     '以下の配信スケジュールは、カレンダー アプリから毎日 8 回抽出した情報に基づき、自動生成しております。',
   hamburgerMenu: 'メニュー',
+  heroAbout: '黒音キトについて',
   heroIntroduction: '黒音キトの自己紹介',
   language: '🇯🇵',
   languageSelection: '言語選択',

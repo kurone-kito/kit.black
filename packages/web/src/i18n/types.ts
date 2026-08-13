@@ -12,6 +12,7 @@ export type ResourcesKeys =
   | 'avatarMomoneko'
   | 'calendar'
   | 'hamburgerMenu'
+  | 'heroAbout'
   | 'heroIntroduction'
   | 'language'
   | 'languageSelection'

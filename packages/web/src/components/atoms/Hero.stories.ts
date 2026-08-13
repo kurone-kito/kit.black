@@ -8,6 +8,11 @@ type Target = typeof Hero;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { children: 'Children', label: 'Introduction', logo: 'Logo' },
+  args: {
+    children: 'Children',
+    label: 'Introduction',
+    logo: 'Logo',
+    secondaryLabel: 'About',
+  },
   component: Hero,
 } satisfies Meta<Target>;
