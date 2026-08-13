@@ -20,4 +20,12 @@ describe('IconContainer', () => {
     expect(icon).toHaveAttribute('aria-label', 'A named icon');
     expect(icon).not.toHaveAttribute('aria-hidden');
   });
+
+  it('treats a blank (empty or whitespace-only) label as decorative', () => {
+    const { container } = render(() => <IconContainer label="   " />);
+    const icon = container.querySelector('i');
+    expect(icon).toHaveAttribute('aria-hidden', 'true');
+    expect(icon).not.toHaveAttribute('role');
+    expect(icon).not.toHaveAttribute('aria-label');
+  });
 });
