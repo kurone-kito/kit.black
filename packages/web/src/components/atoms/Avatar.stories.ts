@@ -18,6 +18,7 @@ export default {
     class: '',
     id: 'Id',
     nextId: 'NextId',
+    nextLabel: 'Go to the next avatar',
     src: `https://placehold.jp/${rect.width}x${rect.height}.png` as const,
   },
   component: Avatar,

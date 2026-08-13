@@ -7,4 +7,7 @@ type Target = typeof KitoWithLogo;
 /** The default story for the component. */
 export const Default: StoryObj<Target> = {};
 
-export default { component: KitoWithLogo } satisfies Meta<Target>;
+export default {
+  args: { nextLabel: 'Go to the next avatar' },
+  component: KitoWithLogo,
+} satisfies Meta<Target>;

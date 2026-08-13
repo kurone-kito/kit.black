@@ -8,6 +8,15 @@ export interface HamburgerButtonProps {
   /** The CSS classes. */
   readonly class?: string | undefined;
 
+  /** The `id` of the element this control expands/collapses. */
+  readonly controls?: string | undefined;
+
+  /**
+   * Whether the controlled element is currently expanded.
+   * @default false
+   */
+  readonly expanded?: boolean | undefined;
+
   /** The accessible label for the toggle input. */
   readonly label: string;
 
@@ -25,7 +34,10 @@ export interface HamburgerButtonProps {
 export const HamburgerButton: Component<HamburgerButtonProps> = (props) => (
   <label class={twMerge('btn btn-ghost swap swap-rotate', props.class)}>
     <input
+      aria-controls={props.controls}
+      aria-expanded={props.expanded ?? false}
       aria-label={props.label}
+      checked={props.expanded ?? false}
       onClick={props.onClick}
       type="checkbox"
       value="expanded"

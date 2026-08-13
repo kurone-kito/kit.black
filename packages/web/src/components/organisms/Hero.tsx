@@ -28,6 +28,7 @@ export const Hero: Component = () => {
         <KitoWithLogo
           altKito={t('avatarKito')}
           altMomoneko={t('avatarMomoneko')}
+          nextLabel={t('avatarNext')}
         />
       }
       secondaryLabel={t('heroAbout')}

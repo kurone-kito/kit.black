@@ -8,6 +8,6 @@ type Target = typeof HamburgerButton;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { class: '', label: 'Menu' },
+  args: { class: '', controls: 'demo-menu', expanded: false, label: 'Menu' },
   component: HamburgerButton,
 } satisfies Meta<Target>;
