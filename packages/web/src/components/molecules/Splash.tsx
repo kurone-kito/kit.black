@@ -11,13 +11,20 @@ export interface SplashProps {
 
 /**
  * The splash component.
+ *
+ * `role="status"` is intentional, not decorative: the `splash-overlay`
+ * class in `app.css` only ever shows this section for a genuine
+ * ~3 s transient (or never at all, e.g. under
+ * `prefers-reduced-motion: reduce`), so a screen reader user who does
+ * encounter it is hearing an accurate, short-lived loading
+ * announcement rather than a misused live region over static content.
  * @param props The properties.
  * @returns The component.
  */
 export const Splash: Component<SplashProps> = (props) => (
   <section
     aria-label={props.label}
-    class="absolute h-[100lvh] w-[100lvw]"
+    class="splash-overlay absolute h-[100lvh] w-[100lvw]"
     role="status"
   >
     <div class="bg-base-300 relative z-50 flex h-[100lvh] items-center justify-center overflow-hidden">
