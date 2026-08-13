@@ -21,7 +21,7 @@
     "prebuild:yaml": "js-yaml src/constants.yaml > src/constants.json",
     "build": "vinxi build",
     "build:storybook": "storybook build",
-    "postbuild": "cp src/data.json dist/data.json && rimraf -g \"dist/**/*.map\"",
+    "postbuild": "cp src/data.json dist/data.json && rimraf -g \"dist/**/*.map\" && node scripts/generate-csp-headers.mjs",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi dist node_modules/.cache \"src/*.json\" \"public/site.webmanifest\" storybook-static",
     "serve": "serve dist",
     "prestart": "pnpm run prebuild",
