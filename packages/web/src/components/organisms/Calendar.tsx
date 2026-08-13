@@ -32,21 +32,29 @@ export const Calendar: Component = () => {
    * so SolidStart SSR and the static build never evaluate it.
    */
   const handleDownload = async (): Promise<void> => {
-    const { snapdom } = await import('@zumer/snapdom');
-    const blob = await snapdom.toBlob(calendarRef, {
-      embedFonts: true,
-      scale: 2,
-      type: 'webp',
-    });
-    const filename = calendarDownloadFilename(since, until, blob.type);
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.download = filename;
-    anchor.href = url;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    let url: string | undefined;
+    try {
+      const { snapdom } = await import('@zumer/snapdom');
+      const blob = await snapdom.toBlob(calendarRef, {
+        embedFonts: true,
+        scale: 2,
+        type: 'webp',
+      });
+      const filename = calendarDownloadFilename(since, until, blob.type);
+      url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.download = filename;
+      anchor.href = url;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch (error) {
+      console.error('Failed to download the calendar image.', error);
+    } finally {
+      if (url) {
+        URL.revokeObjectURL(url);
+      }
+    }
   };
 
   return (
