@@ -38,6 +38,14 @@ export interface EventDetailRow extends Pick<EventDetail, 'time' | 'type'> {
    */
   readonly dateSpan?: number | undefined;
 
+  /**
+   * Whether the date is a Japanese public holiday.
+   *
+   * `true` only on a holiday; omitted entirely otherwise, keeping
+   * `data.json` minimal and diff-friendly.
+   */
+  readonly holiday?: true | undefined;
+
   /** The week. */
   readonly week?: Week | undefined;
 }
