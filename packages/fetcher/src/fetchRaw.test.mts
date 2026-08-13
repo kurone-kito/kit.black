@@ -86,17 +86,23 @@ describe('fetchAllRawEventsFactory', () => {
     );
   });
 
-  it('passes the calendar id derived from the matching ID_<TYPE> env var', async () => {
+  it('passes the calendar id derived from the matching ID_<TYPE> env var for each event type', async () => {
     const { client, list } = stubClient([]);
     const fetchAllRawEvents = fetchAllRawEventsFactory(client);
     const since = new Date('2026-01-01T00:00:00+09:00');
     const until = new Date('2026-01-08T00:00:00+09:00');
     await fetchAllRawEvents([since, until]);
-    expect(list).toHaveBeenCalledWith(
-      expect.objectContaining({
-        calendarId: 'c_[id-others]@group.calendar.google.com',
-      }),
-    );
+    // Assert all three calls individually, in the fixed `eventTypes`
+    // order the factory awaits them in (`others`, `release`,
+    // `streaming`) -- asserting only one call (as a previous revision
+    // did) would still pass if the calendar ids were reused or swapped
+    // across types, since every call in that case would satisfy a
+    // single `toHaveBeenCalledWith` check.
+    expect(list.mock.calls.map(([params]) => params.calendarId)).toEqual([
+      'c_[id-others]@group.calendar.google.com',
+      'c_[id-release]@group.calendar.google.com',
+      'c_[id-streaming]@group.calendar.google.com',
+    ]);
   });
 
   it('returns an empty array for a type whose response has no items', async () => {
