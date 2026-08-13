@@ -42,6 +42,15 @@ export const createVacationEventsFactory = (since: DateParsable) => {
 };
 
 /**
+ * Get the label used to identify an event in a skip warning.
+ * @param raw The raw event.
+ * @returns The event's trimmed summary, falling back to its id, or
+ * `'(unknown)'` if neither is available.
+ */
+const labelOf = (raw: calendar_v3.Schema$Event): string =>
+  raw.summary?.trim() || raw.id || '(unknown)';
+
+/**
  * create thee function that converts the raw event to the event.
  * @param type The type of the event.
  * @returns The function that converts the raw event to the event.
@@ -52,28 +61,38 @@ export const toEventFactory =
    * Convert the raw event to the event.
    *
    * `calendar_v3.Schema$Event.start` may have neither `dateTime` nor
-   * `date` set. Rather than throwing and failing the entire batch on
-   * one malformed event, this skips the event: it logs a warning to
-   * `stderr` naming the event so the drop is visible in the build log,
-   * and returns `undefined` so the caller can filter it out. A skipped
+   * `date` set, and a timed event's `end` is just as optional. Rather
+   * than throwing and failing the entire batch on one malformed event,
+   * this skips the event in either case: it logs a warning to `stderr`
+   * naming the event so the drop is visible in the build log, and
+   * returns `undefined` so the caller can filter it out. A skipped
    * event's date is no longer represented, so
    * {@link createVacationEventsFactory} may synthesize a vacation-day
    * placeholder for that date instead -- an accepted side effect of
    * skipping rather than a separate bug.
    * @param raw The raw event.
    * @returns The event, or `undefined` if the event has no resolvable
-   * start time.
+   * start time, or is a timed event with no resolvable end time.
    */
   (raw: calendar_v3.Schema$Event): EventDetail | undefined => {
     const { end, start, summary } = raw;
     const { dateTime, date } = start ?? {};
     const epoch = new Date((dateTime || date) ?? '').getTime();
     if (Number.isNaN(epoch)) {
-      const label = summary?.trim() || raw.id || '(unknown)';
-      console.warn(`Skipping event with no resolvable start time: ${label}`);
+      console.warn(
+        `Skipping event with no resolvable start time: ${labelOf(raw)}`,
+      );
       return undefined;
     }
-    const time = date ? undefined : formatTimeRange(epoch, end?.dateTime ?? '');
+    const endEpoch = date ? undefined : new Date(end?.dateTime ?? '').getTime();
+    if (endEpoch !== undefined && Number.isNaN(endEpoch)) {
+      console.warn(
+        `Skipping event with no resolvable end time: ${labelOf(raw)}`,
+      );
+      return undefined;
+    }
+    const time =
+      endEpoch === undefined ? undefined : formatTimeRange(epoch, endEpoch);
     return { date: formatDate(epoch), epoch, time, title: summary ?? '', type };
   };
 
