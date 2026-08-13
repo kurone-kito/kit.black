@@ -64,4 +64,17 @@ describe('toEventFactory', () => {
       expect.stringContaining('empty-summary-event'),
     );
   });
+
+  it('falls back to the event id when summary is whitespace-only', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      id: 'whitespace-summary-event',
+      start: {},
+      summary: '   ',
+    };
+    toEventFactory('others')(raw);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('whitespace-summary-event'),
+    );
+  });
 });
