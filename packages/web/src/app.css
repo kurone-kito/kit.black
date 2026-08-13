@@ -77,11 +77,12 @@
 /*
  * The splash overlay fails closed: it stays hidden unless the
  * `splash-visible` animation is actively running, so a visitor gets
- * page content whenever the animation cannot run at all (stripped
- * CSS, an unsupported browser, or a `prefers-reduced-motion: reduce`
- * request below) rather than a permanently stuck overlay -- with or
- * without JavaScript. The 3s duration matches `DURATION` in
- * `organisms/Splash.tsx`; keep both in sync if either changes.
+ * page content whenever the animation cannot run at all (an
+ * unsupported browser, CSS animations disabled, or a
+ * `prefers-reduced-motion: reduce` request below) rather than a
+ * permanently stuck overlay -- with or without JavaScript. Unlike the
+ * former JS-timed version, this CSS owns the full 3s window itself;
+ * there is no separate JS constant to keep in sync anymore.
  */
 .splash-overlay {
   visibility: hidden;
