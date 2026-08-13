@@ -2,6 +2,7 @@ import type { Resources } from './types.js';
 
 const resources: Resources = {
   activities: '黒音キトの主な活動内容',
+  activitiesCarousel: '黒音キトの活動写真',
   avatarKito: '黒音キトの標準アバター',
   avatarMomoneko: 'VR 用アバター“ももねこちゃん”改変',
   author: '黒音キト',

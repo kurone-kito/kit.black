@@ -6,6 +6,7 @@ export type Resources = ReadonlyRecord<ResourcesKeys, string>;
 /** Type definition for the resources keys. */
 export type ResourcesKeys =
   | 'activities'
+  | 'activitiesCarousel'
   | 'author'
   | 'avatarKito'
   | 'avatarMomoneko'
