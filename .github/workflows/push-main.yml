@@ -102,6 +102,7 @@ jobs:
           ID_STREAMING: ${{ secrets.ID_STREAMING }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
           TZ: Asia/Tokyo
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
         name: Run the build
         run: pnpm run build
       - env:
