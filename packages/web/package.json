@@ -20,7 +20,7 @@
     "prebuild:yaml": "js-yaml src/constants.yaml > src/constants.json",
     "build": "vinxi build",
     "build:storybook": "storybook build",
-    "postbuild": "cp src/data.json dist/data.json",
+    "postbuild": "cp src/data.json dist/data.json && rimraf -g \"dist/**/*.map\"",
     "clean": "rimraf -g \"*.tgz\" \"*.tsbuildinfo\" .output .vinxi dist node_modules/.cache \"src/*.json\" storybook-static",
     "serve": "serve dist",
     "prestart": "pnpm run prebuild",
@@ -46,6 +46,7 @@
   "devDependencies": {
     "@kurone-kito/kit.black-fetcher": "workspace:^",
     "@kurone-kito/typescript-config": "^0.17.2",
+    "@sentry/vite-plugin": "^5.4.0",
     "@solidjs/testing-library": "^0.8.10",
     "@storybook/addon-essentials": "^8.5.3",
     "@storybook/addon-interactions": "^8.5.3",
