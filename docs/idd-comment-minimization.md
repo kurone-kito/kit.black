@@ -1,3 +1,10 @@
+---
+type: reference
+title: IDD Comment Minimization
+description: Defines the live status digest contract and the safe procedure for minimizing completed review feedback and stale operational markers after merge.
+tags: [comment-minimization, cleanup]
+---
+
 # IDD Comment Minimization
 
 <!-- cspell:words AAAAB Unminimize Wpaqs unminimized -->
@@ -65,13 +72,13 @@ first. In adopter repositories, see the [Fallback GraphQL](#fallback-graphql)
 section unless the helper scripts were explicitly installed.
 
 ```sh
-node scripts/live-status-digest.mjs --issue \
+node scripts/live-status-digest.mjs --issue <issue-number> --dry-run \
   --phase "<phase>" \
   --claim "<agent-id> / <claim-id>" \
   --branch "<branch-name>" \
   --open-blockers "<blocker-summary>" \
   --next-action "<next-action>" \
-  --authoritative-by "<trusted-evidence>" < issue-number > --dry-run
+  --authoritative-by "<trusted-evidence>"
 ```
 
 Use `--pr <pr-number>` for pull request digests. If `--last-checked`
@@ -82,15 +89,14 @@ stable JSON by default; add `--format table` for terminal inspection or
 Apply mode is explicit and claim-checked:
 
 ```sh
-node scripts/live-status-digest.mjs --issue \
-  --claim-issue \
-  "<phase>" \
+node scripts/live-status-digest.mjs --issue <issue-number> --apply \
+  --claim-issue <issue-number> --claim-id <claim-id> \
+  --phase "<phase>" \
   --claim "<agent-id> / <claim-id>" \
   --branch "<branch-name>" \
   --open-blockers "<blocker-summary>" \
   --next-action "<next-action>" \
-  --authoritative-by "<trusted-evidence>" < issue-number > --apply \
-  < issue-number > --claim-id < claim-id > --phase
+  --authoritative-by "<trusted-evidence>"
 ```
 
 During ordinary IDD execution, pass the active issue and claim id so the
@@ -137,7 +143,7 @@ on `pull_request_target.closed` events filtered to `merged == true`.
 The workflow invokes the helper:
 
 ```sh
-node scripts/audit-pr-cleanup.mjs --pr --skip-claim-check --format json < N > --apply
+node scripts/audit-pr-cleanup.mjs --pr <N> --apply --skip-claim-check --format json
 ```
 
 It then parses the report and posts the canonical
@@ -145,12 +151,22 @@ It then parses the report and posts the canonical
 PR receives evidence within a few minutes even when the agent did
 not run F4 manually.
 
-The template (`idd-template/`) does **not** ship this workflow
-because `scripts/audit-pr-cleanup.mjs` is part of the optional
-helper bundle and is not present in default instructions-only
-installs. Adopters who install the helper can copy the source
-workflow file as-is; permissions required are
-`contents: read`, `issues: write`, and `pull-requests: write`, plus
+The template (`idd-template/`) ships a generic counterpart at
+`idd-template/.github/workflows/post-merge-cleanup.yml`, part of the
+core file set `idd-onboard.mjs --import` copies automatically.
+Earlier template versions omitted this file because
+`scripts/audit-pr-cleanup.mjs` is part of the optional `vendored-node`
+helper bundle and is not present in default `instructions-only`
+installs, so a literal copy would only ever work for one profile. The
+template copy instead resolves the cleanup-audit invocation through
+the repository's configured `helperRuntime.profile` (see
+[Helper Runtime Profiles](idd-helper-scripts.md#helper-runtime-profiles)):
+it runs the equivalent invocation under `vendored-node`,
+`package-manager`, and `ephemeral-npx`, and skips the audit and
+evidence-comment steps entirely under `instructions-only` (or when no
+profile is configured), where no runnable helper command exists for
+any profile. Permissions required are `contents: read`,
+`issues: write`, and `pull-requests: write`, plus
 `pull_request_target` (not `pull_request`) so that fork PRs can
 post comments under a writeable `GITHUB_TOKEN`.
 
@@ -159,18 +175,22 @@ canonical, mandatory contract. The server-side workflow is a
 backstop, not a replacement: same helper, same candidate rules,
 same evidence comment shape, non-blocking on errors. Double-posting is
 prevented by the cleanup-evidence record itself, not by Actions
-concurrency: the workflow skips when any `<!-- idd-cleanup-evidence:`
-comment already exists, and the agent F4 step skips its own post when a
-prior success record is already present — including the one the workflow
-posted. The workflow's PR-keyed `concurrency` group only serializes
-workflow runs against each other; it does not gate the agent's local F4.
+concurrency: the workflow skips when a trusted-author
+`<!-- idd-cleanup-evidence:` comment already exists (posted by
+`github-actions[bot]` or a configured `trustedMarkerActors` login — an
+untrusted commenter's marker-prefixed comment never counts), and the
+agent F4 step skips its own post under the same trusted-author rule when
+a prior success record is already present — including the one the
+workflow posted. The workflow's PR-keyed `concurrency` group only
+serializes workflow runs against each other; it does not gate the
+agent's local F4.
 
 ## GitHub mechanism
 
 GitHub GraphQL exposes `minimizeComment`:
 
 ```graphql
-mutation ($id: ID!, $classifier: ReportedContentClassifiers!) {
+mutation($id: ID!, $classifier: ReportedContentClassifiers!) {
   minimizeComment(input: { subjectId: $id, classifier: $classifier }) {
     minimizedComment {
       __typename
@@ -254,6 +274,7 @@ wait, or review-currency checks. Candidate prefixes are:
 - `advisory-wait:`
 - `advisory-wait-recovery:`
 - `<!-- advisory-wait:`
+- `advisory-reroll:`
 
 Always skip candidates when any of these are true:
 
@@ -274,7 +295,7 @@ a dry-run. In adopter repositories, see the
 were explicitly installed.
 
 ```sh
-node scripts/audit-pr-cleanup.mjs --pr --format table < pr-number > --dry-run
+node scripts/audit-pr-cleanup.mjs --pr <pr-number> --dry-run --format table
 ```
 
 The helper defaults to JSON output for stable machine inspection; use
@@ -308,9 +329,8 @@ operational marker author, or a non-merged PR.
 Apply mode is explicit:
 
 ```sh
-node scripts/audit-pr-cleanup.mjs --pr \
-  --claim-issue table < pr-number > --apply \
-  < issue-number > --claim-id < claim-id > --format
+node scripts/audit-pr-cleanup.mjs --pr <pr-number> --apply \
+  --claim-issue <issue-number> --claim-id <claim-id> --format table
 ```
 
 During an IDD F4 cleanup, pass the active issue and claim id. The helper

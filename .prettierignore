@@ -13,3 +13,23 @@ pnpm-lock.yaml
 # Vendored Claude Code skill bundles (re-synced verbatim from upstream;
 # reformatting on every re-sync makes the diff noisy for no benefit)
 .claude/skills/
+
+# Vendored IDD workflow surfaces (re-synced verbatim from
+# kurone-kito/idd-skill; prettier-plugin-sh corrupts fenced ```sh
+# argument placeholders in these files, so they are excluded from
+# Prettier entirely rather than re-corrupted on every format run).
+# docs/idd-policy.md is locally authored and stays Prettier-formatted,
+# so it is re-included after the broader docs/idd-*.md ignore below.
+.github/instructions/
+docs/idd-*.md
+!docs/idd-policy.md
+docs/concepts.md
+docs/customization.md
+docs/getting-started.md
+docs/index.md
+docs/permissions.md
+docs/policy-constants.md
+docs/reference.md
+docs/onboarding/
+profiles/
+.githooks/

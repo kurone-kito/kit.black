@@ -1,3 +1,10 @@
+---
+type: concept
+title: Core IDD Concepts
+description: Introduces the loop-engineering vocabulary and mental model behind the IDD phase instructions before diving into phase-by-phase rules.
+tags: [concepts, mental-model]
+---
+
 # Core IDD Concepts
 
 Use this page when you want the mental model before reading the phase
@@ -8,6 +15,35 @@ without replacing the authoritative instructions in
 For the shortest procedural path, start with
 [Getting started](getting-started.md). For phase routing and file
 ownership, use the [IDD workflow guide](idd-workflow.md).
+
+## IDD as Loop Engineering
+
+**Loop engineering** is the practice of designing the system that runs
+an agent through an act -> observe -> decide -> repeat cycle, instead
+of hand-prompting each step: its **trigger**, its **topology** (single-
+or multi-agent orchestration), its **verifier**, and its **stop
+rules**. Anthropic frames the same idea as **agentic loops**; IDD is a
+concrete, GitHub-native implementation of it.
+
+| Loop element | IDD's implementation                                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Trigger      | Discover picks a ready roadmap or orphan issue without silently widening scope.                                         |
+| Topology     | The phase pipeline, roadmap decomposition into sub-issues, and worktree-isolated parallel agents.                       |
+| Verifier     | CI gates plus advisory bots (Copilot / CodeRabbit / Codex), review triage, and disposition / unresolved-thread gates.   |
+| Stop rules   | Merge gates recheck claim, freshness, CI, advisory, and review state; the issue being closed is the terminal condition. |
+
+Looping harder is not automatically looping better: assuming enough
+iterations will eventually converge on a correct result ("loopmaxxing")
+is a known failure mode, not a property that emerges for free. IDD
+avoids it by pairing every loop turn with the verifier and stop-rule
+gates above, and by recording claims, review snapshots, decisions, and
+cleanup markers as the durable issue-comment state described throughout
+this page — so progress is auditable rather than assumed.
+
+See [Discover](../.github/instructions/idd-discover.instructions.md),
+[review triage](../.github/instructions/idd-review-triage.instructions.md),
+and [merge execution](../.github/instructions/idd-merge.instructions.md)
+for the phase files behind this table.
 
 ## Claims and Heartbeats
 
@@ -106,6 +142,8 @@ status digest contract, cleanup policy, and helper notes.
 
 ## Where to Read Next
 
+- [IDD as Loop Engineering](#idd-as-loop-engineering) for the
+  trigger/topology/verifier/stop-rules framing this page opens with.
 - [Getting started](getting-started.md) for the first adoption path.
 - [IDD workflow guide](idd-workflow.md) for routing and phase ownership.
 - [Permissions and threat model](permissions.md) before granting
