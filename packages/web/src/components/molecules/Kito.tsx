@@ -17,6 +17,9 @@ export interface KitoProps {
 
   /** The ID of the element. */
   readonly id?: string;
+
+  /** The accessible label for the link between the two avatars. */
+  readonly nextLabel?: string;
 }
 
 /** The IDs of the elements. */
@@ -42,6 +45,7 @@ export const Kito: Component<KitoProps> = (props) => {
         height={2403}
         id={kitoId}
         nextId={momonekoId}
+        nextLabel={props.nextLabel}
         src={avatarKito}
         width={1242}
       />
@@ -52,6 +56,7 @@ export const Kito: Component<KitoProps> = (props) => {
         height={988}
         id={momonekoId}
         nextId={kitoId}
+        nextLabel={props.nextLabel}
         src={avatarMomoneko}
         width={511}
       />

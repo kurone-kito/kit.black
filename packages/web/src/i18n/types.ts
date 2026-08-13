@@ -10,6 +10,7 @@ export type ResourcesKeys =
   | 'author'
   | 'avatarKito'
   | 'avatarMomoneko'
+  | 'avatarNext'
   | 'calendar'
   | 'hamburgerMenu'
   | 'heroAbout'

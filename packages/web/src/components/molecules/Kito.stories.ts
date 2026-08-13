@@ -8,6 +8,6 @@ type Target = typeof Kito;
 export const Default: StoryObj<Target> = {};
 
 export default {
-  args: { class: 'w-full', id: 'id' },
+  args: { class: 'w-full', id: 'id', nextLabel: 'Go to the next avatar' },
   component: Kito,
 } satisfies Meta<Target>;

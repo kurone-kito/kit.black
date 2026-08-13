@@ -5,6 +5,7 @@ const resources: Resources = {
   activitiesCarousel: 'Kuroné Kito’s activity photos',
   avatarKito: 'Kuroné Kito’s standard avatar',
   avatarMomoneko: '“Momoneko-chan” modified avatar for VR',
+  avatarNext: 'Go to the next avatar',
   author: 'Kuroné Kito',
   calendar:
     'The following live streaming schedule is automatically generated based on information extracted from the Calendar app eight times daily.',

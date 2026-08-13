@@ -19,6 +19,6 @@ export const KitoWithLogo: Component<KitoWithLogoProps> = (props) => (
       id="hero"
       {...props}
     />
-    <Logo class="-ml-[36%] h-[50%] w-auto opacity-95" role="banner" />
+    <Logo class="-ml-[36%] h-[50%] w-auto opacity-95" />
   </div>
 );

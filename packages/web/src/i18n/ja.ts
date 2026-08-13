@@ -5,6 +5,7 @@ const resources: Resources = {
   activitiesCarousel: '黒音キトの活動写真',
   avatarKito: '黒音キトの標準アバター',
   avatarMomoneko: 'VR 用アバター“ももねこちゃん”改変',
+  avatarNext: '次のアバターへ移動',
   author: '黒音キト',
   calendar:
     '以下の配信スケジュールは、カレンダー アプリから毎日 8 回抽出した情報に基づき、自動生成しております。',

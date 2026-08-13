@@ -20,11 +20,7 @@ export interface HeaderProps {
 export const Header: Component<HeaderProps> = (props) => (
   <header class="flex items-end gap-4 drop-shadow lg:basis-4/12 lg:flex-col-reverse">
     <div class="relative w-full basis-3/12 sm:basis-4/12">
-      <Logo
-        class="lg:text-stroke-3 max-md:opacity-80"
-        level={3}
-        role="banner"
-      />
+      <Logo class="lg:text-stroke-3 max-md:opacity-80" level={3} />
       <Logo aria-hidden class="absolute top-0 w-full max-md:hidden" level={3} />
     </div>
     <div class="text-stroke-3">

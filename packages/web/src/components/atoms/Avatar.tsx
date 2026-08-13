@@ -12,6 +12,9 @@ export interface AvatarProps
 
   /** The ID of the next element. */
   readonly nextId: string;
+
+  /** The accessible label for the link to the next element. */
+  readonly nextLabel?: string | undefined;
 }
 
 /**
@@ -34,6 +37,7 @@ export const Avatar: Component<AvatarProps> = (props) => (
       width={props.width}
     />
     <a
+      aria-label={props.nextLabel}
       href={`#${props.nextId}`}
       class={twMerge(
         'absolute left-0 right-0 mx-auto cursor-grab max-md:hidden',
