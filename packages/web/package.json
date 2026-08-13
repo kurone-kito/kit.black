@@ -46,6 +46,7 @@
   "devDependencies": {
     "@kurone-kito/kit.black-fetcher": "workspace:^",
     "@kurone-kito/typescript-config": "^0.17.2",
+    "@sentry/vite-plugin": "^5.4.0",
     "@solidjs/testing-library": "^0.8.10",
     "@storybook/addon-essentials": "^8.5.3",
     "@storybook/addon-interactions": "^8.5.3",

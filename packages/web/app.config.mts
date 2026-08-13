@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { parse } from 'node:path';
 import { defineConfig } from '@solidjs/start/config';
+import { createSentryVitePlugins } from './sentryVitePlugin.mts';
 import vite from './vite.config.mjs';
 
 /**
@@ -35,5 +36,19 @@ export default defineConfig({
     prerender: { autoSubfolderIndex: false, routes: [] },
     preset: 'netlify-static',
   },
-  vite,
+  // The client router is the only one shipped to production behind
+  // `netlify-static` (the `server` / `server-function` routers only run
+  // at prerender time), so the Sentry sourcemap-upload plugin and the
+  // sourcemap generation it needs are scoped to that router alone.
+  vite: ({ router }) =>
+    router === 'client'
+      ? {
+          ...vite,
+          build: { sourcemap: Boolean(process.env['SENTRY_AUTH_TOKEN']) },
+          plugins: [
+            ...(vite.plugins ?? []),
+            ...createSentryVitePlugins(process.env),
+          ],
+        }
+      : vite,
 });

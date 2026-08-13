@@ -101,6 +101,9 @@ jobs:
           ID_RELEASE: ${{ secrets.ID_RELEASE }}
           ID_STREAMING: ${{ secrets.ID_STREAMING }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
           TZ: Asia/Tokyo
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
         name: Run the build

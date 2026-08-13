@@ -1,0 +1,55 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSentryVitePlugins } from './sentryVitePlugin.mts';
+
+const { sentryVitePluginMock } = vi.hoisted(() => ({
+  sentryVitePluginMock: vi.fn(() => [{ enforce: 'pre', name: 'sentry-vite' }]),
+}));
+
+vi.mock('@sentry/vite-plugin', () => ({
+  sentryVitePlugin: sentryVitePluginMock,
+}));
+
+beforeEach(() => {
+  sentryVitePluginMock.mockClear();
+});
+
+describe('createSentryVitePlugins', () => {
+  it('returns no plugins and does not call the upload plugin when the token is undefined', () => {
+    const result = createSentryVitePlugins({ SENTRY_AUTH_TOKEN: undefined });
+    expect(result).toEqual([]);
+    expect(sentryVitePluginMock).not.toHaveBeenCalled();
+  });
+
+  it('returns no plugins and does not call the upload plugin when the token is empty', () => {
+    const result = createSentryVitePlugins({ SENTRY_AUTH_TOKEN: '' });
+    expect(result).toEqual([]);
+    expect(sentryVitePluginMock).not.toHaveBeenCalled();
+  });
+
+  it('activates the upload plugin with the expected options when the token is set', () => {
+    const result = createSentryVitePlugins({
+      GITHUB_SHA: 'abc123',
+      SENTRY_AUTH_TOKEN: 'token',
+      SENTRY_ORG: 'kurone-kito',
+      SENTRY_PROJECT: 'kit-black',
+    });
+    expect(sentryVitePluginMock).toHaveBeenCalledTimes(1);
+    expect(sentryVitePluginMock).toHaveBeenCalledWith({
+      authToken: 'token',
+      org: 'kurone-kito',
+      project: 'kit-black',
+      release: { name: 'abc123' },
+      sourcemaps: {
+        filesToDeleteAfterUpload: ['.vinxi/**/*.map', 'dist/**/*.map'],
+      },
+    });
+    expect(result).toEqual([{ enforce: 'pre', name: 'sentry-vite' }]);
+  });
+
+  it('omits the release name and falls back to git auto-detection when GITHUB_SHA is absent', () => {
+    createSentryVitePlugins({ SENTRY_AUTH_TOKEN: 'token' });
+    expect(sentryVitePluginMock).toHaveBeenCalledWith(
+      expect.objectContaining({ release: undefined }),
+    );
+  });
+});
