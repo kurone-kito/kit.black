@@ -66,6 +66,29 @@ The PR phases keep an advisory review step. In practice this repository
 also receives GitHub Copilot and CodeRabbit reviews; a missing advisory
 review is fail-safe via the generation timeout.
 
+**Advisory bot identities** (`advisoryWait.primaryBotLogin`,
+`advisoryBotLogins`, set in #126):
+
+- **Primary advisory bot**: `copilot` (bare login; matches the
+  distributed default).
+- **Ack-only classifiable bots** (`advisoryBotLogins`):
+  `coderabbitai[bot]` and `chatgpt-codex-connector[bot]` — both observed
+  on this repository's PRs. Copilot is deliberately excluded from this
+  list: it is the gating primary, not an ack-only classifiable bot.
+- **Secondary advisory bot**: unconfigured. `coderabbitai` was
+  considered but is not a requestable reviewer on this
+  repository — `gh api repos/{owner}/{repo}/collaborators/coderabbitai`
+  returns `404` (only `kurone-kito` is a collaborator), and CodeRabbit
+  reviews via GitHub App install rather than a request event. An inert
+  `secondaryBotLogin` would make the advisory-wait path look like it has
+  a fallback it does not have, so the key stays unset.
+
+**Advisory-convergence scope** (`advisoryWait.convergenceScope`): set to
+`idd-claimed` in #126. The distributed default is `all-prs`; this
+repository runs Dependabot, so `idd-claimed` reports claimless PRs as
+`not_applicable` instead of requiring Copilot convergence or a
+maintainer waiver on every dependency-bump PR.
+
 ## Review-Thread Resolution Policy
 
 **Policy**: `fast-agent-resolve`
@@ -98,6 +121,44 @@ or advisory feedback.
 > would fail the build). IDD PRs now carry real build/lint/test CI
 > signal in addition to lint + test run locally in the worktree
 > (pre-push-validate), CodeQL, Copilot, and CodeRabbit.
+
+## Role Labels
+
+**Policy** (`labels`, set in #126): `roadmapLabelName: roadmap`,
+`blockedByHumanLabelName: status:blocked-by-human`,
+`needsDecisionLabelName: status:needs-decision` — all pinned to their
+distributed defaults, recorded explicitly rather than left implicit.
+
+## Discover Concurrency Tuning
+
+**Selection desync** (`discover.selectionDesync`, set in #126):
+`session-offset`. Spreads concurrent autopilot sessions across an A4
+Step 2 same-score tie band by a per-session offset, cutting claim races
+between parallel sessions that would otherwise all pick the
+lowest-numbered candidate.
+
+## Merge-Gate Solo-CODEOWNER Fallback
+
+**Policy** (`mergeGate.soloCodeownerAdminFallback`, set in #126):
+`auto-admin-retry` (the distributed default). This repository has no
+`CODEOWNERS`, so the key is currently inert; it is recorded so the
+behavior is explicit if `CODEOWNERS` is ever added.
+
+## External-Check Waivers
+
+**Policy** (`ciGate.externalChecks.waivable`,
+`ciGate.externalCheckWaivers`, set in #126): `idd-advisory-convergence`
+(exact match) is waivable; waivers require `maintainer-authorized`
+mode, `owners-and-maintainers-only` authority, and expire after
+`PT24H` (24 h). This is the escape hatch that keeps the
+`idd-advisory-convergence` required check (once #129 registers it)
+from being unwaivable if the check gets stuck. For a claimless PR (e.g.
+Dependabot), a maintainer can bind a waiver to the sentinel claim-id
+`none` via `scripts/external-check-waiver.mjs --claimless` once #124
+vendors the helper bundle.
+
+`ciGate.trustEmptyProtectionReads` intentionally stays unset (fail-closed
+default).
 
 ## Issue-Author Approval Gate
 
