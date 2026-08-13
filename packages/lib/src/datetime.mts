@@ -13,6 +13,17 @@ export const WEEKDATES = 7;
  * The single time zone this module's scheduling logic is anchored to.
  * Every formatter and every date computation below shares this constant
  * so the zone is never duplicated as a second, driftable literal.
+ *
+ * Known, accepted limitation: `TIMEZONE` observed daylight-saving time
+ * from 1948 through 1951, and used a non-`HH:MM` local-mean-time offset
+ * (`+09:18:59`) before 1888, when Japan adopted a standard zone. Neither
+ * historical period is special-cased below, so `truncateTime` throws on
+ * a pre-1888 instant and `plusDate` briefly loses calendar-day alignment
+ * across the 1948-1951 transitions. This is out of scope: every real
+ * caller in this monorepo (`packages/fetcher/src/bin.mts`,
+ * `packages/fetcher/src/parseEvent.mts`,
+ * `packages/web/src/components/organisms/Calendar.tsx`) always passes
+ * the current date, never a historical one.
  */
 export const TIMEZONE = 'Asia/Tokyo';
 
@@ -110,16 +121,16 @@ export const formatWeek = (date: DateParsable): Week =>
   weekFormatter.format(new Date(date)).toLowerCase() as Week;
 
 /**
- * Format the date.
+ * Format a time range.
  *
  * The `翌` (next-day) marker compares `TIMEZONE` calendar-day keys, not
  * host-local day-of-month: two instants in different months that share
  * the same day-of-month (for example July 5 and August 5) are correctly
  * treated as different days, which a bare day-of-month comparison would
  * have missed.
- * @param from The date to format.
- * @param to The date to format.
- * @returns The formatted date.
+ * @param from The start of the range to format.
+ * @param to The end of the range to format.
+ * @returns The formatted time range.
  */
 export const formatTimeRange = (
   from: DateParsable,
@@ -132,15 +143,17 @@ export const formatTimeRange = (
 };
 
 /**
- * Get the date obtained by adding the specified date.
+ * Get the date obtained by adding the specified number of days.
  *
- * `TIMEZONE` observes no daylight-saving transitions, so one calendar
- * day is always exactly 86,400,000 ms; adding whole days as milliseconds
- * is therefore equivalent to `TIMEZONE` calendar-day arithmetic for any
- * input instant, regardless of the host process's own time zone.
+ * `TIMEZONE` has observed no daylight-saving transitions since 1951, so
+ * one calendar day is exactly 86,400,000 ms for every instant any real
+ * caller in this monorepo passes (see the historical-limitation note on
+ * `TIMEZONE`); adding whole days as milliseconds is equivalent to
+ * `TIMEZONE` calendar-day arithmetic for those instants, regardless of
+ * the host process's own time zone.
  * @param date The date to add.
  * @param days The days to add.
- * @returns The date obtained by adding the specified date.
+ * @returns The date obtained by adding the specified number of days.
  */
 export const plusDate = (date: DateParsable, days: number): Date =>
   new Date(new Date(date).getTime() + days * 86_400_000);
@@ -152,7 +165,10 @@ export const plusDate = (date: DateParsable, days: number): Date =>
  * Unlike the previous host-local implementation, an unparsable `date`
  * now throws a `RangeError` (via `Intl.DateTimeFormat`) instead of
  * silently producing an `Invalid Date`, so a malformed schedule input
- * fails loudly rather than propagating a `NaN` instant.
+ * fails loudly rather than propagating a `NaN` instant. A pre-1888
+ * `date` also throws (see the historical-limitation note on
+ * `TIMEZONE`), since Japan's local-mean-time offset before that year
+ * cannot be expressed as the `±HH:MM` this function builds.
  * @param date The date to truncate.
  * @returns The truncated date.
  */
