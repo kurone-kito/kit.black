@@ -48,6 +48,15 @@ describe('formatTimeRange', () => {
     ],
     [new Date('2021-08-10T11:45:14.191Z'), 1_628_682_314_191, '20:45〜翌20:45'],
     [1_628_595_914_191, '2021-08-11T11:45:14.191Z', '20:45〜翌20:45'],
+    // Cross-month, same day-of-month: a host-local `getDate()` comparison
+    // (the pre-fix implementation) would have read both as day "5" and
+    // missed the 翌 marker despite these instants being 31 days apart.
+    // Comparing JST calendar-day keys instead gets this right.
+    [
+      '2021-07-05T11:45:14.191Z',
+      new Date('2021-08-05T11:45:14.191Z'),
+      '20:45〜翌20:45',
+    ],
   ])('%s, %s -> "%s"', (from, to, expected) =>
     expect(formatTimeRange(from, to)).toBe(expected),
   );
@@ -149,7 +158,11 @@ describe('time zone independence', () => {
   const originalTz = process.env.TZ;
 
   afterEach(() => {
-    process.env.TZ = originalTz;
+    // `process.env.x = undefined` coerces to the string `"undefined"`
+    // rather than truly unsetting the variable, so delete it explicitly
+    // when it was unset before this suite ran.
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
   });
 
   it.each(['UTC', 'Asia/Tokyo', 'America/Los_Angeles'])(

@@ -111,6 +111,12 @@ export const formatWeek = (date: DateParsable): Week =>
 
 /**
  * Format the date.
+ *
+ * The `翌` (next-day) marker compares `TIMEZONE` calendar-day keys, not
+ * host-local day-of-month: two instants in different months that share
+ * the same day-of-month (for example July 5 and August 5) are correctly
+ * treated as different days, which a bare day-of-month comparison would
+ * have missed.
  * @param from The date to format.
  * @param to The date to format.
  * @returns The formatted date.
@@ -142,6 +148,11 @@ export const plusDate = (date: DateParsable, days: number): Date =>
 /**
  * Truncate the date to `TIMEZONE` midnight of its `TIMEZONE` calendar
  * day, regardless of the host process's own time zone.
+ *
+ * Unlike the previous host-local implementation, an unparsable `date`
+ * now throws a `RangeError` (via `Intl.DateTimeFormat`) instead of
+ * silently producing an `Invalid Date`, so a malformed schedule input
+ * fails loudly rather than propagating a `NaN` instant.
  * @param date The date to truncate.
  * @returns The truncated date.
  */
