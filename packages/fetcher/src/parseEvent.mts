@@ -55,7 +55,11 @@ export const toEventFactory =
    * `date` set. Rather than throwing and failing the entire batch on
    * one malformed event, this skips the event: it logs a warning to
    * `stderr` naming the event so the drop is visible in the build log,
-   * and returns `undefined` so the caller can filter it out.
+   * and returns `undefined` so the caller can filter it out. A skipped
+   * event's date is no longer represented, so
+   * {@link createVacationEventsFactory} may synthesize a vacation-day
+   * placeholder for that date instead -- an accepted side effect of
+   * skipping rather than a separate bug.
    * @param raw The raw event.
    * @returns The event, or `undefined` if the event has no resolvable
    * start time.
