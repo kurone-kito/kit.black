@@ -10,23 +10,30 @@ ignorePaths:
   - storybook-static
 version: '0.2'
 words:
+  - agentic
   - amebient
   - cresteaju
+  - dedup
+  - deprioritize
   - desync
   - desynced
   - esync
   - graphig
   - momoneko
+  - onnx
   - pixiv
   - pylint
+  - qwen
   - solidjs
   - toctou
   - towa
   - undispositioned
+  - unioned
   - unpushed
   - unreplied
   - unscored
   - unstub
+  - unwaived
   - vgeek
   - vinxi
   - vocaloid

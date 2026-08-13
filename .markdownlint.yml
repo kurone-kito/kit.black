@@ -1,1 +1,12 @@
 extends: '@kurone-kito/markdownlint-config'
+# Allow non-aligned table columns. Tables with long cell content are
+# impractical to keep aligned without breaking readability.
+table-column-style: false
+# Stop MD025 from treating an OKF frontmatter `title:` field as a second
+# level-1 heading alongside the page's own `# H1`. The default pattern
+# (`^\s*title\s*[:=]`) matches both, firing
+# `MD025/single-title/single-h1 Multiple top-level headings` on every
+# conforming OKF page. See
+# docs/customization.md#docs-bundle-frontmatter-convention-okf.
+single-title:
+  front_matter_title: ''

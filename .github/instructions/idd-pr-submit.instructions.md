@@ -31,15 +31,17 @@ synchronization path. Later branch updates should return through the
 E-phase review loop and, by default, merge `main` into the published PR
 branch so the synchronization diff is reviewable.
 
-This D-phase file records the publication boundary and target
-post-push synchronization contract. Follow-up work may still be needed
-to align later-phase conflict-handling and resume-routing helpers before
-that runtime route is fully active everywhere.
+This D-phase file records the publication boundary only: post-push
+synchronization itself runs through `idd-review-triage.instructions.md`'s
+E-phase branch-sync check (`Esync`), which uses the
+`branch-conflict-state` helper when helper runtime is enabled (a
+`gh pr view` fallback otherwise), and `idd-resume.instructions.md`
+already routes a content-conflicting branch there on restart.
 
 If D1 itself reveals content conflicts before the first push, resolve
 them and continue the rebase. After completing the rebase, if any files
 were manually edited during conflict resolution, run **fix-validate**
-before proceeding.
+and commit any resulting changes before proceeding.
 
 On a signed-commit repo whose primary signing is non-interactive-hostile
 (GPG pinentry or a hardware-touch path) but that provides a fallback
@@ -94,7 +96,6 @@ here turns a confusing later failure into an immediate, recoverable signal.
 2. Run **pre-push-validate**.
 
    (E2E tests are verified by CI; do not run them locally.)
-
 3. Push the branch to the remote. On the first publication push, use a
    normal push. If you are recovering an already-published branch under
    an explicit force-push exception, use `--force-with-lease` only when
@@ -109,8 +110,19 @@ head before merge.
 
 ## D3 — Create PR
 
+Before drafting the PR body, check whether the repository defines
+`.github/pull_request_template.md`. If it exists, shape the PR body to
+follow that template's section structure from the start, rather than
+drafting free-form text and reconciling it against the template
+afterward — repository review tooling (for example, CodeRabbit's
+default description check) can compare the PR description against
+that template when present, and a mismatched body can trigger an
+avoidable advisory finding. If no template file exists, use the
+structure below directly.
+
 Use GH CLI or GH MCP to create the pull request. The PR body must
-include:
+include the following content, mapped onto the template's sections
+when one exists:
 
 - A concise summary of the branch's changes
 - A closing keyword on its own line linking the claimed issue (see
@@ -152,6 +164,30 @@ When detection fails, GitHub will not auto-close the linked issue on
 merge and the issue↔PR linking surfaces (sidebar, timeline) will not
 populate.
 
+**Mirror false-positive — negation-blind detection**: the same literal
+matching runs in the other direction too. GitHub's detector matches a
+recognized keyword form immediately adjacent to a `#N` reference and
+has no concept of negation — wrapping the keyword in surrounding
+"not" / "deliberately" / "isn't" wording does not stop detection when
+the keyword itself still sits next to the `#N` it must not close. Keep
+every recognized keyword form (`close`, `closes`, `closed`, `fix`,
+`fixes`, `fixed`, `resolve`, `resolves`, `resolved`) structurally apart
+from any reference it must not close:
+
+- Risky — a keyword sits directly before the reference, even inside a
+  negation clause: "this PR does not close #42" (`close` is
+  immediately adjacent to `#42`; GitHub cannot see the "not").
+- Safe — reorder so no recognized keyword is adjacent to the
+  reference: "Refs #42 (deliberately not a closing keyword — see the
+  discussion there for why this PR does not resolve it directly)".
+  Here `resolve` is followed by "it", not a `#N` token, so nothing
+  adjacent to `#42` matches.
+
+Do not rely on careful phrasing alone as the only safeguard — the
+strengthened check in D3.5 below verifies `closingIssuesReferences`
+against the deliberate closing set exactly, catching a spurious extra
+close even if phrasing slips.
+
 #### Multiple closing issues
 
 When the PR closes more than one issue, repeat the keyword for each
@@ -180,7 +216,7 @@ completion.
 1. Re-fetch the PR body:
 
    ```sh
-   gh pr view body --jq '.body' < pr-number > --json
+   gh pr view <pr-number> --json body --jq '.body'
    ```
 
 2. Strip regions GitHub does not parse for closing keywords:
@@ -214,14 +250,65 @@ completion.
    block-quote prefix) and apply the same edit-and-recheck path
    as step 4.
 
-GitHub's `closingIssuesReferences` field on the PR
-(`gh pr view <pr-number> --json closingIssuesReferences`) can also
-confirm detection: it lists every issue GitHub plans to close when
-the PR merges. If that list is non-empty and contains the claimed
-issue, the regex check above is redundant but still safe to run.
+6. **Confirm the closing set matches exactly**: GitHub's
+   `closingIssuesReferences` field on the PR
+   (`gh pr view <pr-number> --json closingIssuesReferences --jq
+   '.closingIssuesReferences[].number'`) lists every issue GitHub plans
+   to close when the PR merges. Compare it against the deliberate
+   closing set from D3 — normally just the claimed issue `<N>`, or the
+   full deliberate multi-issue set when "Multiple closing issues" above
+   applies. The two sets must be **exactly** equal; steps 1-5 above
+   only confirm the claimed issue `<N>` is present, so this step is the
+   only one that catches either direction of mismatch:
+
+   - **An extra entry** (a `closingIssuesReferences` issue outside the
+     deliberate set) is most often the negation-blind false-positive
+     documented above, where an unrelated `#M` reference ends up
+     adjacent to a recognized keyword elsewhere in the body. Edit the
+     PR body to separate the keyword from that `#M` reference.
+   - **A missing entry** (a deliberate multi-issue-close target absent
+     from `closingIssuesReferences`) means its keyword did not
+     register — apply the same edit-and-recheck path as step 4 for
+     that issue number.
+
+   Repeat this step once after either fix. If it still fails, post a
+   hold note on the issue citing the PR URL and stop. Do not proceed to
+   D4.
 
 ## D4 — Wait for CI
 
-Delegate to `idd-ci.instructions.md`.
+Schedule a wake, or background this wait only if the
+topology-safety condition holds (confirmed to route completion back to
+this turn); otherwise wait synchronously — block with:
+
+- `gh run watch <run-id> --exit-status` (single workflow run; not
+  usable on a fine-grained PAT)
+- `gh pr checks <pr-number> --watch --required` (PR required-check
+  rollup)
+
+See [idd-ci.instructions.md's Wake-up
+discipline](idd-ci.instructions.md#wake-up-discipline) for the
+caveats on both. Do not `run_in_background` this wait absent the
+confirmed condition above. Delegate polling mechanics to
+`idd-ci.instructions.md`.
 
 - **On success** → proceed to `idd-review-snapshot.instructions.md`
+- **`idd-advisory-convergence` is the sole non-pass required check, and
+  its own verdict — a JSON object printed in that check's run log, whose
+  `pending` field is distinct from any GitHub check-run status —
+  reports `pending: false` with outstanding review reasons** (thread
+  disposition, actionable item count on the latest review, or
+  both; see `idd-ci.instructions.md` §Interpretation for this shared
+  trigger condition) → this is not a CI-wait state: the
+  check turns green only after E-phase disposition, which is downstream
+  of D4, so continued polling cannot resolve it, and a
+  `ciWait.rerunPolicy` rerun only reproduces the same red **unless a
+  maintainer has since posted a valid external-check waiver for this
+  HEAD** — that case still needs the rerun, to make the check reflect
+  the waiver (a pre-existing F2/F3 concern this branch leaves unchanged;
+  see `idd-pre-merge.instructions.md`'s External-check waivers). Absent
+  a waiver, exit CI-wait and proceed directly to
+  `idd-review-snapshot.instructions.md` (E1) instead, matching the phase
+  routing table's "PR open, CI running, reviews exist" row. This does
+  not relax the merge gate — the check stays required, and F2
+  re-verifies it independently before merge.

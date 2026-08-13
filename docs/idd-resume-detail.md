@@ -1,3 +1,10 @@
+---
+type: reference
+title: IDD Resume — Detail Reference
+description: Provides the full narrative detail behind idd-resume.instructions.md's compact routing tables for branches that need careful judgment.
+tags: [resume, recovery]
+---
+
 # IDD Resume — Detail Reference
 
 This document provides full narrative for the routing branches and worktree
@@ -32,6 +39,10 @@ forced-handoff if:
 - The evidence `{claim-id}`, branch, or linked PR does not match the live
   active claim or inheritable released branch/PR state — stop and report
   the mismatch; do not claim, push, or mutate review state.
+- The forced-handoff **authorization gate** does not hold. See
+  [`idd-claim.instructions.md` rule 7](../.github/instructions/idd-claim.instructions.md#claim-state-parsing)
+  for the full criteria — apply it in addition to the checks above; it
+  is not restated here.
 
 **Re-claim rule** — Re-claim only after the human-gated handoff mechanism
 has already updated the GitHub claim stream to a released or
@@ -40,10 +51,16 @@ active, stop and wait rather than inventing a local superseding claim.
 Once GitHub state reflects the handoff outcome, continue via
 `idd-claim.instructions.md` on the branch named in the forced-handoff evidence.
 The verified `forced-handoff` marker has already set the active claim to its
-pre-recorded `new-claim-id` (rule 7), so the successor **adopts that
-`new-claim-id`** as its own `{claim-id}` for the rest of the run — including the
-`--claim-id` passed to `pre-merge-readiness` at F2/F3 — rather than minting a
-fresh one. No separate `claimed-by` post is required for the transfer itself.
+pre-recorded `new-agent-id` / `new-claim-id` pair (rule 7), so the successor
+**adopts both verbatim** as its own `{agent-id}` / `{claim-id}` for the rest
+of the run — including `--agent-id` and `--claim-id` at F2/F3's
+`pre-merge-readiness` — rather than minting a claim-id or keeping its own
+agent-id (an invented agent-id silently fails later checks as
+`agent-id-mismatch`; see `idd-claim.instructions.md`'s Claim verification
+section). No separate `claimed-by` post is required for the transfer itself.
+This adopted claim is **sticky** (re-derived on every resolution pass); see
+the same section for the adopt-verbatim vs. release-then-fresh reconciliation
+paths if a fresh claim appears not to take effect.
 
 **Displaced-session guard** — If the forced-handoff evidence names a
 `{claim-id}` that this current session had already verified before this
@@ -52,8 +69,10 @@ Do not push, comment, reply, resolve threads, request reviewers, or merge
 until a maintainer reassigns ownership.
 
 The successor must cite the forced-handoff evidence in its resume report or
-digest `Authoritative by`. It must not reuse the displaced old `{claim-id}`,
-which is distinct from the adopted `new-claim-id`.
+digest `Authoritative by`. It must not reuse the displaced old `{claim-id}` as
+its own — always use the marker's assigned `new-claim-id`. (`{agent-id}` may
+legitimately equal the displaced claim's agent-id; only `{claim-id}` must
+always be the fresh marker-assigned value.)
 
 ## §W1 — PR exists (1 match), no worktree
 

@@ -1,3 +1,10 @@
+---
+type: reference
+title: Onboarding Reference — Placeholder Values
+description: Provides the full derivation and replacement rules for every template placeholder used during onboarding.
+tags: [onboarding, placeholders]
+---
+
 # Onboarding Reference — Placeholder Values
 
 Use this reference with `idd-template/ONBOARDING.md` when you need the
@@ -117,15 +124,15 @@ For the full fallback order and policy matrix, see
 After Step 1A and Step 1C, you should have final values for these seven
 placeholders:
 
-| Placeholder                                           | Meaning                                                   | Example                            |
-| ----------------------------------------------------- | --------------------------------------------------------- | ---------------------------------- |
-| `kit.black`                                           | Repository short name used in worktree examples           | `my-app`                           |
-| `kit-black`                                           | Hidden issue-body marker prefix                           | `my-app`                           |
-| `kurone-kito`                                         | Single JSON-escaped login allowed to post trusted markers | `trusted-user-a`                   |
-| `pnpm run lint:fix && pnpm run lint`                  | Auto-fix plus validate command row                        | `npm run lint:fix && npm run lint` |
-| `pnpm run lint && pnpm run test`                      | Non-mutating verify command row                           | `npm run lint && npm run test`     |
+| Placeholder                      | Meaning                                                   | Example                            |
+| -------------------------------- | --------------------------------------------------------- | ---------------------------------- |
+| `kit.black`                  | Repository short name used in worktree examples           | `my-app`                           |
+| `kit-black`      | Hidden issue-body marker prefix                           | `my-app`                           |
+| `kurone-kito`       | Single JSON-escaped login allowed to post trusted markers | `trusted-user-a`                   |
+| `pnpm run lint:fix && pnpm run lint`      | Auto-fix plus validate command row                        | `npm run lint:fix && npm run lint` |
+| `pnpm run lint && pnpm run test` | Non-mutating verify command row                           | `npm run lint && npm run test`     |
 | `pnpm run lint:fix && pnpm run lint && pnpm run test` | Post-fix validate command row                             | `npm run lint:fix && npm test`     |
-| `pnpm install --prefer-frozen-lockfile`               | Dependency install command, or `true` when unnecessary    | `npm install`                      |
+| `pnpm install --prefer-frozen-lockfile`       | Dependency install command, or `true` when unnecessary    | `npm install`                      |
 
 ### No-op substitution
 

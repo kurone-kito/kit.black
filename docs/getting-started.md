@@ -1,3 +1,10 @@
+---
+type: guide
+title: Getting Started with IDD
+description: Walks a new adopter through the shortest safe path from deciding to adopt IDD to running the first Issue-Driven Development loop.
+tags: [getting-started, onboarding]
+---
+
 # Getting Started with IDD
 
 Use this guide when you want the shortest safe path from deciding a
@@ -33,6 +40,19 @@ The onboarding guide copies the portable instruction files, asks for
 project-specific command values, and updates agent entry files such as
 `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or Copilot instructions.
 
+### Validate the import with IDD doctor (optional)
+
+After importing IDD, run the doctor script once in a repository that
+has the helper installed to catch common setup drift:
+
+```sh
+node scripts/idd-doctor.mjs
+```
+
+The report checks core IDD file presence, unresolved placeholders,
+marker-prefix consistency, command-table sanity, and (when `gh` access
+is available) branch-protection and required-check signals.
+
 ## 2. Choose the Review Policy
 
 Before the first full loop, decide whether the default Copilot advisory
@@ -66,16 +86,16 @@ the loop starts:
 
 For broad requests, use the optional issue-authoring companion to draft
 a roadmap and focused child issues before starting the execution loop.
-Use task-list links to group active roadmap work. Reserve
-`idd-skill-blocked-by` markers for true sequential dependencies on a
-separate roadmap.
+Use task-list links to group active roadmap work. Reserve the
+blocked-by marker (using your configured prefix) for true sequential
+dependencies on a separate roadmap.
 
 When a project has genuine parallel tracks or multi-session coordination
 boundaries, nested roadmap hierarchies let each track close
 independently before the parent roadmap closes. See
-[Recursive Roadmap Hierarchies](idd-workflow.md#recursive-roadmap-hierarchies)
-in the workflow guide for structure examples, the grouping-versus-dependency
-distinction, and how discovery and bottom-up audit behave across levels.
+[Roadmap Claim Guardrails](idd-workflow.md#roadmap-claim-guardrails)
+in the workflow guide for how nested roadmap claims stay
+coordination-only and how bottom-up audit closes each level.
 
 ## 4. Start the Loop
 

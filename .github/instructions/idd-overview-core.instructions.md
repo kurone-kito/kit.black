@@ -1,16 +1,16 @@
 ---
-applyTo: '**'
-excludeAgent: 'code-review'
+applyTo: "**"
+excludeAgent: "code-review"
 ---
 
 # IDD (Issue-Driven Development) — Shared Definitions (Runtime Core)
 
-This file contains the core runtime-critical definitions for IDD execution:
-claim ownership, marker authentication, state parsing, and pre-mutation
+This file holds the core runtime-critical IDD definitions: claim
+ownership, marker authentication, state parsing, and pre-mutation
 safety gates.
 
-For reference content, appendix sections, and detailed implementation
-guidance, see `idd-overview-appendix.instructions.md`.
+For reference content and implementation detail, see
+`idd-overview-appendix.instructions.md`.
 
 ---
 
@@ -26,22 +26,22 @@ the visible note is for humans:
 _{agent-id}: issue claim — IDD automation marker. Do not edit._
 ```
 
-**Important**: operational marker bodies are HTML comments. Some tools
-(e.g., `gh issue comment`, `gh api -f body=`) silently reject
-HTML-only bodies — always include the visible note and post via direct
-HTTP `POST` with a JSON body for reliability. When helper runtime is enabled,
-the `post-idd-marker` helper (`--type claim --target issue <number> --apply`
-plus the claim fields; see `docs/idd-helper-scripts.md`) posts this marker
-through that JSON path (dry-run, posting nothing, without `--apply`); the direct
-`POST` stays the canonical fallback.
+**Important**: operational marker bodies are HTML comments. `gh issue
+comment` and `gh api -f body=` silently reject HTML-only bodies (and
+mishandle `@`-prefixed values) — always include the visible note and
+post via direct HTTP `POST` with a JSON body; see
+`docs/idd-helper-scripts.md` for the full `gh api` pitfalls. When
+helper runtime is enabled, the `post-idd-marker` helper (`--type claim
+--target issue <number> --apply` plus the claim fields) posts this
+marker through that JSON path (dry-run, posting nothing, without
+`--apply`); the direct `POST` stays the canonical fallback.
 
-Every new HTML-comment operational marker comment must include a short
-visible note after the HTML comment token. `review-watermark` and
-`review-baseline` use the phase-specific note formats in
-`idd-review-snapshot.instructions.md`; `claimed-by` and `unclaimed-by`
-use the claim and release notes shown here. Hidden-only legacy
-`claimed-by` and `unclaimed-by` comments remain valid for parsing and
-migration, but do not create new hidden-only claim comments.
+Every new HTML-comment operational marker must include a short visible
+note after the token: `review-watermark`/`review-baseline` use the
+phase-specific formats in `idd-review-snapshot.instructions.md`;
+`claimed-by`/`unclaimed-by` use the notes shown here. Hidden-only legacy
+`claimed-by`/`unclaimed-by` comments remain valid for parsing/migration,
+but never create new hidden-only claim comments.
 
 - `{agent-id}` is a tool or agent identifier shared across concurrent
   sessions of the same agent type. For auditability, appending a unique
@@ -72,12 +72,11 @@ Post this comment to release a claim (on abort or voluntary release):
 _{agent-id}: issue claim released — IDD automation marker. Do not edit._
 ```
 
-When helper runtime is enabled, post this release marker with
-`post-idd-marker --type unclaim --target issue <number> --apply` (plus the
-agent-id / claim-id / timestamp fields; see `docs/idd-helper-scripts.md`),
-which renders the canonical body and POSTs it via the reliable JSON path — it is
-dry-run (posting nothing) without `--apply`; the direct HTTP `POST` fallback
-above applies when the helper runtime is unavailable.
+When helper runtime is enabled, post this with `post-idd-marker --type
+unclaim --target issue <number> --apply` (plus agent-id / claim-id /
+timestamp; see `docs/idd-helper-scripts.md`); without `--apply` it is
+dry-run. The direct HTTP `POST` above is the fallback when helper
+runtime is unavailable.
 
 ## Trusted marker actors
 
@@ -105,8 +104,6 @@ comes from the current session having recorded the claim token, the
 marker being authored by a trusted actor, and the GitHub server
 `created_at` timestamp satisfying the phase rules.
 
-## Repository-local IDD policy
-
 Repository-local actor policy and any forced-handoff settings live in
 `docs/customization.md`.
 
@@ -120,10 +117,8 @@ do not refresh the stale clock); a new `{claim-id}` becomes active only
 when the issue is unclaimed or the current claim is already stale and
 its `{claim-id}` matches `supersedes:`; unclaim requires exact
 `{agent-id}` and `{claim-id}` match. Same-agent restarts never silently
-inherit a non-stale claim.
-
-For legacy claim migration (comments without `{claim-id}`), see
-`idd-claim.instructions.md`.
+inherit a non-stale claim. For legacy claim migration (comments without
+`{claim-id}`), see the same file.
 
 ## Thresholds
 
@@ -140,6 +135,8 @@ Ownership timing in this workflow uses the policy defaults
   exceed 12 h. The latest **valid** `claimed-by` comment for the same
   `{claim-id}` resets the stale clock. Embed timestamps are ignored;
   only the GitHub `created_at` of the comment itself counts.
+- **Heartbeat-overdue**: diagnostic only; see
+  `idd-resume-stall.instructions.md` S3.
 
 ## Fail-closed default
 
@@ -163,10 +160,15 @@ post further operational comments, and report the handoff or race. If
 loss came from handoff, the displaced session must not push,
 comment, resolve reviews, request reviewers, or merge.
 
+If you posted an activation nonce, confirm it still wins for this
+claim-id (`idd-claim.instructions.md`) -- a different winner means a lost
+claim-id.
+
 In addition to the `{claim-id}` check, verify that the mutation is
 about to run from the worktree named in the active claim's `branch:`
 field. This **cwd-vs-claim check** applies only to mutations made
-from inside the implementation worktree contract (B3, D, E phases):
+from inside the implementation worktree contract (B3, D, E, and F2/F3
+phases):
 
 Scope — the check runs **only** when **all** of the following are
 true:
@@ -183,72 +185,69 @@ When in scope, run:
 
 1. Resolve the mutation's working directory:
    `git rev-parse --show-toplevel`.
-2. Resolve the expected sibling-path from the active claim's
-   `branch:` field, using the B1 naming convention
-   (`../<repo-name>.<normalized-branch>`, with `/` in the branch
-   name replaced by `-`; see
+2. Resolve the expected sibling-path from the active claim's `branch:`
+   field via the B1 naming convention `../<repo-name>.<normalized-branch>`
+   (branch `/` → `-`; see
    [B1 Worktree creation](idd-work.instructions.md#worktree-creation)).
-3. If the cwd does **not** equal the expected sibling path, stop and
-   report. Do not auto-relocate the agent; the operator should
-   investigate (`scripts/idd-doctor.mjs` warns on the same primary-
-   worktree-HEAD symptom that this gate catches at mutation time) and
-   either remove the stale primary-HEAD branch or rerun B1 cleanly in
-   a fresh worktree.
+3. If the cwd doesn't equal the expected sibling path, stop and report —
+   do not auto-relocate; investigate (`scripts/idd-doctor.mjs` flags the
+   same primary-worktree-HEAD symptom) and either remove the stale
+   primary-HEAD branch or rerun B1 in a fresh worktree.
 4. Also assert the worktree is **on the claimed branch**:
    `git branch --show-current` must equal the active claim's `branch:`
-   value. Under concurrency a worktree can be in the right directory but
-   switched onto a different branch; if the current branch differs, stop
-   and report — do not `add`, `commit`, or `push` from a worktree that is
-   not on the claimed branch.
+   value — a worktree can be in the right directory but switched onto a
+   different branch under concurrency. If it differs, stop and report;
+   do not `add`, `commit`, or `push` from a worktree not on the claimed
+   branch.
+5. Acquire the worktree-local claim lock immediately before the mutation,
+   using the profile-selected `claim-lock` helper (see
+   `docs/idd-helper-scripts.md`) with the current `{agent-id}` and
+   `{claim-id}`. Under the `instructions-only` profile, use the
+   helper-free fallback in `idd-work.instructions.md`, which uses the
+   same `idd-claim.lock` namespace. A `collision` is fail-closed: stop
+   unless the active claim revalidation authorizes an explicit takeover.
 
 **Recovery if a commit already landed on the wrong branch.** If this gate
-or `idd-doctor` finds that a commit already landed on the wrong branch —
-typically the primary worktree's `main`, or another issue's branch —
-recover by **cherry-picking** the misplaced commit onto the correct issue
-branch (in its own sibling worktree), then restore the contaminated
-branch. If the contaminated branch is **unpushed** (typically the primary
-worktree's `main`), `git reset --hard` it back to its upstream. If it was
-**already pushed or shared**, do **not** `git reset --hard` then force-push
-to erase the misplaced commit — that is the forbidden force-push; instead
-`git revert` the misplaced change, or let the operator evacuate the branch.
-Either way, preserve that branch's real history and move only the misplaced
-commit.
+or `idd-doctor` finds a commit on the wrong branch, cherry-pick it onto
+the correct issue branch and restore the contaminated branch — **never**
+`git reset --hard` then force-push a pushed or shared branch to erase it.
+See [Wrong-branch commit recovery](../../docs/idd-design-rationale.md#wrong-branch-commit-recovery-cherry-pick-never-force-push)
+for the full procedure.
 
 Out of scope and explicitly **not** blocked:
 
-- B1 setup commands run from the primary worktree on `main` (per the
-  B1 Anti-patterns rule — those commands must keep primary HEAD on
-  `main`).
+- B1 setup commands on the primary worktree's `main` (per the B1
+  Anti-patterns rule, which requires keeping primary HEAD on `main`).
 - A1.5 roadmap-audit coordination operations (claims whose `branch:`
   starts with `roadmap-audit/`).
-- F4 post-merge cleanup (the sibling worktree is removed by F4
-  itself; subsequent local `main` updates run from the primary
-  worktree by design).
+- F4 post-merge cleanup (F4 itself removes the sibling worktree;
+  subsequent local `main` updates run from the primary worktree by
+  design).
 
-This check is read-only and pre-mutation. When in scope, it must run
-before any local commit, push, rebase, comment, label change, reply,
-resolve, reviewer request, or merge.
+The claim and cwd checks are read-only and pre-mutation; the lock
+acquisition is the final local guard. When in scope, all of these checks
+must complete before any local commit, push, rebase, comment, label
+change, reply, resolve, reviewer request, or merge.
 
 A1.5 roadmap completion audit side effects use the roadmap issue itself
-as the claim target (see `idd-roadmap-audit.instructions.md`). Even
-when the audit is GitHub-only and does not create a worktree, claim and
-re-validate the roadmap issue before commenting, editing, labeling,
-creating linked follow-up issues, or closing it. A1.5 coordination-only
-claims use a
-`roadmap-audit/<number>-<slug>` branch field so resume can distinguish
-them from normal implementation claims.
-Roadmap-audit claims are coordination locks for roadmap-side mutations
-only. They must not be treated as global execution locks: child issue
-discovery and A5 checks remain issue-local and are gated by each child's
-own claim state, blockers, and dependencies. This does not relax
-roadmap-level blocker gates such as `status:blocked-by-human` or
-`status:needs-decision`, which still stop child selection in Discover.
+as the claim target (see `idd-roadmap-audit.instructions.md`), with a
+`roadmap-audit/<number>-<slug>` branch field distinguishing coordination
+claims from implementation claims. Even when GitHub-only (no worktree),
+claim and re-validate the roadmap issue before commenting, editing,
+labeling, creating linked follow-up issues, or closing it.
+
+Roadmap-audit claims coordinate roadmap-side mutations only — never
+global execution locks. Child issue discovery and A5 checks stay
+issue-local, gated by each child's own claim state, blockers, and
+dependencies; this does not relax roadmap-level blocker gates
+(`labels.blockedByHumanLabelName`, default `status:blocked-by-human`;
+`labels.needsDecisionLabelName`, default `status:needs-decision`),
+which still stop child selection in Discover.
 
 ## Project commands
 
-When a phase refers to a named command set, run the corresponding
-commands. **Adapt this section when applying this workflow to a
-different project.**
+When a phase names a command set, run the corresponding commands.
+**Adapt this section for other projects.**
 
 If `.github/idd/config.json` exists and validates against the canonical
 schema at
@@ -259,28 +258,29 @@ the recorded machine-readable policy. Absent values keep the gate
 enabled and default approval actors to
 `owners-and-maintainers-only`.
 
-| Name                    | Commands                                              |
-| ----------------------- | ----------------------------------------------------- |
-| **fix-validate**        | `pnpm run lint:fix && pnpm run lint`                  |
-| **pre-push-validate**   | `pnpm run lint && pnpm run test`                      |
-| **post-fix-validate**   | `pnpm run lint:fix && pnpm run lint && pnpm run test` |
-| **install-deps**        | `pnpm install --prefer-frozen-lockfile`               |
-| **issue-scope**         | `roadmap-first`                                       |
-| **orphan-first-policy** | `none`                                                |
+<!-- dprint-ignore-start -->
+| Name | Commands |
+| --- | --- |
+| **fix-validate** | `pnpm run lint:fix && pnpm run lint` |
+| **pre-push-validate** | `pnpm run lint && pnpm run test` |
+| **post-fix-validate** | `pnpm run lint:fix && pnpm run lint && pnpm run test` |
+| **install-deps** | `pnpm install --prefer-frozen-lockfile` |
+| **issue-scope** | `roadmap-first` |
+| **orphan-first-policy** | `none` |
+<!-- dprint-ignore-end -->
 
-Non-shell rows such as **issue-scope** and **orphan-first-policy** are
-workflow settings. Read them literally, not as commands.
+Non-shell rows (**issue-scope**, **orphan-first-policy**) are workflow
+settings — read them literally, not as commands.
 
 `pre-push-validate` omits auto-fix. If lint fails, run
 **fix-validate**, commit, then re-run **pre-push-validate**.
 
-If **fix-validate** or **post-fix-validate** changes files, stage and
-commit them before any push, rebase, or step that requires a clean
-tree.
+If **fix-validate**/**post-fix-validate** changes files, stage and
+commit before any push, rebase, or step needing a clean tree.
 
-`install-deps` must be idempotent. Re-running it in fresh, reused, or
-recreated worktrees must not require manual cleanup and should not leave
-unexpected tracked changes.
+`install-deps` must be idempotent: re-running it in fresh, reused, or
+recreated worktrees must not need manual cleanup or leave unexpected
+tracked changes.
 
 **Tool availability**: run commands only when tools exist. For Node.js:
 prefer project scripts; use `npx <tool>` if Node.js and `npx` are available
@@ -292,21 +292,23 @@ and no relevant script exists; else use `true`. For other tools, use
 Start by reading this file for shared definitions, then load the phase
 file that matches your current situation.
 
-| Situation                                     | Read this file                                                        |
-| --------------------------------------------- | --------------------------------------------------------------------- |
-| Starting fresh (no active claim)              | `idd-discover.instructions.md`, then `idd-claim.instructions.md`      |
+<!-- dprint-ignore-start -->
+| Situation | Read this file |
+| --- | --- |
+| Starting fresh (no active claim) | `idd-discover.instructions.md`, then `idd-claim.instructions.md` |
 | Starting fresh with one explicit issue target | `idd-discover.instructions.md` A0-T, then `idd-claim.instructions.md` |
-| Resuming after crash / rate-limit / handoff   | `idd-resume.instructions.md`                                          |
-| Claimed, branch exists, no PR yet             | `idd-work.instructions.md`                                            |
-| PR open, CI running, no reviews yet           | `idd-pr-submit.instructions.md`                                       |
-| PR open, CI running, reviews exist            | `idd-review-snapshot.instructions.md` (E1–E3)                         |
-| PR open, CI passed, no reviews yet            | `idd-review-snapshot.instructions.md` (E3 empty-list → merge)         |
-| PR open, CI passed, reviews pending           | `idd-review-snapshot.instructions.md`                                 |
-| Snapshot done, ReviewItems_snapshot non-empty | `idd-review-triage.instructions.md` (E4–E8)                           |
-| Review feedback accepted, pushing fixes       | `idd-review-fix.instructions.md`                                      |
-| Ready for pre-merge gate check                | `idd-pre-merge.instructions.md`                                       |
-| All pre-merge conditions satisfied            | `idd-merge-handoff.instructions.md` (F2.5)                            |
-| Autonomous merge path confirmed               | `idd-merge.instructions.md` (F3–F5)                                   |
+| Resuming after crash / rate-limit / handoff | `idd-resume.instructions.md` |
+| Claimed, branch exists, no PR yet | `idd-work.instructions.md` |
+| PR open, CI running, no reviews yet | `idd-pr-submit.instructions.md` |
+| PR open, CI running, reviews exist | `idd-review-snapshot.instructions.md` (E1–E3) |
+| PR open, CI passed, no reviews yet | `idd-review-snapshot.instructions.md` (E3 empty-list → branch-sync → F1) |
+| PR open, CI passed, reviews pending | `idd-review-snapshot.instructions.md` |
+| Snapshot done, ReviewItems_snapshot non-empty | `idd-review-triage.instructions.md` (E4–E8) |
+| Review feedback accepted, pushing fixes | `idd-review-fix.instructions.md` |
+| Ready for pre-merge gate check | `idd-pre-merge.instructions.md` |
+| All pre-merge conditions satisfied | `idd-merge-handoff.instructions.md` (F2.5) |
+| Autonomous merge path confirmed | `idd-merge.instructions.md` (F3–F5) |
+<!-- dprint-ignore-end -->
 
 **Note**: A1 reads `idd-roadmap-audit.instructions.md` (A1.5) before
 A2.
@@ -319,6 +321,6 @@ CI polling logic shared by D and E phases lives in
 `idd-ci.instructions.md`; callers declare their own on-success target.
 
 The Copilot advisory-wait protocol (commands, decision table, hold
-comment templates) is defined once in `idd-advisory-wait.instructions.md`
-and referenced by E14 (review-fix) and F2/F3 (merge). Do not duplicate
-these commands in caller files.
+templates) lives once in `idd-advisory-wait.instructions.md`, referenced
+by E14 (review-fix) and F2/F3 (merge); do not duplicate it in caller
+files.

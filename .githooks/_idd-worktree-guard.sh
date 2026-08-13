@@ -14,7 +14,7 @@ idd_worktree_guard_check() {
   # $1: human-readable action word ("commit" or "push").
   action="$1"
 
-  repo_root=$(git rev-parse --show-toplevel 2> /dev/null) || return 0
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   config="$repo_root/.github/idd/config.json"
   [ -f "$config" ] || return 0
 
@@ -36,7 +36,7 @@ idd_worktree_guard_check() {
   # Only the primary worktree is guarded. The primary worktree is the
   # first entry reported by `git worktree list`; sibling worktrees are
   # exactly where implementation branches are supposed to live.
-  primary=$(git worktree list --porcelain 2> /dev/null | sed -n 's/^worktree //p' | head -n 1)
+  primary=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -n 1)
   [ -n "$primary" ] || return 0
   [ "$primary" = "$repo_root" ] || return 0
 
@@ -44,7 +44,7 @@ idd_worktree_guard_check() {
   # worktreeGuard.branchPatterns, defaulting to issue/* and
   # roadmap-audit/* when the key is absent. (A detached HEAD reports
   # "HEAD" and never matches.)
-  branch=$(git rev-parse --abbrev-ref HEAD 2> /dev/null)
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
   [ -n "$branch" ] && [ "$branch" != "HEAD" ] || return 0
 
   patterns='issue/* roadmap-audit/*'
@@ -62,10 +62,7 @@ idd_worktree_guard_check() {
     # configured branch pattern against the branch name.
     # shellcheck disable=SC2254
     case "$branch" in
-      $pattern)
-        matched=1
-        break
-        ;;
+      $pattern) matched=1; break ;;
     esac
   done
   [ "$matched" = 1 ] || return 0
