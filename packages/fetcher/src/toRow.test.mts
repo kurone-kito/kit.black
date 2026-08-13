@@ -64,4 +64,36 @@ describe('toRowMapper', () => {
     expect(rowA.holiday).toBe(true);
     expect(rowB.holiday).toBeUndefined();
   });
+
+  it('pins toRowMapper’s actual whole-array-scan behavior for same-date events that are not adjacent', () => {
+    // `array.filter`/`findIndex` scan the whole array by `date`, not by
+    // position, so this is `toRowMapper`'s real, already-shipped
+    // behavior for this input shape -- this test pins that pure-function
+    // contract per issue #163's acceptance criteria (a non-adjacent
+    // same-date case), it does not assert that the input shape itself is
+    // expected or that rendering `dateSpan: 2` here would be valid HTML.
+    // `Row.tsx` applies `dateSpan` as `rowSpan`, which requires
+    // contiguous rows, so this input never reaches rendering in
+    // production: `toEventsFactory` sorts events chronologically before
+    // `.map(toRowMapper)`, which guarantees same-date events are always
+    // adjacent by the time they reach this function. Enforcing that
+    // invariant belongs to the sorting step, not to this pure mapper, so
+    // no production source change is made here.
+    const a = event({ date: '01/01' });
+    const middle = event({
+      date: '01/02',
+      epoch: Date.parse('2026-01-02T12:00:00+09:00'),
+    });
+    const b = event({ date: '01/01' });
+    const array = [a, middle, b];
+    const rowA = toRowMapper(a, 0, array);
+    const rowMiddle = toRowMapper(middle, 1, array);
+    const rowB = toRowMapper(b, 2, array);
+    expect(rowA.date).toBe('01/01');
+    expect(rowA.dateSpan).toBe(2);
+    expect(rowMiddle.date).toBe('01/02');
+    expect(rowMiddle.dateSpan).toBeUndefined();
+    expect(rowB.date).toBeUndefined();
+    expect(rowB.dateSpan).toBeUndefined();
+  });
 });
