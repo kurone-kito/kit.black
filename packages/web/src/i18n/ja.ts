@@ -9,6 +9,7 @@ const resources: Resources = {
   author: '黒音キト',
   calendar:
     '以下の配信スケジュールは、カレンダー アプリから毎日 8 回抽出した情報に基づき、自動生成しております。',
+  downloadCalendar: 'スケジュール表を画像として保存',
   hamburgerMenu: 'メニュー',
   heroAbout: '黒音キトについて',
   heroIntroduction: '黒音キトの自己紹介',

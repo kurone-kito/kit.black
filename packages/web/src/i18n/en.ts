@@ -9,6 +9,7 @@ const resources: Resources = {
   author: 'Kuroné Kito',
   calendar:
     'The following live streaming schedule is automatically generated based on information extracted from the Calendar app eight times daily.',
+  downloadCalendar: 'Save the schedule calendar as an image',
   hamburgerMenu: 'Menu',
   heroAbout: 'About Kuroné Kito',
   heroIntroduction: 'Kuroné Kito’s introduction',
