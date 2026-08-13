@@ -48,6 +48,13 @@ describe('getCalendarIds validation', () => {
       'Missing required environment variable: ID_STREAMING',
     );
   });
+
+  it('throws naming the missing variable when an ID is whitespace-only', () => {
+    vi.stubEnv('ID_STREAMING', '   ');
+    expect(() => getCalendarIds()).toThrow(
+      'Missing required environment variable: ID_STREAMING',
+    );
+  });
 });
 
 describe('getJwtInput validation', () => {
