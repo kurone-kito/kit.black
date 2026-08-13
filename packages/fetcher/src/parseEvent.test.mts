@@ -51,4 +51,17 @@ describe('toEventFactory', () => {
     expect(() => toEventFactory('others')(raw)).not.toThrow();
     expect(toEventFactory('others')(raw)).toBeUndefined();
   });
+
+  it('falls back to the event id when summary is an empty string', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      id: 'empty-summary-event',
+      start: {},
+      summary: '',
+    };
+    toEventFactory('others')(raw);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('empty-summary-event'),
+    );
+  });
 });

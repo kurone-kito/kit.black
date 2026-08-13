@@ -69,7 +69,7 @@ export const toEventFactory =
     const { dateTime, date } = start ?? {};
     const epoch = new Date((dateTime || date) ?? '').getTime();
     if (Number.isNaN(epoch)) {
-      const label = summary ?? raw.id ?? '(unknown)';
+      const label = summary || raw.id || '(unknown)';
       console.warn(`Skipping event with no resolvable start time: ${label}`);
       return undefined;
     }

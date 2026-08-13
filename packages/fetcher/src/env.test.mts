@@ -66,4 +66,11 @@ describe('getJwtInput validation', () => {
       'Missing required environment variable: CLIENT_ID',
     );
   });
+
+  it('throws naming the missing variable when a credential is whitespace-only', () => {
+    vi.stubEnv('CLIENT_ID', '   ');
+    expect(() => getJwtInput()).toThrow(
+      'Missing required environment variable: CLIENT_ID',
+    );
+  });
 });
