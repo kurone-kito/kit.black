@@ -1,4 +1,4 @@
-#!/usr/bin/env node --enable-source-maps --env-file=../../.env
+#!/usr/bin/env node --enable-source-maps --env-file-if-exists=../../.env
 
 import { WEEKDATES, weekRange } from '@kurone-kito/kit.black-lib';
 import { fetchAllRawEventsFactory } from './fetchRaw.mjs';
