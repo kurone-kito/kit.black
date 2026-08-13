@@ -25,8 +25,16 @@ const jstDateFormatter = new Intl.DateTimeFormat('en-US', {
  */
 export const toJstCalendarDate = (epoch: number): Date => {
   const parts = jstDateFormatter.formatToParts(new Date(epoch));
-  const get = (type: 'day' | 'month' | 'year'): number =>
-    Number(parts.find((part) => part.type === type)?.value);
+  const get = (type: 'day' | 'month' | 'year'): number => {
+    const part = parts.find((p) => p.type === type);
+    if (!part) {
+      // Guard against a silent NaN / Invalid Date: if Intl ever omits
+      // a requested part, fail loudly instead of letting holiday
+      // detection degrade to a silent false negative.
+      throw new Error(`Intl.DateTimeFormat did not return a "${type}" part`);
+    }
+    return Number(part.value);
+  };
   return new Date(get('year'), get('month') - 1, get('day'));
 };
 

@@ -7,13 +7,16 @@ afterEach(() => cleanup());
 /**
  * Render a {@link Row} and return its date cell.
  * @param props The properties to pass to {@link Row}.
- * @returns The date cell element, or `null` when not rendered.
+ * @returns The date cell element.
  */
-const renderDateCell = (
-  props: Parameters<typeof Row>[0],
-): HTMLElement | null => {
+const renderDateCell = (props: Parameters<typeof Row>[0]): HTMLElement => {
   const { container } = render(() => <Row {...props} />);
-  return container.querySelector('.date');
+  const cell = container.querySelector('.date');
+  // Fail with a clear "no .date cell rendered" error here, rather than
+  // a less-informative matcher error at the call site if the component
+  // ever stops rendering a date cell for the given props.
+  expect(cell).not.toBeNull();
+  return cell as HTMLElement;
 };
 
 describe('Row', () => {

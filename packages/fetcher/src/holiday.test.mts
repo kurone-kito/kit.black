@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isJpHoliday, toJstCalendarDate } from './holiday.mjs';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('toJstCalendarDate', () => {
   it.each([
@@ -10,6 +12,19 @@ describe('toJstCalendarDate', () => {
   ])('epoch %d -> local Date(%d, %d, %d)', (epoch, year, month, day) =>
     expect(toJstCalendarDate(epoch)).toEqual(new Date(year, month, day)),
   );
+
+  it('fails loudly instead of silently coercing a missing part to NaN', () => {
+    // If Intl.DateTimeFormat#formatToParts ever omits a requested part,
+    // the guard should throw rather than let holiday detection degrade
+    // to a silent false negative (Number(undefined) === NaN).
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'formatToParts').mockReturnValue([
+      { type: 'month', value: '1' },
+      { type: 'day', value: '1' },
+    ]);
+    expect(() => toJstCalendarDate(Date.now())).toThrow(
+      /did not return a "year" part/,
+    );
+  });
 });
 
 describe('isJpHoliday', () => {
