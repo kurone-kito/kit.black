@@ -53,4 +53,15 @@ describe('toRowMapper', () => {
     expect(rowB.dateSpan).toBeUndefined();
     expect(rowA.week).toBe('thu');
   });
+
+  it('omits holiday on a same-day row that does not render the date cell', () => {
+    // Only the first-occurrence row renders <td class="date">, so only
+    // that row needs holiday -- mirrors the existing dateSpan gate.
+    const a = event({ date: '01/01' });
+    const b = event({ date: '01/01' });
+    const rowA = toRowMapper(a, 0, [a, b]);
+    const rowB = toRowMapper(b, 1, [a, b]);
+    expect(rowA.holiday).toBe(true);
+    expect(rowB.holiday).toBeUndefined();
+  });
 });

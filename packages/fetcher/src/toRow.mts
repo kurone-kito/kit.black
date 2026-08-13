@@ -16,9 +16,12 @@ export const toRowMapper: Mapper<EventDetail, EventDetailRow> = (
 ) => {
   const { date: dt, epoch, time, title: children, type } = item;
   const week = formatWeek(epoch);
-  const holiday = isJpHoliday(epoch) ? true : undefined;
   const equalsDate = (e: EventDetail) => e.date === dt;
   const date = index === array.findIndex(equalsDate) ? dt : undefined;
+  // Only the row that renders the date cell (see the same `date` gate
+  // above) needs `holiday`: computing it for every same-day row would
+  // repeat the JST lookup and bloat data.json with an unused field.
+  const holiday = date && isJpHoliday(epoch) ? true : undefined;
   const span = array.filter(equalsDate).length;
   const dateSpan = date && span > 1 ? span : undefined;
   return { children, date, dateSpan, holiday, time, type, week } as const;
