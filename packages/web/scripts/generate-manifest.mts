@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
 
 /** The subset of the site constants this generator needs. */
@@ -52,7 +52,19 @@ export const buildManifest = (
   display: 'standalone',
 });
 
-if (import.meta.main) {
+/**
+ * Whether this module was invoked directly (`node scripts/…mts`), rather
+ * than imported. Deliberately avoids `import.meta.main` (Node >=24.2
+ * only): on an older Node, that property is `undefined` and the guard
+ * below would silently skip the CLI body instead of writing the
+ * manifest, with no error — the same fail-open no-op trap the project's
+ * IDD-helper re-import tracked (roadmap #122). Comparing the resolved
+ * module URL against the invoked script path works on every supported
+ * Node version.
+ */
+const isMain = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
+
+if (isMain) {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const raw = await readFile(`${root}/src/constants.yaml`, 'utf8');
   const constants = yaml.load(raw) as ManifestSourceConstants;
