@@ -73,3 +73,30 @@
     --splash-logo-scale: 5vmax;
   }
 }
+
+/*
+ * The splash overlay fails closed: it stays hidden unless the
+ * `splash-visible` animation is actively running, so a visitor gets
+ * page content whenever the animation cannot run at all (stripped
+ * CSS, an unsupported browser, or a `prefers-reduced-motion: reduce`
+ * request below) rather than a permanently stuck overlay -- with or
+ * without JavaScript. The 3s duration matches `DURATION` in
+ * `organisms/Splash.tsx`; keep both in sync if either changes.
+ */
+.splash-overlay {
+  visibility: hidden;
+  animation: splash-visible 3s;
+}
+
+@keyframes splash-visible {
+  from,
+  to {
+    visibility: visible;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-overlay {
+    animation: none;
+  }
+}

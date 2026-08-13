@@ -17,7 +17,7 @@ export interface SplashProps {
 export const Splash: Component<SplashProps> = (props) => (
   <section
     aria-label={props.label}
-    class="absolute h-[100lvh] w-[100lvw]"
+    class="splash-overlay absolute h-[100lvh] w-[100lvw]"
     role="status"
   >
     <div class="bg-base-300 relative z-50 flex h-[100lvh] items-center justify-center overflow-hidden">

@@ -3,7 +3,13 @@ import { createSignal, onMount } from 'solid-js';
 import { Splash as MoleculesSplash } from '../molecules/Splash.js';
 import { useTranslator } from '../../modules/createI18N.js';
 
-/** The duration of the splash animation. */
+/**
+ * The duration of the splash overlay, in milliseconds.
+ *
+ * Documents the value only -- the overlay's actual visible window is
+ * driven by the `splash-visible` CSS animation on `.splash-overlay` in
+ * `app.css`. Keep both in sync if either changes.
+ */
 export const DURATION = 3_000;
 
 /**
