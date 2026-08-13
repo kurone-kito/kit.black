@@ -1,12 +1,4 @@
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { calendar_v3 } from 'googleapis';
 import {
   fetchAllRawEventsFactory,
@@ -27,8 +19,6 @@ const stubClient = (items: readonly calendar_v3.Schema$Event[] | undefined) => {
   const client = { events: { list } } as unknown as calendar_v3.Calendar;
   return { client, list };
 };
-
-afterEach(() => vi.restoreAllMocks());
 
 describe('fetchRawEventsFactory', () => {
   it('always sends singleEvents, the Japan time zone, and startTime ordering', async () => {
