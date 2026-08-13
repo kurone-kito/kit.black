@@ -23,6 +23,7 @@ const originalCreateObjectURL = URL.createObjectURL;
 const originalRevokeObjectURL = URL.revokeObjectURL;
 
 let clickSpy: ReturnType<typeof vi.spyOn> | undefined;
+let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
 afterEach(() => {
   cleanup();
@@ -33,6 +34,8 @@ afterEach(() => {
   URL.revokeObjectURL = originalRevokeObjectURL;
   clickSpy?.mockRestore();
   clickSpy = undefined;
+  consoleErrorSpy?.mockRestore();
+  consoleErrorSpy = undefined;
 });
 
 describe('Calendar organism', () => {
@@ -78,9 +81,7 @@ describe('Calendar organism', () => {
     URL.createObjectURL = createObjectURL;
     URL.revokeObjectURL = revokeObjectURL;
     toBlob.mockRejectedValueOnce(new Error('capture failed'));
-    const consoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const { getByRole } = render(() => (
       <MemoryRouter>
@@ -90,29 +91,27 @@ describe('Calendar organism', () => {
 
     fireEvent.click(getByRole('button'));
 
-    await waitFor(() => expect(consoleError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalledOnce());
 
-    expect(consoleError).toHaveBeenCalledWith(
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
       'Failed to download the calendar image.',
       expect.any(Error),
     );
     expect(createObjectURL).not.toHaveBeenCalled();
     expect(revokeObjectURL).not.toHaveBeenCalled();
-
-    consoleError.mockRestore();
   });
 
-  it('still revokes the object URL when a failure happens after it is created', async () => {
+  it('still revokes the object URL and removes the anchor when a failure happens after it is created', async () => {
     URL.createObjectURL = createObjectURL;
     URL.revokeObjectURL = revokeObjectURL;
+    let clickedAnchor: HTMLAnchorElement | undefined;
     clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(() => {
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        clickedAnchor = this;
         throw new Error('click failed');
       });
-    const consoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const { getByRole } = render(() => (
       <MemoryRouter>
@@ -122,11 +121,11 @@ describe('Calendar organism', () => {
 
     fireEvent.click(getByRole('button'));
 
-    await waitFor(() => expect(consoleError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalledOnce());
 
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
-
-    consoleError.mockRestore();
+    expect(clickedAnchor).toBeDefined();
+    expect(document.body.contains(clickedAnchor ?? null)).toBe(false);
   });
 });

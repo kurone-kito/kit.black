@@ -33,6 +33,7 @@ export const Calendar: Component = () => {
    */
   const handleDownload = async (): Promise<void> => {
     let url: string | undefined;
+    let anchor: HTMLAnchorElement | undefined;
     try {
       const { snapdom } = await import('@zumer/snapdom');
       const blob = await snapdom.toBlob(calendarRef, {
@@ -42,15 +43,15 @@ export const Calendar: Component = () => {
       });
       const filename = calendarDownloadFilename(since, until, blob.type);
       url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
+      anchor = document.createElement('a');
       anchor.download = filename;
       anchor.href = url;
       document.body.appendChild(anchor);
       anchor.click();
-      anchor.remove();
     } catch (error) {
       console.error('Failed to download the calendar image.', error);
     } finally {
+      anchor?.remove();
       if (url) {
         URL.revokeObjectURL(url);
       }
