@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createSentryVitePlugins } from './sentryVitePlugin.mjs';
+import {
+  applyClientSentryConfig,
+  createSentryVitePlugins,
+} from './sentryVitePlugin.mjs';
 
 const { sentryVitePluginMock } = vi.hoisted(() => ({
   sentryVitePluginMock: vi.fn(() => [{ enforce: 'pre', name: 'sentry-vite' }]),
@@ -53,6 +56,52 @@ describe('createSentryVitePlugins', () => {
       sourcemaps: {
         filesToDeleteAfterUpload: ['.vinxi/**/*.map', 'dist/**/*.map'],
       },
+    });
+  });
+});
+
+describe('applyClientSentryConfig', () => {
+  const baseVite = { plugins: [{ name: 'markdown-it' }] };
+
+  it('leaves the server router config completely unchanged', () => {
+    const result = applyClientSentryConfig('server', baseVite, {
+      SENTRY_AUTH_TOKEN: 'token',
+    });
+    expect(result).toBe(baseVite);
+    expect(sentryVitePluginMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves the server-function router config completely unchanged', () => {
+    const result = applyClientSentryConfig('server-function', baseVite, {
+      SENTRY_AUTH_TOKEN: 'token',
+    });
+    expect(result).toBe(baseVite);
+    expect(sentryVitePluginMock).not.toHaveBeenCalled();
+  });
+
+  it('disables sourcemap generation and adds no plugin for the client router when the token is absent', () => {
+    const result = applyClientSentryConfig('client', baseVite, {
+      SENTRY_AUTH_TOKEN: undefined,
+    });
+    expect(result).toEqual({
+      ...baseVite,
+      build: { sourcemap: false },
+      plugins: [{ name: 'markdown-it' }],
+    });
+    expect(sentryVitePluginMock).not.toHaveBeenCalled();
+  });
+
+  it('enables sourcemap generation and appends the upload plugin for the client router when the token is set', () => {
+    const result = applyClientSentryConfig('client', baseVite, {
+      SENTRY_AUTH_TOKEN: 'token',
+    });
+    expect(result).toEqual({
+      ...baseVite,
+      build: { sourcemap: true },
+      plugins: [
+        { name: 'markdown-it' },
+        { enforce: 'pre', name: 'sentry-vite' },
+      ],
     });
   });
 });
