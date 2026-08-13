@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { getCalendarIds, getJwtInput } from './env.mjs';
 
 beforeAll(() => {
@@ -29,4 +37,26 @@ describe('jwtInput', () => {
       client_secret: '[client-secret]',
       refresh_token: '[refresh-token]',
     }));
+});
+
+describe('getCalendarIds validation', () => {
+  afterEach(() => vi.stubEnv('ID_STREAMING', '[id-streaming]'));
+
+  it('throws naming the missing variable when an ID is unset', () => {
+    vi.stubEnv('ID_STREAMING', '');
+    expect(() => getCalendarIds()).toThrow(
+      'Missing required environment variable: ID_STREAMING',
+    );
+  });
+});
+
+describe('getJwtInput validation', () => {
+  afterEach(() => vi.stubEnv('CLIENT_ID', '[client-id]'));
+
+  it('throws naming the missing variable when a credential is unset', () => {
+    vi.stubEnv('CLIENT_ID', '');
+    expect(() => getJwtInput()).toThrow(
+      'Missing required environment variable: CLIENT_ID',
+    );
+  });
 });
