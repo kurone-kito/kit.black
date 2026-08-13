@@ -14,8 +14,13 @@ export interface SceneCarouselProps {
   /** The items. */
   readonly items: readonly Item[];
 
-  /** The accessible name that describes what the carousel contains. */
-  readonly label?: string | undefined;
+  /**
+   * The accessible name that describes what the carousel contains.
+   * Required because the container is keyboard-focusable
+   * (`tabindex="0"`); an unnamed focusable region is an accessibility
+   * regression.
+   */
+  readonly label: string;
 }
 
 /**
