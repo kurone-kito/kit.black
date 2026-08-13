@@ -85,6 +85,57 @@ describe('toEventFactory', () => {
     );
   });
 
+  it('skips a timed event with no end object at all, without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      id: 'no-end-event',
+      start: { dateTime: '2026-01-01T12:00:00+09:00' },
+      summary: 'No End',
+    };
+    expect(() => toEventFactory('others')(raw)).not.toThrow();
+    expect(toEventFactory('others')(raw)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('No End'));
+  });
+
+  it('skips a timed event whose end has no dateTime, without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      end: {},
+      id: 'empty-end-event',
+      start: { dateTime: '2026-01-01T12:00:00+09:00' },
+      summary: 'Empty End',
+    };
+    expect(() => toEventFactory('others')(raw)).not.toThrow();
+    expect(toEventFactory('others')(raw)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Empty End'));
+  });
+
+  it('skips a timed event whose end.dateTime is an empty string, without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      end: { dateTime: '' },
+      id: 'blank-end-event',
+      start: { dateTime: '2026-01-01T12:00:00+09:00' },
+      summary: 'Blank End',
+    };
+    expect(() => toEventFactory('others')(raw)).not.toThrow();
+    expect(toEventFactory('others')(raw)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Blank End'));
+  });
+
+  it('skips a timed event whose end.dateTime does not parse, without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw: calendar_v3.Schema$Event = {
+      end: { dateTime: 'not-a-date' },
+      id: 'garbled-end-event',
+      start: { dateTime: '2026-01-01T12:00:00+09:00' },
+      summary: 'Garbled End',
+    };
+    expect(() => toEventFactory('others')(raw)).not.toThrow();
+    expect(toEventFactory('others')(raw)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Garbled End'));
+  });
+
   it('renders the 翌 (next-day) marker when the event crosses a JST midnight', () => {
     const raw: calendar_v3.Schema$Event = {
       end: { dateTime: '2026-01-02T00:30:00+09:00' },
