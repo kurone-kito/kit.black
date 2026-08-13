@@ -9,6 +9,9 @@ export interface HeroProps
       'class' | 'innerHTML'
     >,
     Readonly<ParentProps> {
+  /** The accessible label describing the hero content. */
+  readonly label: string;
+
   /** The logo */
   readonly logo?: JSX.Element;
 }
@@ -19,10 +22,10 @@ export interface HeroProps
  * @returns The component.
  */
 export const Hero: Component<HeroProps> = (props) => {
-  const [local, others] = splitProps(props, ['class', 'logo']);
+  const [local, others] = splitProps(props, ['class', 'label', 'logo']);
   return (
     <>
-      <section aria-label="Hero section" class="hero bg-base-300 lg:pb-20">
+      <section aria-label={local.label} class="hero bg-base-300 lg:pb-20">
         <div class="hero-content w-full items-stretch px-0">
           {local.logo}
           <div
@@ -35,7 +38,6 @@ export const Hero: Component<HeroProps> = (props) => {
         </div>
       </section>
       <section
-        aria-label="Additional hero section for mobile"
         class={twMerge(
           'container mx-auto flex flex-col items-center gap-8 py-20 leading-loose tracking-wider lg:hidden',
           local.class,

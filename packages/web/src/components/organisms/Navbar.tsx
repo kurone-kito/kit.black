@@ -1,6 +1,7 @@
 import type { Component } from 'solid-js';
 import { createSignal } from 'solid-js';
 import { HamburgerButton } from '../atoms/HamburgerButton.js';
+import { useTranslator } from '../../modules/createI18N.js';
 import { LanguageChanger } from './LanguageChanger.js';
 import { ToggleTheme } from './ToggleTheme.js';
 
@@ -10,9 +11,10 @@ import { ToggleTheme } from './ToggleTheme.js';
  */
 export const Navbar: Component = () => {
   const [expanded, setExpandState] = createSignal(false);
+  const t = useTranslator();
   return (
     <header
-      aria-label="Main navigation"
+      aria-label={t('navbarLabel')}
       class="navbar pointer-events-none fixed top-0 z-50 justify-end"
       role="navigation"
     >
@@ -30,6 +32,7 @@ export const Navbar: Component = () => {
         </li>
         <li>
           <HamburgerButton
+            label={t('hamburgerMenu')}
             onClick={(event) => setExpandState(event.currentTarget.checked)}
           />
         </li>

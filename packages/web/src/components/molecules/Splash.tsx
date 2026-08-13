@@ -4,6 +4,9 @@ import type { Component } from 'solid-js';
 export interface SplashProps {
   /** The animation flag. */
   readonly animation?: boolean;
+
+  /** The accessible label describing the loading status. */
+  readonly label: string;
 }
 
 /**
@@ -13,7 +16,7 @@ export interface SplashProps {
  */
 export const Splash: Component<SplashProps> = (props) => (
   <section
-    aria-label="Loading the website"
+    aria-label={props.label}
     class="absolute h-[100lvh] w-[100lvw]"
     role="status"
   >
