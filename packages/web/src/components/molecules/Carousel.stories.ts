@@ -17,6 +17,7 @@ export default {
   args: {
     class: '',
     items: Array.from({ length: 10 }, (_, i) => [src, `${i}`] as const),
+    label: 'Example carousel',
   },
   component: Carousel,
 } satisfies Meta<Target>;

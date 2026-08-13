@@ -2,6 +2,7 @@ import type { Resources } from './types.js';
 
 const resources: Resources = {
   activities: 'Kuroné Kito’s main activities',
+  activitiesCarousel: 'Kuroné Kito’s activity photos',
   avatarKito: 'Kuroné Kito’s standard avatar',
   avatarMomoneko: '“Momoneko-chan” modified avatar for VR',
   author: 'Kuroné Kito',

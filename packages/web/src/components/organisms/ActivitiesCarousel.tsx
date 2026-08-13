@@ -14,6 +14,7 @@ import sceneSleepyMeetup from '../../assets/activities/sleepy-meetup.webp';
 import uiUxMeetup from '../../assets/activities/ui-ux-meetup.webp';
 import type { Item } from '../molecules/Carousel.js';
 import { Carousel } from '../molecules/Carousel.js';
+import { useTranslator } from '../../modules/createI18N.js';
 
 /** The activities. */
 const activities = [
@@ -36,6 +37,13 @@ const activities = [
  * The activities carousel.
  * @returns The component.
  */
-export const ActivitiesCarousel: Component = () => (
-  <Carousel class="m-safe" items={activities} />
-);
+export const ActivitiesCarousel: Component = () => {
+  const t = useTranslator();
+  return (
+    <Carousel
+      class="m-safe"
+      items={activities}
+      label={t('activitiesCarousel')}
+    />
+  );
+};
