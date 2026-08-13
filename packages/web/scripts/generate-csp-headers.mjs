@@ -65,10 +65,14 @@ export const collectHtmlFiles = async (dir) => {
  */
 export const extractInlineScriptHashes = (html) => {
   const hashes = new Set();
-  for (const [tag, body] of html.matchAll(
-    /<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g,
+  for (const [, attrs, body] of html.matchAll(
+    /<script((?:\s[^>]*)?)>([\s\S]*?)<\/script>/g,
   )) {
-    if (/<script[^>]*\ssrc=/.test(tag) || !body.trim()) continue;
+    // Only the opening tag's own attributes may carry `src=`; matching
+    // against the whole tag (attrs + body) would false-positive on a
+    // script body that happens to contain the literal text `<script
+    // src=`, e.g. an embedded HTML string in the asset manifest.
+    if (/\ssrc=/.test(attrs) || !body.trim()) continue;
     hashes.add(`sha256-${createHash('sha256').update(body).digest('base64')}`);
   }
   return [...hashes];
@@ -121,6 +125,33 @@ export const sentryConnectOrigin = (dsn) => {
 };
 
 /**
+ * The warning `sentryConnectOriginOrWarn` emits when `VITE_SENTRY_DSN`
+ * is set but not a parsable URL. Exported so tests can assert on it
+ * without duplicating the exact wording.
+ * @type {string}
+ */
+export const malformedDsnWarning =
+  'generate-csp-headers: VITE_SENTRY_DSN is set but not a parsable URL — ' +
+  "shipping this build with connect-src/worker-src still pinned to 'self' " +
+  '(and blob: omitted) would silently block Sentry telemetry once ' +
+  'initSentry() runs with this same value. Fix or unset VITE_SENTRY_DSN.';
+
+/**
+ * {@link sentryConnectOrigin}, but logs {@link malformedDsnWarning} to
+ * stderr on the failure case instead of failing silently — a DSN that
+ * is present-but-unparsable would otherwise ship a CSP that blocks
+ * Sentry's own beacons and Replay worker with no build-time signal, and
+ * Sentry cannot report its own CSP-blocked traffic to itself.
+ * @param {string | undefined} dsn See {@link sentryConnectOrigin}.
+ * @returns {string | undefined} See {@link sentryConnectOrigin}.
+ */
+export const sentryConnectOriginOrWarn = (dsn) => {
+  const origin = sentryConnectOrigin(dsn);
+  if (dsn && !origin) console.warn(malformedDsnWarning);
+  return origin;
+};
+
+/**
  * Whether this module was invoked directly (`node scripts/…mjs`), rather
  * than imported. Deliberately avoids `import.meta.main` (Node >=24.2
  * only) for the same fail-open-no-op reason documented in
@@ -141,7 +172,9 @@ if (isMain) {
     .sort()
     .map((hash) => `'${hash}'`);
 
-  const connectOrigin = sentryConnectOrigin(process.env['VITE_SENTRY_DSN']);
+  const connectOrigin = sentryConnectOriginOrWarn(
+    process.env['VITE_SENTRY_DSN'],
+  );
 
   const headersPath = `${distDir}/_headers`;
   const original = await readFile(headersPath, 'utf8');

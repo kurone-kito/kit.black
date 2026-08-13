@@ -30,6 +30,18 @@ const hasDist = existsSync(distDir);
 const resourceLoadPattern =
   /<(script|img|source|audio|video|iframe)\b[^>]*\ssrc=["'](https?:\/\/[^"']+)["']|<link\b[^>]*\srel=["'](?:stylesheet|preload|modulepreload|icon|manifest)["'][^>]*\shref=["'](https?:\/\/[^"']+)["']/gi;
 
+/**
+ * `srcset` candidates are a comma-separated `url descriptor, …` list, so
+ * an external origin need not start the attribute value the way a bare
+ * `src` does — this checks every whitespace-delimited token in each
+ * `srcset` value, not just an anchored prefix. Not part of
+ * {@link resourceLoadPattern} itself so a `srcset` hit records every
+ * offending token rather than only the first. Kept as its own check
+ * (rather than folded into the CSP source list today) so this stays a
+ * regression guard once #151 adds responsive image variants.
+ */
+const srcsetPattern = /<(?:img|source)\b[^>]*\ssrcset=["']([^"']+)["']/gi;
+
 describe.skipIf(!hasDist)(
   'production build output matches the shipped CSP',
   () => {
@@ -59,6 +71,12 @@ describe.skipIf(!hasDist)(
         const html = await readFile(file, 'utf8');
         for (const match of html.matchAll(resourceLoadPattern)) {
           violations.push({ file, url: match[2] ?? match[3] });
+        }
+        for (const [, srcset] of html.matchAll(srcsetPattern)) {
+          for (const candidate of srcset.split(',')) {
+            const url = candidate.trim().split(/\s+/)[0];
+            if (/^https?:\/\//i.test(url)) violations.push({ file, url });
+          }
         }
       }
       expect(violations).toStrictEqual([]);

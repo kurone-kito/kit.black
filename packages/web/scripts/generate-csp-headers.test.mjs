@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   connectSrcPlaceholder,
   extractInlineScriptHashes,
   injectCspSources,
+  malformedDsnWarning,
   scriptSrcPlaceholder,
   sentryConnectOrigin,
+  sentryConnectOriginOrWarn,
   workerSrcPlaceholder,
 } from './generate-csp-headers.mjs';
 
@@ -40,6 +42,16 @@ describe('extractInlineScriptHashes', () => {
     const html = `<script>${body}</script>`;
     const expected = `sha256-${createHash('sha256').update(body).digest('base64')}`;
     expect(extractInlineScriptHashes(html)).toStrictEqual([expected]);
+  });
+
+  it('does not false-positive on a script body that contains the text "<script src="', () => {
+    // The manifest script legitimately embeds asset metadata as a
+    // string; if that string happened to contain a script-tag-shaped
+    // substring, only the *opening* tag's own attributes should decide
+    // whether this is a src-referencing script.
+    const body = 'window.manifest = { snippet: "<script src=\\"x.js\\">" };';
+    const html = `<script>${body}</script>`;
+    expect(extractInlineScriptHashes(html)).toHaveLength(1);
   });
 });
 
@@ -103,5 +115,32 @@ describe('sentryConnectOrigin', () => {
 
   it('returns undefined for an unparsable DSN', () => {
     expect(sentryConnectOrigin('not-a-url')).toBeUndefined();
+  });
+});
+
+describe('sentryConnectOriginOrWarn', () => {
+  it('returns the origin and warns nothing when the DSN is valid', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(
+      sentryConnectOriginOrWarn(
+        'https://examplekey@o123456.ingest.us.sentry.io/789',
+      ),
+    ).toBe('https://o123456.ingest.us.sentry.io');
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('warns nothing when the DSN is unset', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(sentryConnectOriginOrWarn(undefined)).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('warns when the DSN is set but unparsable, instead of failing silently', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(sentryConnectOriginOrWarn('not-a-url')).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(malformedDsnWarning);
+    warn.mockRestore();
   });
 });
