@@ -13,8 +13,11 @@ import { Splash } from '../organisms/Splash.js';
  *
  * The splash overlay always renders here; `app.css`'s `splash-overlay`
  * class owns its visibility and 3s timing (including the
- * `prefers-reduced-motion` fallback) so the behavior is identical with
- * or without JavaScript -- see #159.
+ * `prefers-reduced-motion` fallback), so that timing is identical with
+ * or without JavaScript -- see #159. The logo's own entrance animation
+ * (`organisms/Splash.tsx`) still gates on client mount and stays paused
+ * without JavaScript; only the overlay's visibility/timing is unified
+ * here.
  * @param props The properties.
  * @returns The component.
  */

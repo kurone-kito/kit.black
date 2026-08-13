@@ -8,12 +8,14 @@ describe('Splash molecule', () => {
   it('renders the splash-overlay class that owns visibility and timing in CSS', () => {
     const { container } = render(() => <Splash label="Loading" />);
     const section = container.querySelector('section');
+    expect(section).not.toBeNull();
     expect(section).toHaveClass('splash-overlay');
   });
 
   it('announces itself as a status region with the given label', () => {
     const { container } = render(() => <Splash label="Loading the website" />);
     const section = container.querySelector('section');
+    expect(section).not.toBeNull();
     expect(section).toHaveAttribute('role', 'status');
     expect(section).toHaveAttribute('aria-label', 'Loading the website');
   });
@@ -23,6 +25,7 @@ describe('Splash molecule', () => {
     const logo = container.querySelector(
       '.animate-\\[splash-logo-scale_1\\.5s_ease-in_1\\.5s\\]',
     );
+    expect(logo).not.toBeNull();
     expect(logo).toHaveClass('[animation-play-state:paused]');
     expect(logo).not.toHaveClass('[animation-play-state:running]');
   });
@@ -32,6 +35,7 @@ describe('Splash molecule', () => {
     const logo = container.querySelector(
       '.animate-\\[splash-logo-scale_1\\.5s_ease-in_1\\.5s\\]',
     );
+    expect(logo).not.toBeNull();
     expect(logo).toHaveClass('[animation-play-state:running]');
     expect(logo).not.toHaveClass('[animation-play-state:paused]');
   });
