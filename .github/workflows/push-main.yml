@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}
+  queue: max
 permissions:
   contents: read
 jobs:
@@ -113,6 +114,9 @@ jobs:
         # cspell:disable-next-line
         uses: nwtgck/actions-netlify@d22a32a27c918fe470bbc562e984f80ec48c2668 # v4.0
         with:
+          enable-commit-comment: false
+          enable-commit-status: false
+          enable-github-deployment: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
           production-branch: main
