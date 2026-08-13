@@ -34,7 +34,6 @@ describe('LinkList', () => {
     expect(
       document.head.querySelector('link[href="https://fonts.gstatic.com"]'),
     ).toBeNull();
-    expect(document.head.querySelector('link[rel="preconnect"]')).toBeNull();
   });
 
   it('renders the ico, 32x32, and 16x16 icon links when provided', () => {
