@@ -1,4 +1,18 @@
-@import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;900&display=swap');
+@font-face {
+  font-family: Lato;
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('./assets/fonts/lato-latin-300-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: Lato;
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url('./assets/fonts/lato-latin-900-normal.woff2') format('woff2');
+}
 
 @tailwind base;
 @tailwind components;

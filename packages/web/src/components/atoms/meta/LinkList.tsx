@@ -42,12 +42,6 @@ export interface LinkListProps {
  */
 export const LinkList: Component<LinkListProps> = (props) => (
   <>
-    <Link href="https://fonts.googleapis.com" rel="preconnect" />
-    <Link
-      crossOrigin="anonymous"
-      href="https://fonts.gstatic.com"
-      rel="preconnect"
-    />
     <Show when={props.authorUrl}>
       {(href) => <Link href={href()} rel="author" />}
     </Show>

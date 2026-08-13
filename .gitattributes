@@ -1,6 +1,7 @@
 *.ico binary
 *.png binary
 *.webp binary
+*.woff2 binary
 
 .coderabbit.yaml export-ignore
 .git* export-ignore
