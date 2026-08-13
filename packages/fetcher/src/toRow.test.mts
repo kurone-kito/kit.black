@@ -64,4 +64,26 @@ describe('toRowMapper', () => {
     expect(rowA.holiday).toBe(true);
     expect(rowB.holiday).toBeUndefined();
   });
+
+  it('computes dateSpan and a single dated row for same-date events that are not adjacent in the array', () => {
+    // `array.filter`/`findIndex` scan the whole array, so a different
+    // date sitting between the two same-date events must not change
+    // the dateSpan or which row renders the date cell.
+    const a = event({ date: '01/01' });
+    const middle = event({
+      date: '01/02',
+      epoch: Date.parse('2026-01-02T12:00:00+09:00'),
+    });
+    const b = event({ date: '01/01' });
+    const array = [a, middle, b];
+    const rowA = toRowMapper(a, 0, array);
+    const rowMiddle = toRowMapper(middle, 1, array);
+    const rowB = toRowMapper(b, 2, array);
+    expect(rowA.date).toBe('01/01');
+    expect(rowA.dateSpan).toBe(2);
+    expect(rowMiddle.date).toBe('01/02');
+    expect(rowMiddle.dateSpan).toBeUndefined();
+    expect(rowB.date).toBeUndefined();
+    expect(rowB.dateSpan).toBeUndefined();
+  });
 });
