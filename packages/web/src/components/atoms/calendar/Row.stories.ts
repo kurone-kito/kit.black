@@ -17,6 +17,9 @@ export default {
     week: '',
   },
   argTypes: {
+    holiday: {
+      control: { type: 'boolean' },
+    },
     type: {
       control: { type: 'select' },
       options: ['others', 'release', 'streaming'],

@@ -1,4 +1,5 @@
 import { Mapper, formatWeek } from '@kurone-kito/kit.black-lib';
+import { isJpHoliday } from './holiday.mjs';
 import type { EventDetail, EventDetailRow } from './types.mjs';
 
 /**
@@ -17,7 +18,11 @@ export const toRowMapper: Mapper<EventDetail, EventDetailRow> = (
   const week = formatWeek(epoch);
   const equalsDate = (e: EventDetail) => e.date === dt;
   const date = index === array.findIndex(equalsDate) ? dt : undefined;
+  // Only the row that renders the date cell (see the same `date` gate
+  // above) needs `holiday`: computing it for every same-day row would
+  // repeat the JST lookup and bloat data.json with an unused field.
+  const holiday = date && isJpHoliday(epoch) ? true : undefined;
   const span = array.filter(equalsDate).length;
   const dateSpan = date && span > 1 ? span : undefined;
-  return { children, date, dateSpan, time, type, week } as const;
+  return { children, date, dateSpan, holiday, time, type, week } as const;
 };
