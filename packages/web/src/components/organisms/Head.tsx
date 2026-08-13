@@ -3,7 +3,10 @@ import type { Component } from 'solid-js';
 import { createMemo } from 'solid-js';
 import constants from '../../constants.json';
 import { useLanguage, useTranslator } from '../../modules/createI18N.js';
-import { useLanguageHref } from '../../modules/useLanguageHref.js';
+import {
+  useLanguageHref,
+  useUnprefixedHref,
+} from '../../modules/useLanguageHref.js';
 import { Head as InternalHead } from '../molecules/Head.js';
 
 /** The images for the Open Graph protocol. */
@@ -22,6 +25,7 @@ export const Head: Component = () => {
   const location = useLocation();
   const jaHref = useLanguageHref('ja');
   const enHref = useLanguageHref('en');
+  const defaultHref = useUnprefixedHref();
 
   /** The absolute URL of the current page. */
   const pageUrl = createMemo(() => `${constants.site.url}${location.pathname}`);
@@ -30,7 +34,7 @@ export const Head: Component = () => {
   const alternates = createMemo(() => [
     { hreflang: 'ja', href: `${constants.site.url}${jaHref()}` },
     { hreflang: 'en', href: `${constants.site.url}${enHref()}` },
-    { hreflang: 'x-default', href: `${constants.site.url}/` },
+    { hreflang: 'x-default', href: `${constants.site.url}${defaultHref()}` },
   ]);
 
   return (

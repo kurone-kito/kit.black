@@ -36,7 +36,14 @@ const renderHead = (path: string) => {
     <MetaProvider>
       <MemoryRouter history={history}>
         <Suspense>
-          <Route path="/:language?" component={Head} />
+          {/*
+           * The trailing `/*` lets this harness match a synthetic
+           * non-root path (e.g. `/en/about`) that the app itself does
+           * not route yet, while `:language?` still populates for
+           * `useLanguage()` so the OGP-locale assertions stay
+           * meaningful at those paths too.
+           */}
+          <Route path="/:language?/*" component={Head} />
         </Suspense>
       </MemoryRouter>
     </MetaProvider>
@@ -103,5 +110,14 @@ describe('organisms/Head', () => {
         'link[rel="alternate"][hreflang="x-default"]',
       ),
     ).toHaveAttribute('href', 'https://kit.black/');
+  });
+
+  it('derives x-default from the current path instead of the site root', () => {
+    renderHead('/en/about');
+    expect(
+      document.head.querySelector(
+        'link[rel="alternate"][hreflang="x-default"]',
+      ),
+    ).toHaveAttribute('href', 'https://kit.black/about');
   });
 });
