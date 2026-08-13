@@ -268,6 +268,9 @@ $RECYCLE.BIN/
 # JSON
 packages/web/src/*.json
 
+# Web app manifest (generated from constants.yaml, see scripts/generate-manifest.mts)
+packages/web/public/site.webmanifest
+
 # Solid.js
 packages/web/.output
 packages/web/.vinxi

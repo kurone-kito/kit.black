@@ -13,6 +13,9 @@ export interface XCardProps {
   /** The card image URL. */
   readonly image?: string | undefined;
 
+  /** The alt text of the card image. */
+  readonly imageAlt?: string | undefined;
+
   /** The site name. */
   readonly siteName: string;
 
@@ -27,7 +30,10 @@ export interface XCardProps {
  */
 export const XCard: Component<XCardProps> = (props) => (
   <>
-    <Meta name="twitter:card" content="summary_large_image" />
+    {/* The referenced image is square; `summary` is the correct card
+        type for a 1:1 aspect ratio (`summary_large_image` expects a
+        1.91:1 landscape image). */}
+    <Meta name="twitter:card" content="summary" />
     <Show when={props.author}>
       <Meta name="twitter:creator" content={props.author} />
     </Show>
@@ -36,6 +42,9 @@ export const XCard: Component<XCardProps> = (props) => (
     </Show>
     <Show when={props.image}>
       <Meta name="twitter:image" content={props.image} />
+    </Show>
+    <Show when={props.image && props.imageAlt}>
+      <Meta name="twitter:image:alt" content={props.imageAlt} />
     </Show>
     <Show when={props.author}>
       <Meta name="twitter:author" content={props.author} />
