@@ -7,9 +7,11 @@ on:
   schedule:
     - cron: '0 */3 * * *'
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}
+  queue: max
 permissions:
   contents: read
-  pull-requests: write
 jobs:
   detect-changes:
     if: github.event_name == 'schedule'
@@ -35,8 +37,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-      - name: Install the latest corepack explicitly
-        run: npm install --force -g corepack@latest
       - name: Enable the corepack because of the pnpm
         run: corepack enable
       - name: Post-prepare the Node.js environment
@@ -81,8 +81,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-      - name: Install the latest corepack explicitly
-        run: npm install --force -g corepack@latest
       - name: Enable the corepack because of the pnpm
         run: corepack enable
       - name: Post-prepare the Node.js environment
@@ -114,8 +112,11 @@ jobs:
           NODE_ENV: production
         name: Deploy to Netlify
         # cspell:disable-next-line
-        uses: nwtgck/actions-netlify@v4.0
+        uses: nwtgck/actions-netlify@d22a32a27c918fe470bbc562e984f80ec48c2668 # v4.0
         with:
+          enable-commit-comment: false
+          enable-commit-status: false
+          enable-github-deployment: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
           production-branch: main
