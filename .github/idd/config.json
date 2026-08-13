@@ -1,7 +1,24 @@
 {
   "$schema": "https://kurone-kito.github.io/idd-skill/schemas/policy.schema.json",
+  "advisoryBotLogins": ["coderabbitai[bot]", "chatgpt-codex-connector[bot]"],
+  "advisoryWait": {
+    "convergenceScope": "idd-claimed",
+    "primaryBotLogin": "copilot"
+  },
   "autopilotSuitability": {
     "floor": 3
+  },
+  "ciGate": {
+    "externalChecks": {
+      "waivable": [
+        { "selector": "idd-advisory-convergence", "matchMode": "exact" }
+      ]
+    },
+    "externalCheckWaivers": {
+      "mode": "maintainer-authorized",
+      "authorityPolicy": "owners-and-maintainers-only",
+      "maxValidity": "PT24H"
+    }
   },
   "ciWait": {
     "runningTimeout": "PT30M",
@@ -18,13 +35,20 @@
     "pre-push-validate": "pnpm run lint && pnpm run test",
     "post-fix-validate": "pnpm run lint:fix && pnpm run lint && pnpm run test"
   },
+  "discover": { "selectionDesync": "session-offset" },
   "helperRuntime": {
     "profile": "instructions-only"
   },
   "iddVersion": "0.6.0",
   "issueScope": "roadmap-first",
+  "labels": {
+    "roadmapLabelName": "roadmap",
+    "blockedByHumanLabelName": "status:blocked-by-human",
+    "needsDecisionLabelName": "status:needs-decision"
+  },
   "maintainerApprovalActorPolicy": "owners-and-maintainers-only",
   "markerPrefix": "kit-black",
+  "mergeGate": { "soloCodeownerAdminFallback": "auto-admin-retry" },
   "mergePolicy": "fully_autonomous_merge",
   "orphanFirstPolicy": "none",
   "reviewPolicy": "copilot-advisory",
