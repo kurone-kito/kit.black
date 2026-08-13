@@ -19,9 +19,6 @@ export interface WorkCardProps
   /** The label for more information button. */
   readonly labelMore: JSX.Element;
 
-  /** The landscape image URL. */
-  readonly landscapeSrc?: string;
-
   /** The release year text. */
   readonly released: JSX.Element;
 }
@@ -37,42 +34,17 @@ export const WorkCard: Component<WorkCardProps> = (props) => {
     <li class="card bg-base-300 lg:card-side shadow-xl">
       <Show when={others.src}>
         <figure class="aspect-video !items-start lg:aspect-[128/207] lg:h-full lg:w-auto lg:max-w-72 xl:aspect-square xl:max-w-96">
-          <Show
-            fallback={
-              <img
-                alt={others.alt}
-                class="w-full"
-                decoding="async"
-                fetchpriority="low"
-                height={1024}
-                loading="lazy"
-                src={others.src}
-                width={1656}
-              />
-            }
-            when={others.landscapeSrc}
-          >
-            <img
-              alt={others.alt}
-              class="block w-full lg:hidden"
-              decoding="async"
-              fetchpriority="low"
-              height={1280}
-              loading="lazy"
-              src={others.landscapeSrc}
-              width={720}
-            />
-            <img
-              alt={others.alt}
-              class="hidden w-full lg:block"
-              decoding="async"
-              fetchpriority="low"
-              height={1024}
-              loading="lazy"
-              src={others.src}
-              width={1656}
-            />
-          </Show>
+          {/* Work images (assets/works/*.webp) are portrait, 1024x1656. */}
+          <img
+            alt={others.alt}
+            class="w-full"
+            decoding="async"
+            fetchpriority="low"
+            height={1656}
+            loading="lazy"
+            src={others.src}
+            width={1024}
+          />
         </figure>
       </Show>
       <div class="card-body lg:basis-0">
