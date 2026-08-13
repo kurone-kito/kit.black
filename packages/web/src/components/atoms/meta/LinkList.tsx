@@ -52,7 +52,7 @@ export const LinkList: Component<LinkListProps> = (props) => (
       {(href) => <Link href={href()} rel="author" />}
     </Show>
     <Show when={props.iconIcoUrl}>
-      {(href) => <Link href={href()} rel="icon" sizes="any" />}
+      {(href) => <Link href={href()} rel="icon" sizes="16x16 32x32 48x48" />}
     </Show>
     <Show when={props.icon32Url}>
       {(href) => (

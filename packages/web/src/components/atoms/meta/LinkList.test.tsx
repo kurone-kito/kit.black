@@ -35,7 +35,7 @@ describe('LinkList', () => {
     const icons = document.head.querySelectorAll('link[rel="icon"]');
     expect(icons).toHaveLength(3);
     const ico = document.head.querySelector('link[href="/favicon.ico"]');
-    expect(ico).toHaveAttribute('sizes', 'any');
+    expect(ico).toHaveAttribute('sizes', '16x16 32x32 48x48');
     const png32 = document.head.querySelector(
       'link[href="/favicon-32x32.png"]',
     );

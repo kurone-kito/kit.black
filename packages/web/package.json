@@ -17,7 +17,7 @@
   "scripts": {
     "prebuild": "pnpm run \"/^prebuild:.+/\"",
     "prebuild:fetcher": "kb-fetcher > src/data.json",
-    "prebuild:manifest": "node scripts/generate-manifest.mts",
+    "prebuild:manifest": "node scripts/generate-manifest.mjs",
     "prebuild:yaml": "js-yaml src/constants.yaml > src/constants.json",
     "build": "vinxi build",
     "build:storybook": "storybook build",
