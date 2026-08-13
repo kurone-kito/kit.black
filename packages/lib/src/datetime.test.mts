@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 import type { DateParsable } from './datetime.mjs';
 import {
   formatDate,
@@ -71,10 +71,21 @@ describe('plusDate', () => {
   );
 });
 
+// `truncateTime`, `weekDates`, and `weekRange` are anchored to JST
+// (`Asia/Tokyo`) regardless of the host process's own time zone, so
+// their fixtures use `Z`-suffixed (or otherwise TZ-unambiguous) inputs
+// and `+09:00`-anchored expected values throughout — a naive,
+// un-suffixed string on either side would be parsed under the *host's*
+// local time zone by the `Date` constructor itself, which is outside
+// these functions' control and would make the fixture's own expected
+// value host-TZ-dependent rather than a reliable regression check.
 describe('truncateTime', () => {
   it.each([
-    ['2021-08-10T11:45:14.191', new Date('2021-08-10T00:00')],
-    [new Date('2021-08-10T11:45:14.191'), new Date('2021-08-10T00:00')],
+    ['2021-08-10T11:45:14.191Z', new Date('2021-08-10T00:00:00+09:00')],
+    [
+      new Date('2021-08-10T11:45:14.191Z'),
+      new Date('2021-08-10T00:00:00+09:00'),
+    ],
   ])('%s -> "%s"', (date, expected) =>
     expect(truncateTime(date)).toEqual(expected),
   );
@@ -83,27 +94,27 @@ describe('truncateTime', () => {
 describe('weekDates', () => {
   it.each([
     [
-      '2021-08-10T11:45:14.191',
+      '2021-08-10T11:45:14.191Z',
       [
-        new Date('2021-08-10T00:00'),
-        new Date('2021-08-11T00:00'),
-        new Date('2021-08-12T00:00'),
-        new Date('2021-08-13T00:00'),
-        new Date('2021-08-14T00:00'),
-        new Date('2021-08-15T00:00'),
-        new Date('2021-08-16T00:00'),
+        new Date('2021-08-10T00:00:00+09:00'),
+        new Date('2021-08-11T00:00:00+09:00'),
+        new Date('2021-08-12T00:00:00+09:00'),
+        new Date('2021-08-13T00:00:00+09:00'),
+        new Date('2021-08-14T00:00:00+09:00'),
+        new Date('2021-08-15T00:00:00+09:00'),
+        new Date('2021-08-16T00:00:00+09:00'),
       ],
     ],
     [
-      '2021-09-19T11:45:14.810',
+      '2021-09-19T11:45:14.810Z',
       [
-        new Date('2021-09-19T00:00'),
-        new Date('2021-09-20T00:00'),
-        new Date('2021-09-21T00:00'),
-        new Date('2021-09-22T00:00'),
-        new Date('2021-09-23T00:00'),
-        new Date('2021-09-24T00:00'),
-        new Date('2021-09-25T00:00'),
+        new Date('2021-09-19T00:00:00+09:00'),
+        new Date('2021-09-20T00:00:00+09:00'),
+        new Date('2021-09-21T00:00:00+09:00'),
+        new Date('2021-09-22T00:00:00+09:00'),
+        new Date('2021-09-23T00:00:00+09:00'),
+        new Date('2021-09-24T00:00:00+09:00'),
+        new Date('2021-09-25T00:00:00+09:00'),
       ],
     ],
   ])('%s -> "%s"', (date, expected) =>
@@ -114,16 +125,51 @@ describe('weekDates', () => {
 describe('weekRange', () => {
   it.each([
     [
-      '2021-08-10T11:45:14.191',
+      '2021-08-10T11:45:14.191Z',
       6,
-      [new Date('2021-08-10T00:00'), new Date('2021-08-16T00:00')],
+      [
+        new Date('2021-08-10T00:00:00+09:00'),
+        new Date('2021-08-16T00:00:00+09:00'),
+      ],
     ],
     [
-      '2021-09-19T11:45:14.810',
+      '2021-09-19T11:45:14.810Z',
       6,
-      [new Date('2021-09-19T00:00'), new Date('2021-09-25T00:00')],
+      [
+        new Date('2021-09-19T00:00:00+09:00'),
+        new Date('2021-09-25T00:00:00+09:00'),
+      ],
     ],
   ])('%s, %s -> "%s"', (date, range, expected) =>
     expect(weekRange(date, range)).toEqual(expected),
+  );
+});
+
+describe('time zone independence', () => {
+  const originalTz = process.env.TZ;
+
+  afterEach(() => {
+    process.env.TZ = originalTz;
+  });
+
+  it.each(['UTC', 'Asia/Tokyo', 'America/Los_Angeles'])(
+    'weekRange and weekDates return the same instants regardless of TZ=%s',
+    (tz) => {
+      process.env.TZ = tz;
+      const start = '2021-08-10T11:45:14.191Z';
+      expect(weekRange(start, 6)).toEqual([
+        new Date('2021-08-10T00:00:00+09:00'),
+        new Date('2021-08-16T00:00:00+09:00'),
+      ]);
+      expect(weekDates(start)).toEqual([
+        new Date('2021-08-10T00:00:00+09:00'),
+        new Date('2021-08-11T00:00:00+09:00'),
+        new Date('2021-08-12T00:00:00+09:00'),
+        new Date('2021-08-13T00:00:00+09:00'),
+        new Date('2021-08-14T00:00:00+09:00'),
+        new Date('2021-08-15T00:00:00+09:00'),
+        new Date('2021-08-16T00:00:00+09:00'),
+      ]);
+    },
   );
 });
