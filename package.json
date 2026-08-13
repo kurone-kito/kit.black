@@ -20,7 +20,6 @@
     ]
   },
   "scripts": {
-    "prebuild": "nodetouch .env",
     "build": "pnpm run -r build",
     "clean": "pnpm run --no-bail \"/^clean:.+/\"",
     "clean:root": "rimraf -g .eslintcache \"*.tgz\" \"*.tsbuildinfo\" \"node_modules/.cache/**/*\"",
@@ -41,7 +40,6 @@
     "pnpm:devPreinstall": "pnpm dlx mkdirp packages/fetcher/dist && pnpm dlx shx head -n 1 packages/fetcher/src/bin.mts > packages/fetcher/dist/bin.mjs",
     "prepare": "husky",
     "prettier": "prettier --cache --log-level=warn \"./**/*\"",
-    "prestart": "pnpm run prebuild",
     "start": "pnpm run --parallel -r start",
     "stylelint": "stylelint --aei --cache --cache-location node_modules/.cache/stylelint/ \"./**/*.css\"",
     "test": "pnpm run -r test"
@@ -76,7 +74,6 @@
     "stylelint": "^16.14.1",
     "stylelint-config-standard": "^36.0.1",
     "stylelint-config-tailwindcss": "^0.0.7",
-    "touch": "^3.1.1",
     "typescript": "~5.7.3",
     "typescript-eslint-language-service": "^5.0.5",
     "vitest": "^2.1.9"
