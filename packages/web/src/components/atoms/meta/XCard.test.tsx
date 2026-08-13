@@ -70,4 +70,15 @@ describe('XCard', () => {
       document.head.querySelector('meta[name="twitter:creator"]'),
     ).toHaveAttribute('content', 'Example Author');
   });
+
+  it('does not emit twitter:creator when author is unset', () => {
+    render(() => (
+      <MetaProvider>
+        <XCard siteName="Example" />
+      </MetaProvider>
+    ));
+    expect(
+      document.head.querySelector('meta[name="twitter:creator"]'),
+    ).toBeNull();
+  });
 });
