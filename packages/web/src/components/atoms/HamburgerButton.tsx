@@ -37,6 +37,7 @@ export const HamburgerButton: Component<HamburgerButtonProps> = (props) => (
       aria-controls={props.controls}
       aria-expanded={props.expanded ?? false}
       aria-label={props.label}
+      checked={props.expanded ?? false}
       onClick={props.onClick}
       type="checkbox"
       value="expanded"
