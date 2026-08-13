@@ -65,14 +65,19 @@ export const collectHtmlFiles = async (dir) => {
  */
 export const extractInlineScriptHashes = (html) => {
   const hashes = new Set();
+  // HTML tag names and attribute names are case-insensitive per spec
+  // (`<SCRIPT SRC=…>` is as valid as `<script src=…>`), so both this
+  // tag matcher and the `src=` attribute check below use the `i` flag —
+  // a case-sensitive version would silently miss an uppercase/mixed-case
+  // script tag, dropping a real inline script's hash from the CSP.
   for (const [, attrs, body] of html.matchAll(
-    /<script((?:\s[^>]*)?)>([\s\S]*?)<\/script>/g,
+    /<script((?:\s[^>]*)?)>([\s\S]*?)<\/script>/gi,
   )) {
     // Only the opening tag's own attributes may carry `src=`; matching
     // against the whole tag (attrs + body) would false-positive on a
     // script body that happens to contain the literal text `<script
     // src=`, e.g. an embedded HTML string in the asset manifest.
-    if (/\ssrc=/.test(attrs) || !body.trim()) continue;
+    if (/\ssrc=/i.test(attrs) || !body.trim()) continue;
     hashes.add(`sha256-${createHash('sha256').update(body).digest('base64')}`);
   }
   return [...hashes];

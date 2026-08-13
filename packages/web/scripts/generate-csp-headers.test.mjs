@@ -31,6 +31,15 @@ describe('extractInlineScriptHashes', () => {
     expect(extractInlineScriptHashes(html)).toStrictEqual([]);
   });
 
+  it('matches upper- and mixed-case <SCRIPT> tags (HTML tag names are case-insensitive)', () => {
+    const hashed = extractInlineScriptHashes('<SCRIPT>const a = 1;</SCRIPT>');
+    expect(hashed).toHaveLength(1);
+    const skipped = extractInlineScriptHashes(
+      '<ScRiPt SRC="/app.js"></ScRiPt>',
+    );
+    expect(skipped).toStrictEqual([]);
+  });
+
   it('skips empty inline scripts', () => {
     const html = '<script></script><script>   </script>';
     expect(extractInlineScriptHashes(html)).toStrictEqual([]);
