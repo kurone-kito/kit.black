@@ -45,6 +45,21 @@ describe('extractInlineScriptHashes', () => {
     expect(extractInlineScriptHashes(html)).toStrictEqual([]);
   });
 
+  it('matches real-world end-tag forms browsers still honor', () => {
+    // A browser's HTML tokenizer closes script raw-text mode on
+    // `</script` followed by *any* non-letter — whitespace, `/`, or
+    // bogus attributes — not only a bare `</script>`.
+    const forms = [
+      '<script>const a = 1;</script >',
+      '<script>const a = 1;</script\t\n>',
+      '<script>const a = 1;</script foo="bar">',
+      '<script>const a = 1;</script/>',
+    ];
+    for (const html of forms) {
+      expect(extractInlineScriptHashes(html)).toHaveLength(1);
+    }
+  });
+
   it('produces a hash matching an independently-computed sha256', async () => {
     const { createHash } = await import('node:crypto');
     const body = 'window.manifest = { a: 1 };';
