@@ -1,6 +1,7 @@
 import { useLocation } from '@solidjs/router';
 import type { Component } from 'solid-js';
-import { createMemo } from 'solid-js';
+import { createEffect, createMemo } from 'solid-js';
+import { isServer } from 'solid-js/web';
 import constants from '../../constants.json';
 import { useLanguage, useTranslator } from '../../modules/createI18N.js';
 import {
@@ -26,6 +27,19 @@ export const Head: Component = () => {
   const jaHref = useLanguageHref('ja');
   const enHref = useLanguageHref('en');
   const defaultHref = useUnprefixedHref();
+
+  // `entry-server.tsx` sets `<html lang>` once, during the initial SSR
+  // pass; the document shell it renders is outside this component tree.
+  // A client-side locale switch (`LanguageChanger`) is an SPA navigation
+  // that only re-renders inside `#app`, so nothing else keeps
+  // `document.documentElement.lang` in sync afterward. Skip this
+  // entirely during SSR (`document` does not exist there, and the
+  // server-rendered value must stay the first-paint source of truth).
+  if (!isServer) {
+    createEffect(() => {
+      document.documentElement.lang = language();
+    });
+  }
 
   /** The absolute URL of the current page. */
   const pageUrl = createMemo(() => `${constants.site.url}${location.pathname}`);
