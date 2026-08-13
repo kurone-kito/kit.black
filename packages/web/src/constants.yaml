@@ -8,6 +8,12 @@ favicon:
   path: /favicon.webp
   size: 1024
   url: https://kit.black/favicon.webp
+icons:
+  appleTouchIcon: /apple-touch-icon.png
+  ico: /favicon.ico
+  manifest: /site.webmanifest
+  png16: /favicon-16x16.png
+  png32: /favicon-32x32.png
 keywords: Kuroné Kito, 黒音キト, VTuber, Virtual YouTuber, Streamer
 licenseUrl: https://github.com/kurone-kito/kit.black/blob/main/LICENSE
 site:

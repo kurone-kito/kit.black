@@ -1,20 +1,29 @@
 import { Link } from '@solidjs/meta';
 import type { Component } from 'solid-js';
-import { Index, Match, Show, Switch } from 'solid-js';
+import { Index, Show } from 'solid-js';
 
 /** Type definition for the properties. */
 export interface LinkListProps {
+  /** The apple-touch-icon URL. */
+  readonly appleTouchIconUrl?: string | undefined;
+
   /** The author URL. */
   readonly authorUrl?: string | undefined;
 
-  /** The mime type of the favicon. */
-  readonly faviconType?: string | undefined;
+  /** The 16x16 PNG favicon URL. */
+  readonly icon16Url?: string | undefined;
 
-  /** The favicon URL. */
-  readonly faviconUrl?: string | undefined;
+  /** The 32x32 PNG favicon URL. */
+  readonly icon32Url?: string | undefined;
+
+  /** The multi-resolution `.ico` favicon URL. */
+  readonly iconIcoUrl?: string | undefined;
 
   /** The license URL. */
   readonly licenseUrl?: string | undefined;
+
+  /** The web app manifest URL. */
+  readonly manifestUrl?: string | undefined;
 
   /** The images to preload. */
   readonly preloadImages?: readonly string[] | undefined;
@@ -42,14 +51,25 @@ export const LinkList: Component<LinkListProps> = (props) => (
     <Show when={props.authorUrl}>
       {(href) => <Link href={href()} rel="author" />}
     </Show>
-    <Switch>
-      <Match when={props.faviconType && props.faviconUrl}>
-        <Link href={props.faviconUrl} rel="icon" type={props.faviconType} />
-      </Match>
-      <Match when={!props.faviconType && props.faviconUrl}>
-        <Link href={props.faviconUrl} rel="icon" />
-      </Match>
-    </Switch>
+    <Show when={props.iconIcoUrl}>
+      {(href) => <Link href={href()} rel="icon" sizes="16x16 32x32 48x48" />}
+    </Show>
+    <Show when={props.icon32Url}>
+      {(href) => (
+        <Link href={href()} rel="icon" sizes="32x32" type="image/png" />
+      )}
+    </Show>
+    <Show when={props.icon16Url}>
+      {(href) => (
+        <Link href={href()} rel="icon" sizes="16x16" type="image/png" />
+      )}
+    </Show>
+    <Show when={props.appleTouchIconUrl}>
+      {(href) => <Link href={href()} rel="apple-touch-icon" />}
+    </Show>
+    <Show when={props.manifestUrl}>
+      {(href) => <Link href={href()} rel="manifest" />}
+    </Show>
     <Show when={props.licenseUrl}>
       {(href) => <Link href={href()} hreflang="en" rel="license" />}
     </Show>

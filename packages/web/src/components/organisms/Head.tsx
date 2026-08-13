@@ -14,13 +14,15 @@ export const Head: Component = () => {
   const t = useTranslator();
   return (
     <InternalHead
+      appleTouchIconUrl={constants.icons.appleTouchIcon}
       author={t('author')}
       authorUrl={constants.author.url}
       colorDark={constants.color.dark}
       colorLight={constants.color.light}
       description={t('siteDescription')}
-      faviconType={constants.favicon.type}
-      faviconUrl={constants.favicon.path}
+      icon16Url={constants.icons.png16}
+      icon32Url={constants.icons.png32}
+      iconIcoUrl={constants.icons.ico}
       keywords={constants.keywords}
       imageAlt={t('author')}
       imageHeight={constants.favicon.size}
@@ -29,6 +31,7 @@ export const Head: Component = () => {
       imageWidth={constants.favicon.size}
       language="ja"
       licenseUrl={constants.licenseUrl}
+      manifestUrl={constants.icons.manifest}
       next={undefined}
       prev={undefined}
       siteName={constants.site.name}
