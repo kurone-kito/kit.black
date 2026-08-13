@@ -22,6 +22,20 @@ describe('LinkList', () => {
     expect(document.head.querySelector('link[rel="manifest"]')).toBeNull();
   });
 
+  it('renders no preconnect links to Google Fonts, since fonts are self-hosted', () => {
+    render(() => (
+      <MetaProvider>
+        <LinkList />
+      </MetaProvider>
+    ));
+    expect(
+      document.head.querySelector('link[href="https://fonts.googleapis.com"]'),
+    ).toBeNull();
+    expect(
+      document.head.querySelector('link[href="https://fonts.gstatic.com"]'),
+    ).toBeNull();
+  });
+
   it('renders the ico, 32x32, and 16x16 icon links when provided', () => {
     render(() => (
       <MetaProvider>
