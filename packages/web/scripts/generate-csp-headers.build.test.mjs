@@ -20,27 +20,168 @@ import {
 const distDir = join(process.cwd(), 'dist');
 const hasDist = existsSync(distDir);
 
+/** Tag names whose `src=` attribute is a resource load CSP governs. */
+const srcTagNames = /** @type {const} */ ([
+  'script',
+  'img',
+  'source',
+  'audio',
+  'video',
+  'iframe',
+]);
+
+/** `<link rel=…>` values that load a subresource, as opposed to
+ * metadata/navigation values (`alternate`, `author`, `canonical`,
+ * `license`) that CSP does not gate. */
+const resourceLinkRels = /** @type {const} */ ([
+  'stylesheet',
+  'preload',
+  'modulepreload',
+  'icon',
+  'manifest',
+]);
+
 /**
- * Resource-loading tag/attribute combinations the CSP's fetch
- * directives actually govern. `<a href>` and metadata `<link
+ * Read one attribute's value from a captured attribute string,
+ * tolerating single, double, or no quotes — real HTML permits all
+ * three, and this file's own attribute order (`rel` before `href`, or
+ * the reverse) must not matter either. Two-pass by design (tag first,
+ * then attributes independently) rather than one attribute-order-locked
+ * regex, per the review finding that flagged the single-regex version
+ * as matching zero real `<link>` tags in this codebase's own build
+ * (which always emits `href` before `rel`).
+ * @param {string} attrs The tag's attribute string (between the tag
+ * name and the closing `>`).
+ * @param {string} name The attribute name to read.
+ * @returns {string | undefined} The attribute's value, or `undefined`
+ * when the attribute is absent.
+ */
+const readAttr = (attrs, name) =>
+  attrs.match(new RegExp(`\\s${name}=["']?([^"'\\s>]+)`, 'i'))?.[1];
+
+/**
+ * Same as {@link readAttr}, but for a value that may itself contain
+ * internal whitespace (only `srcset` today: a comma-separated `url
+ * descriptor, …` list). {@link readAttr}'s `[^"'\s>]+` would truncate
+ * at the value's first internal space, so this instead requires a
+ * matching quote pair and captures everything up to it. An unquoted
+ * `srcset` cannot legally contain a space or comma at all, so this
+ * intentionally does not attempt the unquoted case.
+ * @param {string} attrs See {@link readAttr}.
+ * @param {string} name See {@link readAttr}.
+ * @returns {string | undefined} See {@link readAttr}.
+ */
+const readQuotedAttr = (attrs, name) =>
+  attrs.match(new RegExp(`\\s${name}=["']([^"']+)["']`, 'i'))?.[1];
+
+/**
+ * Find every resource-loading reference to a third-party (`http(s)://`)
+ * origin in one HTML document: `src=` on a script/img/source/audio/
+ * video/iframe tag, `href=` on a resource-loading `<link>`, and every
+ * `srcset` candidate URL. `<a href>` and metadata `<link
  * rel="alternate|author|canonical|license">` are navigation targets,
  * not subresource loads, so they are deliberately excluded — CSP does
  * not gate them.
+ * @param {string} html The HTML document text.
+ * @returns {string[]} Every offending third-party URL found.
  */
-const resourceLoadPattern =
-  /<(script|img|source|audio|video|iframe)\b[^>]*\ssrc=["'](https?:\/\/[^"']+)["']|<link\b[^>]*\srel=["'](?:stylesheet|preload|modulepreload|icon|manifest)["'][^>]*\shref=["'](https?:\/\/[^"']+)["']/gi;
+const findThirdPartyResourceLoads = (html) => {
+  const urls = [];
 
-/**
- * `srcset` candidates are a comma-separated `url descriptor, …` list, so
- * an external origin need not start the attribute value the way a bare
- * `src` does — this checks every whitespace-delimited token in each
- * `srcset` value, not just an anchored prefix. Not part of
- * {@link resourceLoadPattern} itself so a `srcset` hit records every
- * offending token rather than only the first. Kept as its own check
- * (rather than folded into the CSP source list today) so this stays a
- * regression guard once #151 adds responsive image variants.
- */
-const srcsetPattern = /<(?:img|source)\b[^>]*\ssrcset=["']([^"']+)["']/gi;
+  for (const tagName of srcTagNames) {
+    for (const [, attrs] of html.matchAll(
+      new RegExp(`<${tagName}\\b([^>]*)>`, 'gi'),
+    )) {
+      const src = readAttr(attrs, 'src');
+      if (src && /^https?:\/\//i.test(src)) urls.push(src);
+    }
+  }
+
+  for (const [, attrs] of html.matchAll(/<link\b([^>]*)>/gi)) {
+    const rel = readAttr(attrs, 'rel');
+    const href = readAttr(attrs, 'href');
+    if (
+      rel &&
+      href &&
+      /^https?:\/\//i.test(href) &&
+      resourceLinkRels.includes(/** @type {never} */ (rel.toLowerCase()))
+    ) {
+      urls.push(href);
+    }
+  }
+
+  // `srcset` candidates are a comma-separated `url descriptor, …` list,
+  // so an external origin need not start the attribute value the way a
+  // bare `src` does — check every whitespace-delimited token in each
+  // `srcset` value, not just the raw attribute string. Kept as a
+  // separate check (rather than folded into the CSP source list today)
+  // so this stays a regression guard once #151 adds responsive image
+  // variants.
+  for (const [, attrs] of html.matchAll(/<(?:img|source)\b([^>]*)>/gi)) {
+    const srcset = readQuotedAttr(attrs, 'srcset');
+    if (!srcset) continue;
+    for (const candidate of srcset.split(',')) {
+      const url = candidate.trim().split(/\s+/)[0];
+      if (url && /^https?:\/\//i.test(url)) urls.push(url);
+    }
+  }
+
+  return urls;
+};
+
+// Fixture-based coverage for findThirdPartyResourceLoads itself (always
+// runs, unlike the dist/-gated suite below): this repo's own build
+// output happens to emit href-before-rel on every real <link> tag, so
+// the dist/-based suite alone would never actually exercise the
+// order-independence this function exists to provide.
+describe('findThirdPartyResourceLoads', () => {
+  it('detects a <link> resource load regardless of rel/href attribute order', () => {
+    const relFirst = '<link rel="stylesheet" href="https://evil.test/x.css">';
+    const hrefFirst = '<link href="https://evil.test/x.css" rel="stylesheet">';
+    expect(findThirdPartyResourceLoads(relFirst)).toStrictEqual([
+      'https://evil.test/x.css',
+    ]);
+    expect(findThirdPartyResourceLoads(hrefFirst)).toStrictEqual([
+      'https://evil.test/x.css',
+    ]);
+  });
+
+  it('ignores navigation-only <link> rel values', () => {
+    const html =
+      '<link href="https://kit.black/ja/" rel="alternate" hreflang="ja">';
+    expect(findThirdPartyResourceLoads(html)).toStrictEqual([]);
+  });
+
+  it('ignores <a href> navigation links entirely', () => {
+    expect(
+      findThirdPartyResourceLoads('<a href="https://github.com/x">link</a>'),
+    ).toStrictEqual([]);
+  });
+
+  it('detects a third-party <script src> and <img src>, quoted or not', () => {
+    expect(
+      findThirdPartyResourceLoads(
+        '<script src="https://evil.test/a.js"></script>',
+      ),
+    ).toStrictEqual(['https://evil.test/a.js']);
+    expect(
+      findThirdPartyResourceLoads('<img src=https://evil.test/a.webp>'),
+    ).toStrictEqual(['https://evil.test/a.webp']);
+  });
+
+  it('detects a third-party origin anywhere in a srcset candidate list', () => {
+    const html = '<img srcset="/local.webp 1x, https://evil.test/a.webp 2x">';
+    expect(findThirdPartyResourceLoads(html)).toStrictEqual([
+      'https://evil.test/a.webp',
+    ]);
+  });
+
+  it('finds nothing in same-origin-only markup', () => {
+    const html =
+      '<script src="/app.js"></script><link href="/site.css" rel="stylesheet"><img src="/a.webp" srcset="/a.webp 1x, /a-2x.webp 2x">';
+    expect(findThirdPartyResourceLoads(html)).toStrictEqual([]);
+  });
+});
 
 describe.skipIf(!hasDist)(
   'production build output matches the shipped CSP',
@@ -69,14 +210,8 @@ describe.skipIf(!hasDist)(
       const violations = [];
       for (const file of htmlFiles) {
         const html = await readFile(file, 'utf8');
-        for (const match of html.matchAll(resourceLoadPattern)) {
-          violations.push({ file, url: match[2] ?? match[3] });
-        }
-        for (const [, srcset] of html.matchAll(srcsetPattern)) {
-          for (const candidate of srcset.split(',')) {
-            const url = candidate.trim().split(/\s+/)[0];
-            if (/^https?:\/\//i.test(url)) violations.push({ file, url });
-          }
+        for (const url of findThirdPartyResourceLoads(html)) {
+          violations.push({ file, url });
         }
       }
       expect(violations).toStrictEqual([]);

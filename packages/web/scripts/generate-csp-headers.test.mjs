@@ -26,8 +26,11 @@ describe('extractInlineScriptHashes', () => {
     expect(extractInlineScriptHashes(html)).toHaveLength(1);
   });
 
-  it('skips scripts with a src attribute', () => {
-    const html = '<script type="module" async src="/app.js"></script>';
+  it('skips scripts with a src attribute, even when the body is non-empty', () => {
+    // A non-empty body means this can only pass via the `src=` check
+    // itself, not the separate empty-body skip below.
+    const html =
+      '<script type="module" async src="/app.js">not real content</script>';
     expect(extractInlineScriptHashes(html)).toStrictEqual([]);
   });
 
@@ -35,7 +38,7 @@ describe('extractInlineScriptHashes', () => {
     const hashed = extractInlineScriptHashes('<SCRIPT>const a = 1;</SCRIPT>');
     expect(hashed).toHaveLength(1);
     const skipped = extractInlineScriptHashes(
-      '<ScRiPt SRC="/app.js"></ScRiPt>',
+      '<ScRiPt SRC="/app.js">not real content</ScRiPt>',
     );
     expect(skipped).toStrictEqual([]);
   });
@@ -47,8 +50,8 @@ describe('extractInlineScriptHashes', () => {
 
   it('matches real-world end-tag forms browsers still honor', () => {
     // A browser's HTML tokenizer closes script raw-text mode on
-    // `</script` followed by *any* non-letter — whitespace, `/`, or
-    // bogus attributes — not only a bare `</script>`.
+    // `</script` followed by tab, newline, form feed, space, `/`, or
+    // `>` — not only a bare `</script>`.
     const forms = [
       '<script>const a = 1;</script >',
       '<script>const a = 1;</script\t\n>',
@@ -58,6 +61,19 @@ describe('extractInlineScriptHashes', () => {
     for (const html of forms) {
       expect(extractInlineScriptHashes(html)).toHaveLength(1);
     }
+  });
+
+  it('does not treat "</script" followed by a non-delimiter character as a close', async () => {
+    // A browser does NOT recognize `</script-anything` as an end tag at
+    // all (only tab/LF/FF/space/`/`/`>` may follow `</script`), so the
+    // raw-text scan continues past it to the *real* closing tag. A
+    // looser `\b`-word-boundary check would incorrectly stop here and
+    // hash only the truncated `const a = 1;` prefix.
+    const html = '<script>const a = 1;</script-fake>const b = 2;</script>';
+    const { createHash } = await import('node:crypto');
+    const body = 'const a = 1;</script-fake>const b = 2;';
+    const expected = `sha256-${createHash('sha256').update(body).digest('base64')}`;
+    expect(extractInlineScriptHashes(html)).toStrictEqual([expected]);
   });
 
   it('produces a hash matching an independently-computed sha256', async () => {

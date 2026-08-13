@@ -70,16 +70,20 @@ export const extractInlineScriptHashes = (html) => {
   // tag matcher and the `src=` attribute check below use the `i` flag —
   // a case-sensitive version would silently miss an uppercase/mixed-case
   // script tag, dropping a real inline script's hash from the CSP.
-  // `\b` (not a literal `>`) ends the tag name on both the opening and
-  // closing tag, then `[^>]*` absorbs everything up to the real `>` —
-  // this matches how a browser's HTML parser actually closes `<script>`
-  // raw-text mode: on `</script` followed by *any* non-letter
-  // (whitespace, `/`, bogus attributes), not only a bare `</script>`. A
-  // stricter literal (even `<\/script\s*>`) misses real end-tag forms a
-  // browser still honors, silently dropping a real inline script's hash
-  // from the CSP.
+  //
+  // The closing tag uses a lookahead for the exact delimiter set a
+  // browser's HTML parser recognizes after `</script` — tab, newline,
+  // form feed, space, `/`, or `>` — then `[^>]*` absorbs everything up
+  // to the real `>`. This matters in both directions: a stricter literal
+  // (even `<\/script\s*>`) misses real end-tag forms a browser still
+  // honors (bogus attributes, `/`), silently dropping a real inline
+  // script's hash; a looser `\b` word-boundary check is *too*
+  // permissive — `-`, `:`, and other non-word, non-delimiter characters
+  // satisfy `\b` but a browser does not treat `</script-anything` as a
+  // close at all, so a `\b`-based match could truncate a script body
+  // early and hash the wrong (partial) content.
   for (const [, attrs, body] of html.matchAll(
-    /<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi,
+    /<script\b([^>]*)>([\s\S]*?)<\/script(?=[\t\n\f />])[^>]*>/gi,
   )) {
     // Only the opening tag's own attributes may carry `src=`; matching
     // against the whole tag (attrs + body) would false-positive on a
