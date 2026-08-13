@@ -98,6 +98,9 @@ describe('truncateTime', () => {
   ])('%s -> "%s"', (date, expected) =>
     expect(truncateTime(date)).toEqual(expected),
   );
+
+  it('should throw on an unparsable date', () =>
+    expect(() => truncateTime('not-a-date')).toThrow(RangeError));
 });
 
 describe('weekDates', () => {
