@@ -26,7 +26,12 @@ export const Row: Component<RowProps> = (props) => {
   const concProps = mergeProps(defaultProps, props);
   type CL = ReadonlyRecord<string, boolean>;
   const tc = { [concProps.type]: !!concProps.type } as const satisfies CL;
-  const wc = { [concProps.week]: !!concProps.week } as const satisfies CL;
+  // A holiday always wins the date cell's color, decided here rather
+  // than by CSS cascade order — so a holiday Saturday never also
+  // receives `.sat` styling.
+  const wc = concProps.holiday
+    ? ({ holiday: true } as const satisfies CL)
+    : ({ [concProps.week]: !!concProps.week } as const satisfies CL);
   return (
     <tr>
       <Show when={props.date}>

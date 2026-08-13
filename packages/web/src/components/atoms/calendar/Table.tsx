@@ -32,7 +32,7 @@ export const Table: Component<TableProps> = (props) => (
         <th scope="col">{props.detail}</th>
       </tr>
     </thead>
-    <tbody class="[&_.release]:!bg-secondary/80 [&_.release]:text-secondary-content [&_.streaming]:!bg-accent/80 [&_.streaming]:text-accent-content [&_td]:bg-base-300/80 [&_td]:rounded-badge [&_.date]:text-center [&_.sat]:!bg-blue-500/60 [&_.sun]:!bg-red-500/60 [&_.time]:text-center [&_td]:px-[2cqi] [&_td]:py-[1.8cqi]">
+    <tbody class="[&_.release]:!bg-secondary/80 [&_.release]:text-secondary-content [&_.streaming]:!bg-accent/80 [&_.streaming]:text-accent-content [&_td]:bg-base-300/80 [&_td]:rounded-badge [&_.date]:text-center [&_.holiday]:!bg-red-500/60 [&_.sat]:!bg-blue-500/60 [&_.sun]:!bg-red-500/60 [&_.time]:text-center [&_td]:px-[2cqi] [&_td]:py-[1.8cqi]">
       {props.children}
     </tbody>
   </table>
