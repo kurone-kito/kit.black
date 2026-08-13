@@ -69,9 +69,11 @@ export const extractInlineScriptHashes = (html) => {
   // (`<SCRIPT SRC=…>` is as valid as `<script src=…>`), so both this
   // tag matcher and the `src=` attribute check below use the `i` flag —
   // a case-sensitive version would silently miss an uppercase/mixed-case
-  // script tag, dropping a real inline script's hash from the CSP.
+  // script tag, dropping a real inline script's hash from the CSP. The
+  // end tag also allows trailing whitespace before `>` (`</script >` is
+  // valid HTML), which a bare `<\/script>` literal would not match.
   for (const [, attrs, body] of html.matchAll(
-    /<script((?:\s[^>]*)?)>([\s\S]*?)<\/script>/gi,
+    /<script((?:\s[^>]*)?)>([\s\S]*?)<\/script\s*>/gi,
   )) {
     // Only the opening tag's own attributes may carry `src=`; matching
     // against the whole tag (attrs + body) would false-positive on a
