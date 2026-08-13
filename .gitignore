@@ -268,7 +268,7 @@ $RECYCLE.BIN/
 # JSON
 packages/web/src/*.json
 
-# Web app manifest (generated from constants.yaml, see scripts/generate-manifest.mts)
+# Web app manifest (generated from constants.yaml, see scripts/generate-manifest.mjs)
 packages/web/public/site.webmanifest
 
 # Solid.js
