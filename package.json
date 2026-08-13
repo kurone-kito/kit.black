@@ -44,7 +44,7 @@
     "prestart": "pnpm run prebuild",
     "start": "pnpm run --parallel -r start",
     "stylelint": "stylelint --aei --cache --cache-location node_modules/.cache/stylelint/ \"./**/*.css\"",
-    "test": "vitest run"
+    "test": "pnpm run -r test"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.7.1",
