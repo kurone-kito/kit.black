@@ -43,4 +43,31 @@ describe('Row', () => {
     expect(cell).toHaveClass('sat');
     expect(cell).not.toHaveClass('holiday');
   });
+
+  it('renders the rowSpan on the date cell when dateSpan is given', () => {
+    const cell = renderDateCell({ date: '01/01', dateSpan: 2, week: 'thu' });
+    expect(cell).toHaveAttribute('rowspan', '2');
+  });
+
+  it('renders no date cell at all when date is omitted', () => {
+    const { container } = render(() => <Row time="10:00">Content</Row>);
+    expect(container.querySelector('.date')).toBeNull();
+  });
+
+  it('spans two columns when time is omitted', () => {
+    const { container } = render(() => <Row date="01/01">Content</Row>);
+    const cell = container.querySelector('td:last-child');
+    expect(cell).toHaveAttribute('colspan', '2');
+    expect(container.querySelectorAll('td.time')).toHaveLength(0);
+  });
+
+  it('renders a separate time cell when time is given', () => {
+    const { container } = render(() => (
+      <Row date="01/01" time="10:00">
+        Content
+      </Row>
+    ));
+    expect(container.querySelector('td.time')).not.toBeNull();
+    expect(container.querySelectorAll('td[colspan]')).toHaveLength(0);
+  });
 });
