@@ -30,13 +30,12 @@ export interface SceneCarouselProps {
  */
 export const Carousel: Component<SceneCarouselProps> = (props) => (
   <div class="bg-base-100 px-0.5 py-12">
-    <figure
+    <ul
       aria-label={props.label}
       class={twMerge(
         'carousel carousel-center focus-visible:outline-primary aspect-[19/9] h-auto w-full space-x-4 px-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 md:aspect-[27/9] xl:aspect-[28/9] 2xl:aspect-[43/9]',
         props.class,
       )}
-      role="list"
       tabindex="0"
     >
       <Index each={props.items}>
@@ -50,6 +49,6 @@ export const Carousel: Component<SceneCarouselProps> = (props) => (
           />
         )}
       </Index>
-    </figure>
+    </ul>
   </div>
 );

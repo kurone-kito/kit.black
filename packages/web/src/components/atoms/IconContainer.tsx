@@ -29,13 +29,13 @@ export const IconContainer: Component<IconProps> = (props) => {
   /** Whether a non-blank accessible name was given. */
   const isNamed = () => (concProps.label ?? '').trim() !== '';
   return (
-    <i
+    <span
       aria-hidden={isNamed() ? undefined : true}
       aria-label={isNamed() ? concProps.label : undefined}
       class={twMerge('not-italic', concProps.class)}
       role={isNamed() ? 'img' : undefined}
     >
       {concProps.children}
-    </i>
+    </span>
   );
 };
