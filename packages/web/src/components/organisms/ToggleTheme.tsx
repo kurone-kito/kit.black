@@ -24,8 +24,6 @@ export const ToggleTheme: Component = () => {
   const t = useTranslator();
   return (
     <InternalToggleTheme
-      labelToDark={t('toDark')}
-      labelToLight={t('toLight')}
       ref={ref}
       themes={themes}
       toggleTooltip={t('toggleTheme')}

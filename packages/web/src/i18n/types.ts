@@ -13,6 +13,7 @@ export type ResourcesKeys =
   | 'avatarNext'
   | 'calendar'
   | 'downloadCalendar'
+  | 'footerCredits'
   | 'hamburgerMenu'
   | 'heroAbout'
   | 'heroIntroduction'
@@ -27,9 +28,8 @@ export type ResourcesKeys =
   | 'repository'
   | 'siteDescription'
   | 'splashLoading'
-  | 'toDark'
   | 'toggleTheme'
-  | 'toLight'
   | 'wishlist'
   | 'worksDescription'
-  | 'worksHeading';
+  | 'worksHeading'
+  | 'worksMore';

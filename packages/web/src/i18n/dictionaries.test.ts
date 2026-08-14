@@ -11,4 +11,18 @@ describe('i18n dictionaries', () => {
     // loop that catches a key added to one locale and not the other.
     expect(Object.keys(ja).sort()).toStrictEqual(Object.keys(en).sort());
   });
+
+  it.each([
+    ['en', en],
+    ['ja', ja],
+  ])(
+    'gives the two complementary-landmark asides distinct accessible names in %s',
+    (_locale, resources) => {
+      // The two `<aside>` landmarks (Footer, Works) must have distinct
+      // accessible names -- html-validate's `unique-landmark` rule
+      // fails when duplicate `complementary` regions share a name,
+      // not merely when either is empty.
+      expect(resources.footerCredits).not.toBe(resources.worksMore);
+    },
+  );
 });

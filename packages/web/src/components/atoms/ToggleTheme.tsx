@@ -3,12 +3,6 @@ import { Component, mergeProps, Ref } from 'solid-js';
 
 /** Type definition for the properties. */
 export interface ToggleThemeProps {
-  /** The label to change to dark mode. */
-  readonly labelToDark?: string | undefined;
-
-  /** The label to change to light mode. */
-  readonly labelToLight?: string | undefined;
-
   /** The reference to the input element. */
   readonly ref?: Ref<HTMLInputElement> | undefined;
 
@@ -33,6 +27,7 @@ export const ToggleTheme: Component<ToggleThemeProps> = (props) => {
     >
       <label class="swap swap-rotate pointer-events-auto">
         <input
+          aria-label={concProps.toggleTooltip}
           data-toggle-theme={concProps.themes.join(',')}
           onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.click()}
           ref={concProps.ref}
@@ -41,11 +36,11 @@ export const ToggleTheme: Component<ToggleThemeProps> = (props) => {
           value="dark"
         />
         <FaSolidSun
-          aria-label={concProps.labelToDark}
+          aria-hidden={true}
           class="fill-primary-content swap-off h-6 w-6"
         />
         <FaSolidMoon
-          aria-label={concProps.labelToLight}
+          aria-hidden={true}
           class="fill-primary-content swap-on h-6 w-6"
         />
       </label>
