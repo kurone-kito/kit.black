@@ -183,7 +183,14 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
       listRef.scrollLeft +
       targetCenterFromContainerLeft -
       containerRect.width / 2;
-    listRef.scrollTo?.({ behavior: 'smooth', left });
+    // `activeIndex` only ever changes from the autoplay timer today,
+    // which is already gated on `prefersReducedMotion`, but checking it
+    // again here too is defense-in-depth: a future direct
+    // `setActiveIndex` call (a manual prev/next control, say) should
+    // never reintroduce animated motion for a reduced-motion visitor
+    // just because this effect didn't independently enforce it.
+    const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    listRef.scrollTo?.({ behavior, left });
   });
 
   onMount(() => {

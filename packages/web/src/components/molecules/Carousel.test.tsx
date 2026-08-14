@@ -204,6 +204,24 @@ describe('Carousel', () => {
     expect(activeIndexOf(container)).toBe(0);
   });
 
+  it('scrolls instantly instead of smoothly when prefers-reduced-motion: reduce is requested', () => {
+    stubMatchMedia(true);
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
+    const ul = container.querySelector('ul');
+    if (!ul) throw new Error('ul not found');
+    const scrollTo = vi.mocked(Element.prototype.scrollTo);
+
+    // Autoplay never runs under reduced motion, but the position-sync
+    // effect (the only thing that can call `scrollTo`) still applies
+    // `prefers-reduced-motion` independently -- defense-in-depth
+    // against a future direct `setActiveIndex` caller re-animating.
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: 'auto' }),
+    );
+  });
+
   it('does not advance while the tab is hidden, and resumes once it is visible again', () => {
     const { container } = render(() => (
       <Carousel items={items} label="Example carousel" />
