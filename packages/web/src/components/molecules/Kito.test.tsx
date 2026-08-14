@@ -7,13 +7,13 @@ afterEach(() => cleanup());
 describe('Kito', () => {
   it('fetches the hero (kito) avatar eagerly at high priority', () => {
     const { container } = render(() => <Kito id="hero" />);
-    const images = container.querySelectorAll('img');
-    expect(images[0]).toHaveAttribute('fetchpriority', 'high');
+    const image = container.querySelector('#hero-avatar-kito img');
+    expect(image).toHaveAttribute('fetchpriority', 'high');
   });
 
   it('keeps the second (momoneko) avatar at the default low priority', () => {
     const { container } = render(() => <Kito id="hero" />);
-    const images = container.querySelectorAll('img');
-    expect(images[1]).toHaveAttribute('fetchpriority', 'low');
+    const image = container.querySelector('#hero-avatar-momoneko img');
+    expect(image).toHaveAttribute('fetchpriority', 'low');
   });
 });
