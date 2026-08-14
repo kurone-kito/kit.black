@@ -1,0 +1,2038 @@
+#!/usr/bin/env node
+// idd-generated-from: src/scripts/rerun-advisory-convergence.mts
+//
+// The scripts/rerun-advisory-convergence.mjs copy is generated from the
+// .mts source named above by `pnpm run build`. Edit the .mts source,
+// never the generated .mjs. See docs/typescript-sources.md.
+//
+// Read-only rerun-plan helper for stuck `idd-advisory-convergence` rollups
+// (#1431). Automates the manual recovery documented in
+// `idd-ci.instructions.md` §Rerun mechanics (#1381, extended by #1424): a
+// PR HEAD can accumulate several `idd-advisory-convergence` check-run
+// instances (the check fires on pull_request + pull_request_review +
+// pull_request_review_comment, and `cancel-in-progress` cancels most of
+// them), and the required-check rollup can stay pinned to a stale
+// non-passing instance even after the real verdict converges. This helper
+// fetches every check-run instance for the current HEAD via the commit
+// check-runs API (not the recent-runs list, which can page the target run
+// out of view -- see the module-level `fetchCheckRunsForRef` doc comment),
+// classifies each instance, and prints the exact sequential `gh run rerun`
+// recovery plan. It never calls `gh run rerun` (or any other mutating
+// command) itself; a mutating `--apply` mode is a deliberate follow-up
+// (out of scope here).
+//
+// Classification (six states -- the issue's three named buckets, `pass` /
+// `rerun-eligible` / `bot-gated-skip`, are a subset here; `pending`,
+// `unresolved`, and `awaiting-fresh-review` are additional fail-safe
+// states so a live run is never force-classified into either "skip
+// forever" or "safe to rerun", an unresolvable run identity is reported
+// instead of silently guessed or dropped, and a failure whose own
+// advisory-convergence verdict is "review does not cover HEAD" is never
+// recommended for a rerun that cannot change that outcome -- #1775):
+//   - `pass`: conclusion is success/neutral/skipped -- no action needed.
+//   - `pending`: still queued/in_progress (no conclusion yet) -- reported,
+//     excluded from the plan (rerunning a live run cancels it, not helps).
+//   - `bot-gated-skip`: conclusion is `action_required` -- rerunning
+//     without a non-bot trigger or maintainer approval re-enters
+//     `action_required` per #1424, so this needs a non-bot trigger or
+//     maintainer approval, never a rerun. Whether the underlying workflow
+//     run's actor/triggering_actor is a bot (`type === "Bot"` is the
+//     primary signal; a configured advisory-bot login is a defensive
+//     fallback) is reported in the reason text when it applies, but no
+//     longer gates BY ITSELF (narrowed by #1745): #1424 only established
+//     that an `action_required`-conclusion Copilot-triggered run is gated
+//     by GitHub, never that every bot-triggered instance regardless of its
+//     own conclusion is unsafe to rerun. A direct experiment on PR #1741
+//     confirmed a `CANCELLED`-conclusion bot-triggered instance reran and
+//     completed normally, never re-entering `action_required` -- the prior,
+//     over-broad `|| botTriggered` condition withheld exactly that working
+//     recovery action from the plan.
+//   - `unresolved`: the run id could not be parsed from the check-run's
+//     URL, or the per-run lookup itself failed -- reported for manual
+//     inspection, never silently dropped and never placed in the plan
+//     (fail-closed: an instance this helper cannot positively verify as
+//     safe is never recommended for rerun).
+//   - `awaiting-fresh-review`: the instance's own advisory-convergence
+//     JSON verdict (from the workflow job log) reports that the latest
+//     Copilot review does not cover the current HEAD. No number of
+//     `gh run rerun` invocations changes that outcome -- only a fresh
+//     review does -- so this is never placed in the plan and never
+//     spends the rerun-once budget (#1775, observed on PR #1772).
+//     #1806: this historical verdict is a snapshot of the workflow job
+//     log at the time THAT run executed, and the log is immutable -- so
+//     an instance that failed BEFORE a fresh review landed keeps
+//     reporting uncovered-HEAD forever, even once live coverage is
+//     satisfied (observed on PR #1854: the failed run's own log still
+//     said "does not cover current HEAD" after Copilot had already
+//     reviewed the real current HEAD with no new comments). When a LIVE
+//     check (reusing `advisory-convergence.mts`'s own Clause 1 evidence
+//     via `review-clause.mts`) confirms the current HEAD IS now covered,
+//     this classification recovers to `rerun-eligible` instead of
+//     staying stuck -- see `RerunPlanOptions.headCoverageSatisfied` and
+//     `classifyInstance`'s uncovered-HEAD step. Live coverage that is
+//     unreadable, not yet established, or simply not checked (no
+//     historical uncovered-HEAD reason to recover) leaves this hold
+//     exactly as it was before #1806 -- fail-closed, never an invented
+//     rerun.
+//   - `rerun-eligible`: non-pass, terminal, resolved -- goes into the
+//     ordered rerun plan (bot-triggered or not, unless gated per above).
+//
+// Reuse map (no duplicated identity/config logic):
+//   - `resolveAdvisoryPrimaryBotLogin`, `isCopilotReviewerLogin`,
+//     `resolveAdvisoryBotLogins`, `advisoryBotIdentityToken` -- the same
+//     bot-identity configuration and matching (including the `[bot]`-suffix
+//     normalization) every advisory-wait/-convergence helper already uses.
+//   - `normalizeCiWaitPolicy` -- the same ciWait.rerunPolicy resolution
+//     `idd-ci.instructions.md` §Rerun mechanics makes this helper's own
+//     recovery recommendations subject to.
+//   - `resolveCiRerunDecision` -- the same rerun-once-budget decision
+//     (policy string AND per-run rerun-attempt count) CI-wait itself
+//     applies, reused per instance here (via each instance's own
+//     `runAttempt`) rather than re-derived, so this helper can never
+//     recommend a rerun CI-wait's own budget would already refuse
+//     (ci-wait-policy.mts).
+//   - `deriveGhHttpStatus` -- discriminates a confirmed 404 (genuinely no
+//     remote config) from any other unreadable state, so a cross-repo
+//     config fetch fails closed instead of guessing (gh-http-status.mts).
+//   - `ghText` -- shared `gh` execution (gh-exec.mts). The CLI-entry-point
+//     guard below uses Node's own native `import.meta.main`, which
+//     replaced this repo's hand-rolled `isCliExecution` helper (removed
+//     from gh-exec.mts by an unrelated `main`-sync merge).
+//   - `parsePaginatedGhNdjson` -- shared NDJSON pagination parser
+//     (protocol-helpers.mts), reused directly here rather than through
+//     `ghApiJson`'s `paginate` mode: that mode hardcodes `--jq '.[]'` for a
+//     bare top-level array, but the commit check-runs endpoint's shape is
+//     `{ total_count, check_runs: [...] }`, so this file's own
+//     `fetchCheckRunsForRef` passes `--jq '.check_runs[]'` instead.
+//   - `resolveLatestCopilotReviewClause`, `fetchReviewsAndHeadCommit`
+//     (review-clause.mts, #1806) -- the SAME latest-review Clause 1
+//     evidence `advisory-convergence.mts`'s own `converged` verdict is
+//     built on, reused here for the live-coverage recovery signal
+//     (`RerunPlanOptions.headCoverageSatisfied`) instead of a second,
+//     independent GraphQL path that could drift out of sync with the
+//     real gate's own notion of "covers current HEAD". Deliberately
+//     imported from the small `review-clause.mts` module rather than
+//     `advisory-convergence.mts` directly, keeping this read-only
+//     helper's dependency surface off that file's full claim/waiver/
+//     disposition machinery (see `review-clause.mts`'s own doc comment).
+//
+// This helper never mutates GitHub state: it only reads check-run/run data
+// and prints a diagnosis plus a plan of commands for a human (or a future
+// --apply follow-up) to execute.
+import { parseArgs as nodeParseArgs } from 'node:util';
+import {
+  DEFAULT_ADVISORY_PRIMARY_BOT_LOGIN,
+  resolveAdvisoryPrimaryBotLogin,
+} from './advisory-wait-policy.mjs';
+import {
+  normalizeCiWaitPolicy,
+  resolveCiRerunDecision,
+} from './ci-wait-policy.mjs';
+import { GH_TEXT_LOOP_TIMEOUT_OPTIONS, ghText } from './gh-exec.mjs';
+import { deriveGhHttpStatus } from './gh-http-status.mjs';
+import { isValidIsoTimestamp } from './marker-helpers.mjs';
+import {
+  advisoryBotIdentityToken,
+  isCopilotReviewerLogin,
+  parsePaginatedGhNdjson,
+  resolveAdvisoryBotLogins,
+} from './protocol-helpers.mjs';
+// #1806: reuses `advisory-convergence.mts`'s own latest-review Clause 1
+// evidence (whether the latest trusted primary-bot review's commit
+// matches the PR's current HEAD) to recover a check-run instance whose
+// OWN historical job-log verdict is stale, instead of a second ad-hoc
+// GraphQL path. Imported from `review-clause.mts` (not
+// `advisory-convergence.mts` directly) -- see that module's own doc
+// comment and this file's module-header "Reuse map" above for why this
+// helper's dependency surface deliberately stays off the full
+// `advisory-convergence.mts` claim/waiver/disposition machinery.
+import {
+  fetchReviewsAndHeadCommit,
+  resolveLatestCopilotReviewClause,
+} from './review-clause.mjs';
+import { loadJson, validateConfigSection } from './validate-schemas.mjs';
+/** The check name this helper diagnoses. Matches
+ * `ADVISORY_CONVERGENCE_CHECK_SELECTOR` in advisory-convergence.mts;
+ * duplicated as a literal here (not imported) to keep this read-only
+ * helper's dependency surface limited to what it actually needs --
+ * advisory-convergence.mts pulls in the full claim/waiver/disposition
+ * machinery this helper has no use for. */
+export const RERUN_PLAN_CHECK_NAME = 'idd-advisory-convergence';
+/** Same schema `readCiWaitPolicy` (ci-wait-policy.mts) and
+ * `readAdvisoryPrimaryBotLogin` (advisory-wait-policy.mts) already
+ * validate their own local-disk config reads against, reused here for
+ * {@link sanitizeRemoteConfig} so a fetched-but-schema-invalid section
+ * fails closed the same way theirs already does (#1434 review, Codex
+ * P2). */
+const POLICY_SCHEMA = loadJson('schemas/policy.schema.json');
+/** Check-run `conclusion` values treated as pass-equivalent, matching
+ * `idd-ci.instructions.md`'s normalized required-check states. */
+const PASS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
+/** Check-run `status` values meaning "has not concluded yet". Only
+ * consulted when `conclusion` is absent -- a completed run always reports
+ * a conclusion, so this set is only reached pre-completion. */
+const PENDING_STATUSES = new Set([
+  'queued',
+  'in_progress',
+  'requested',
+  'waiting',
+  'pending',
+]);
+/** Workflow-run trigger events this helper trusts to reliably refresh the
+ * PR's required-check rollup on rerun, matching the events
+ * `idd-advisory-convergence` itself subscribes to (its own header comment,
+ * mirrored in `idd-ci.instructions.md` §Rerun mechanics): `pull_request`,
+ * `pull_request_review`, `pull_request_review_comment`. A run triggered by
+ * any other event -- most notably `workflow_dispatch` -- has no
+ * `pull_request` context of its own and is documented as NOT reliably
+ * associated with the PR's HEAD SHA, so rerunning it would not dependably
+ * clear a stuck rollup even though the run itself is otherwise a plain,
+ * non-bot failure. */
+const PULL_REQUEST_FAMILY_EVENTS = new Set([
+  'pull_request',
+  'pull_request_review',
+  'pull_request_review_comment',
+]);
+/**
+ * Stable phrase shared with `advisory-convergence.mts` Clause 1's reason
+ * text (`latest <bot> review (commit <sha>) does not cover current HEAD
+ * <head>`). Matching on this substring (not the whole templated string)
+ * keeps the classifier independent of the configured primary bot login
+ * and of either SHA, while still sourcing the decision from the
+ * workflow's own verdict rather than re-deriving coverage (#1775).
+ */
+export const UNCOVERED_HEAD_REASON_MARKER = 'does not cover current HEAD';
+const PLAN_CAVEAT =
+  'Rerun the rerun-eligible instances ONE AT A TIME, in the order listed below, waiting for each `gh run rerun` to finish before starting the next -- rerunning several concurrently makes them cancel each other via the shared concurrency group.';
+// Deliberately does NOT open with "No rerun-eligible instance exists": since
+// #1745, recoveryRefreshPlan can be populated alongside a non-empty `plan`
+// (a bot-triggered rerun-eligible instance, e.g. a CANCELLED sibling, does
+// not itself supply the non-bot trigger a separately bot-gated instance
+// still needs), so that claim is not always true. `plan`'s own emptiness or
+// non-emptiness is already visible in the JSON document; this text sticks to
+// the technical gating condition, which holds regardless (#1752).
+const RECOVERY_REFRESH_CAVEAT =
+  'At least one check-run is bot-gated-skip and at least one already-PASSING non-bot pull_request-family instance exists for this SHA. Per idd-ci.instructions.md Rerun mechanics, rerunning that already-passing instance (not the bot-gated one) is the documented way to force a fresh non-bot-triggered evaluation and clear a required-check rollup pinned to the stale bot-gated state -- the instance itself does not need to change its outcome.';
+/**
+ * Compute the deterministic rerun-plan verdict from already-fetched and
+ * already-enriched check-run instances. Pure (no I/O), so it is directly
+ * unit-testable with fixtures -- mirrors
+ * `computeAdvisoryConvergenceVerdict` (advisory-convergence.mts).
+ */
+export function computeRerunPlan(input, options) {
+  const now = String(options.now ?? '');
+  if (!isValidIsoTimestamp(now)) {
+    throw new Error('now must be an ISO 8601 UTC timestamp');
+  }
+  // Lowercased before validating, so a mixed-/upper-case 40-hex SHA is
+  // accepted (normalized), matching advisory-convergence.mts's own rule.
+  const prHeadSha = String(input.prHeadSha ?? '').toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(prHeadSha)) {
+    throw new Error('prHeadSha must be a 40-character hexadecimal commit SHA');
+  }
+  const checkName =
+    String(input.checkName ?? '').trim() || RERUN_PLAN_CHECK_NAME;
+  const owner = String(input.owner ?? '').trim();
+  const repo = String(input.repo ?? '').trim();
+  const primaryBotLogin =
+    String(options.primaryBotLogin ?? '')
+      .trim()
+      .toLowerCase() || DEFAULT_ADVISORY_PRIMARY_BOT_LOGIN;
+  const advisoryBotLogins = normalizeLoginList(options.advisoryBotLogins ?? []);
+  const classifyOptions = {
+    primaryBotLogin,
+    advisoryBotLogins,
+    // #1806: `undefined` normalizes to `null` here so `classifyInstance`'s
+    // uncovered-HEAD step can use a single `=== true` check to fail closed
+    // on every non-`true` value (`false`, `null`, and omitted alike).
+    headCoverageSatisfied: options.headCoverageSatisfied ?? null,
+  };
+  const instances = (input.instances ?? []).map((instance) =>
+    classifyInstance(instance, classifyOptions),
+  );
+  // idd-ci.instructions.md §Rerun mechanics makes the advisory-convergence
+  // recovery explicitly subject to the resolved ciWait.rerunPolicy: a
+  // `"hold"` policy means a repository has deliberately opted out of
+  // automatic reruns (withholds every instance), and even under the
+  // default `"rerun-once"` policy, an instance whose own `runAttempt`
+  // shows a rerun already happened has already used its one-rerun budget
+  // (withholds only that instance). Both flow through the SAME
+  // {@link resolveCiRerunDecision} (ci-wait-policy.mts) CI-wait itself
+  // applies, reused per instance here rather than re-derived, so this
+  // helper's recovery recommendations can never drift out of sync with
+  // the budget CI-wait already enforces. `runAttempt` counts every rerun
+  // of the underlying workflow run regardless of trigger (a manual UI
+  // rerun, another session's `gh run rerun`, or this helper's own
+  // previously-followed plan) -- treating any prior attempt as already
+  // having consumed the budget is intentional: a rollup still stuck after
+  // one rerun warrants a human look, not another automated rerun (#1434
+  // review, Codex P1).
+  const rerunPolicy =
+    String(options.rerunPolicy ?? '').trim() === 'hold' ? 'hold' : 'rerun-once';
+  const eligibleInstances = instances.filter(
+    (instance) => instance.classification === 'rerun-eligible',
+  );
+  const eligibleDecisions = new Map(
+    eligibleInstances.map((instance) => [
+      instance.checkRunId,
+      resolveInstanceRerunDecision(instance, rerunPolicy),
+    ]),
+  );
+  const reRunningEligibleInstances = eligibleInstances.filter(
+    (instance) =>
+      eligibleDecisions.get(instance.checkRunId)?.action === 'rerun',
+  );
+  const plan = buildOrderedPlan(reRunningEligibleInstances, owner, repo);
+  const recoveryRefreshCandidates = selectRecoveryRefreshCandidates(
+    instances,
+    classifyOptions,
+  );
+  // Two independent conditions gate recoveryRefreshPlan, both preserved
+  // from the reasoning that produced them:
+  //
+  // 1. `!anyEligibleHeld` (CodeRabbit review, #1434): a genuine
+  //    rerun-eligible instance whose OWN budget is exhausted/unconfirmed
+  //    must never silently fall through to recovery-refresh, which would
+  //    recommend rerunning a DIFFERENT, already-passing instance instead --
+  //    circumventing the "one rerun, then a human reviews it" boundary the
+  //    budget hold exists to enforce.
+  // 2. `everyReRunningEligibleIsBotTriggered` (#1745 Codex review, this
+  //    PR): pre-#1745, EVERY bot-triggered non-pass instance was
+  //    `bot-gated-skip`, so `eligibleInstances.length === 0` alone
+  //    correctly meant "bot-gated-only, nothing else to trigger a fresh
+  //    evaluation" -- the scenario recoveryRefreshPlan's own doc comment
+  //    describes. #1745 narrowed `bot-gated-skip` to a genuine
+  //    `action_required` conclusion only, so a bot-triggered `CANCELLED`
+  //    sibling can now be BOTH independently `rerun-eligible` (goes into
+  //    `plan`) AND coexist with a still-genuinely-gated `action_required`
+  //    instance that ALSO needs the passing-instance refresh -- rerunning
+  //    the bot-triggered eligible instance does not itself supply the
+  //    "fresh NON-BOT-triggered evaluation" the refresh mechanism exists
+  //    to force (a rerun preserves its original run's triggering actor),
+  //    so it must not suppress recoveryRefreshPlan the way a genuinely
+  //    NON-bot rerun-eligible instance legitimately does (that instance's
+  //    own rerun already IS the needed non-bot trigger). Vacuously `true`
+  //    when there is nothing in `plan` to begin with, preserving the
+  //    original bot-gated-only case unchanged.
+  //
+  // #1806 interaction (intentional): a live-coverage-recovered instance
+  // (classified `rerun-eligible` instead of `awaiting-fresh-review` --
+  // see `classifyInstance`'s uncovered-HEAD step) enters `eligibleInstances`
+  // like any other rerun-eligible instance. If ITS OWN `runAttempt` already
+  // exhausted the rerun-once budget, rule 1 above applies to it exactly the
+  // same way it already applies to any other budget-held eligible instance:
+  // `anyEligibleHeld` becomes `true` and `recoveryRefreshPlan` is withheld
+  // for the WHOLE rollup, even when a separate, still-genuinely-stuck
+  // `bot-gated-skip` sibling exists. This is not a #1806-specific carve-out
+  // -- #1806 only widens which instances CAN reach `eligibleInstances` in
+  // the first place; rule 1's own boundary (a human must look at a
+  // budget-exhausted eligible instance rather than have the tool silently
+  // route around it via a different instance's rerun) applies uniformly
+  // once an instance is there, regardless of how it got classified
+  // `rerun-eligible`. See the "budget-exhausted recovered instance" test.
+  const anyEligibleHeld = eligibleInstances.some(
+    (instance) =>
+      eligibleDecisions.get(instance.checkRunId)?.action !== 'rerun',
+  );
+  const everyReRunningEligibleIsBotTriggered = reRunningEligibleInstances.every(
+    (instance) => isBotTriggered(instance, classifyOptions),
+  );
+  const allowRecoveryRefresh =
+    !anyEligibleHeld && everyReRunningEligibleIsBotTriggered;
+  const refreshDecisions = allowRecoveryRefresh
+    ? new Map(
+        recoveryRefreshCandidates.map((instance) => [
+          instance.checkRunId,
+          resolveInstanceRerunDecision(instance, rerunPolicy),
+        ]),
+      )
+    : new Map();
+  const recoveryRefreshPlan = allowRecoveryRefresh
+    ? buildOrderedPlan(
+        recoveryRefreshCandidates.filter(
+          (instance) =>
+            refreshDecisions.get(instance.checkRunId)?.action === 'rerun',
+        ),
+        owner,
+        repo,
+      )
+    : [];
+  const heldEligibleCount = [...eligibleDecisions.values()].filter(
+    (decision) => decision.action === 'hold',
+  ).length;
+  const heldRefreshCount = [...refreshDecisions.values()].filter(
+    (decision) => decision.action === 'hold',
+  ).length;
+  const totalHeldCount = heldEligibleCount + heldRefreshCount;
+  // Per-instance reasons a non-"hold" policy still withheld an instance:
+  // a confirmed-exhausted budget ('rerun-budget-exhausted') and one that
+  // could not be confirmed at all ('run-attempt-unknown', CodeRabbit
+  // review, #1434) are reported distinctly below rather than conflated,
+  // so the notice never claims a budget is "already used" when it was
+  // actually just never confirmed.
+  const allHeldReasons = new Set(
+    [...eligibleDecisions.values(), ...refreshDecisions.values()]
+      .filter((decision) => decision.action === 'hold')
+      .map((decision) => decision.reason),
+  );
+  const rerunPolicyHoldNotice =
+    totalHeldCount === 0
+      ? ''
+      : rerunPolicy === 'hold'
+        ? `ciWait.rerunPolicy is "hold": ${describeHeldCounts(heldEligibleCount, heldRefreshCount)} found, but auto-rerun is disallowed by this repository's policy -- a maintainer must manually decide (see idd-ci.instructions.md §Rerun mechanics).`
+        : `ciWait.rerunPolicy is "rerun-once" and ${describeRerunOnceHoldReasons(allHeldReasons)}: ${describeHeldCounts(heldEligibleCount, heldRefreshCount)} withheld from the plan -- a maintainer must manually decide (see idd-ci.instructions.md §Rerun mechanics).`;
+  const budgetHeldCheckRunIds = new Set(
+    [...eligibleDecisions.entries(), ...refreshDecisions.entries()]
+      .filter(
+        ([, decision]) =>
+          decision.reason === 'rerun-budget-exhausted' ||
+          decision.reason === 'run-attempt-unknown',
+      )
+      .map(([checkRunId]) => checkRunId),
+  );
+  const finalInstances = instances.map((instance) => ({
+    ...instance,
+    rerunBudgetHeld: budgetHeldCheckRunIds.has(instance.checkRunId),
+  }));
+  const counts = {
+    pass: 0,
+    pending: 0,
+    botGatedSkip: 0,
+    unresolved: 0,
+    awaitingFreshReview: 0,
+    rerunEligible: 0,
+    rerunBudgetHeld: budgetHeldCheckRunIds.size,
+    total: instances.length,
+  };
+  for (const instance of instances) {
+    if (instance.classification === 'pass') counts.pass += 1;
+    else if (instance.classification === 'pending') counts.pending += 1;
+    else if (instance.classification === 'bot-gated-skip')
+      counts.botGatedSkip += 1;
+    else if (instance.classification === 'unresolved') counts.unresolved += 1;
+    else if (instance.classification === 'awaiting-fresh-review')
+      counts.awaitingFreshReview += 1;
+    else counts.rerunEligible += 1;
+  }
+  return {
+    protocolVersion: '1',
+    prNumber: Number(input.prNumber),
+    prHeadSha,
+    checkName,
+    now,
+    instances: finalInstances,
+    counts,
+    plan,
+    planCaveat: PLAN_CAVEAT,
+    recoveryRefreshPlan,
+    recoveryRefreshCaveat:
+      recoveryRefreshPlan.length > 0 ? RECOVERY_REFRESH_CAVEAT : '',
+    rerunPolicy,
+    rerunPolicyHoldNotice,
+  };
+}
+/**
+ * Resolve whether `instance` may still be rerun under `rerunPolicy`, given
+ * its own `runAttempt`. Reuses {@link resolveCiRerunDecision}
+ * (ci-wait-policy.mts) -- the same rerun-once-budget decision
+ * `idd-ci.instructions.md` §Rerun mechanics documents CI-wait itself
+ * applying -- rather than re-deriving the budget rule here, so this
+ * helper's recovery recommendations can never drift out of sync with the
+ * policy CI-wait already enforces.
+ *
+ * Fails closed when `runAttempt` is `null` under a non-`"hold"` policy
+ * (an unresolved or not-yet-enriched instance): this previously defaulted
+ * the missing value to `1` (treating it as "never rerun", the single
+ * MOST PERMISSIVE interpretation) and silently derived `rerunCount: 0`
+ * from that guess, rather than withholding an instance whose budget this
+ * helper cannot actually confirm (CodeRabbit review, #1434). Reported
+ * with its own distinct `reason: 'run-attempt-unknown'` (not conflated
+ * with a confirmed-exhausted budget's `'rerun-budget-exhausted'`), so the
+ * operator-facing notice can still tell "known, already used" apart from
+ * "unconfirmed" -- but both withhold the instance the same way. Under a
+ * `"hold"` policy this distinction is moot (every instance is withheld
+ * regardless of its own attempt count, and `resolveCiRerunDecision`
+ * already reports the correct shared `'policy-hold'` reason for it), so
+ * the null-`runAttempt` short-circuit only applies to the non-`"hold"`
+ * path where `rerunCount` would otherwise actually be read.
+ */
+function resolveInstanceRerunDecision(instance, rerunPolicy) {
+  if (instance.runAttempt === null && rerunPolicy !== 'hold') {
+    return {
+      action: 'hold',
+      reason: 'run-attempt-unknown',
+      rerunPolicy,
+      rerunCount: 0,
+    };
+  }
+  const rerunCount = Math.max(0, (instance.runAttempt ?? 0) - 1);
+  return resolveCiRerunDecision({ rerunPolicy, rerunCount });
+}
+/** Render "N rerun-eligible instance(s)" and/or "N recovery-refresh
+ * candidate(s)" for {@link RerunAdvisoryConvergencePlan.rerunPolicyHoldNotice},
+ * omitting either half when its own count is zero. */
+function describeHeldCounts(eligibleCount, refreshCount) {
+  const parts = [];
+  if (eligibleCount > 0)
+    parts.push(`${eligibleCount} rerun-eligible instance(s)`);
+  if (refreshCount > 0) {
+    parts.push(`${refreshCount} recovery-refresh candidate(s)`);
+  }
+  return parts.join(' and ');
+}
+/**
+ * Render the reason clause for a `"rerun-once"` policy's
+ * {@link RerunAdvisoryConvergencePlan.rerunPolicyHoldNotice}, distinguishing
+ * a confirmed-exhausted budget from one that could not be confirmed (CodeRabbit
+ * review, #1434) -- joined when a single run produces both reasons across
+ * different instances, so the notice never overstates certainty ("the
+ * budget is already used") for an instance that was actually withheld
+ * because its `run_attempt` could not be confirmed at all.
+ */
+function describeRerunOnceHoldReasons(reasons) {
+  const parts = [];
+  if (reasons.has('rerun-budget-exhausted')) {
+    parts.push('the one-rerun budget is already used (run_attempt > 1)');
+  }
+  if (reasons.has('run-attempt-unknown')) {
+    parts.push("one or more instances' own run_attempt could not be confirmed");
+  }
+  // Every "hold" decision under a non-"hold" policy carries one of the
+  // two reasons above (resolveCiRerunDecision / resolveInstanceRerunDecision
+  // have no third hold reason on that path) -- this fallback is
+  // defensive, not a reachable case today.
+  return parts.length > 0
+    ? parts.join(', and ')
+    : 'the one-rerun budget is already used (run_attempt > 1)';
+}
+/**
+ * Select already-passing, non-bot, pull_request-family instances eligible
+ * to serve as the recovery-refresh target when no genuine rerun-eligible
+ * instance exists but a bot-gated-skip instance does -- see
+ * {@link RerunAdvisoryConvergencePlan.recoveryRefreshPlan}. Reuses the
+ * exact same bot-detection logic ({@link isBotTriggered}) classification
+ * already applies, so a "passing" instance is never suggested for rerun
+ * if it was itself bot-triggered (rerunning it would not help either).
+ */
+function selectRecoveryRefreshCandidates(instances, options) {
+  const hasBotGatedSkip = instances.some(
+    (instance) => instance.classification === 'bot-gated-skip',
+  );
+  if (!hasBotGatedSkip) return [];
+  return instances.filter((instance) => {
+    if (instance.classification !== 'pass') return false;
+    if (instance.runId === null || instance.runLookupFailed) return false;
+    const runEvent = String(instance.runEvent ?? '')
+      .trim()
+      .toLowerCase();
+    if (!PULL_REQUEST_FAMILY_EVENTS.has(runEvent)) return false;
+    return !isBotTriggered(instance, options);
+  });
+}
+function normalizeLoginList(logins) {
+  return logins
+    .map((login) =>
+      String(login ?? '')
+        .trim()
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+}
+/**
+ * Classify one check-run instance. Evaluated as a strict, ordered decision
+ * list -- see the module header for the rationale behind each state and
+ * why `pending`/`unresolved` exist beyond the issue's three named buckets.
+ */
+function classifyInstance(instance, options) {
+  const status = String(instance.status ?? '')
+    .trim()
+    .toLowerCase();
+  const conclusion = instance.conclusion
+    ? String(instance.conclusion).trim().toLowerCase()
+    : null;
+  // 1. Pass-equivalent -- no action needed.
+  if (conclusion && PASS_CONCLUSIONS.has(conclusion)) {
+    return {
+      ...instance,
+      classification: 'pass',
+      reason: `conclusion "${conclusion}" is pass-equivalent`,
+    };
+  }
+  // 2. Still running -- rerunning a live run cancels it, never helps.
+  if (!conclusion && PENDING_STATUSES.has(status)) {
+    return {
+      ...instance,
+      classification: 'pending',
+      reason: `status "${status}" has not concluded yet; rerunning a live run would cancel it instead of recovering it`,
+    };
+  }
+  // 3. Bot-gated: `action_required` conclusion ONLY (#1745 narrowed this
+  // from the prior "action_required OR bot-triggered actor" rule -- #1424
+  // established just the action_required case; a bot-triggered instance
+  // with any other conclusion, e.g. CANCELLED, reruns and completes
+  // normally, per #1745's direct experiment on PR #1741). `botTriggered` is
+  // still computed here (and reused at step 7 below) purely to annotate the
+  // reason text and to feed `selectRecoveryRefreshCandidates`, which still
+  // must exclude a bot-triggered PASS instance from the refresh
+  // suggestion -- it no longer decides this instance's classification by
+  // itself.
+  const botTriggered = isBotTriggered(instance, options);
+  const actorDescription =
+    instance.triggeringActorLogin ?? instance.actorLogin ?? 'unknown actor';
+  if (conclusion === 'action_required') {
+    const reason = botTriggered
+      ? `conclusion is "action_required" and the triggering actor (${actorDescription}) is a bot; rerunning re-enters action_required (#1424) -- needs a non-bot trigger or maintainer approval`
+      : 'conclusion is "action_required"; rerunning without a non-bot trigger or maintainer approval re-enters action_required (#1424)';
+    return { ...instance, classification: 'bot-gated-skip', reason };
+  }
+  // 4. Fail closed on an unresolvable run identity -- never guess.
+  if (instance.runId === null) {
+    return {
+      ...instance,
+      classification: 'unresolved',
+      reason:
+        "could not parse a workflow run id from this check-run's URL; inspect manually",
+    };
+  }
+  if (instance.runLookupFailed) {
+    return {
+      ...instance,
+      classification: 'unresolved',
+      reason:
+        'the underlying workflow run could not be fetched (network/permission/transient failure); inspect manually',
+    };
+  }
+  // 5. Fail closed on a completed run with no conclusion (malformed/
+  // unexpected payload) -- never assume it is safe to rerun.
+  if (!conclusion) {
+    return {
+      ...instance,
+      classification: 'unresolved',
+      reason: `status "${status}" reported no conclusion; inspect manually`,
+    };
+  }
+  // 6. Fail closed on a non-pull_request-family trigger event (most
+  // commonly workflow_dispatch): rerunning it is not documented as a
+  // reliable way to refresh the PR's required-check rollup, so never
+  // recommend it -- see idd-ci.instructions.md Rerun mechanics.
+  const runEvent = String(instance.runEvent ?? '')
+    .trim()
+    .toLowerCase();
+  if (!PULL_REQUEST_FAMILY_EVENTS.has(runEvent)) {
+    return {
+      ...instance,
+      classification: 'unresolved',
+      reason: runEvent
+        ? `triggering event "${runEvent}" is not pull_request-family (pull_request / pull_request_review / pull_request_review_comment); rerunning it is not a reliable way to refresh the PR's required-check rollup -- inspect manually`
+        : 'triggering event is unknown; inspect manually rather than assuming it is safe to rerun',
+    };
+  }
+  // 7. Uncovered-HEAD hold (#1775): the instance's own
+  // advisory-convergence JSON verdict (from the workflow job log) says
+  // the latest Copilot review does not cover the current HEAD. Rerunning
+  // cannot change that -- only a fresh review can -- so never place this
+  // in the plan and never spend the rerun-once budget on it. Only fires
+  // when `verdictReasons` was actually consulted and matched; a missing
+  // / unparsed log leaves classification unchanged (no invented hold).
+  //
+  // #1806 live-coverage recovery: the job log above is an IMMUTABLE
+  // snapshot from when THAT run executed, so it can go stale once a
+  // fresh review actually lands after the run failed (observed on PR
+  // #1854). `options.headCoverageSatisfied` is a LIVE, per-PR signal
+  // (see `RerunPlanOptions.headCoverageSatisfied`) that lets this hold
+  // recover instead of staying stuck forever. Only `=== true` recovers;
+  // `false`, `null`, and `undefined` all keep the historical hold exactly
+  // as before #1806 -- fail-closed, so an unreadable or not-yet-covered
+  // live signal never invents a rerun.
+  if (hasUncoveredHeadVerdictReason(instance.verdictReasons)) {
+    const matched =
+      instance.verdictReasons?.find(isUncoveredHeadVerdictReason) ??
+      UNCOVERED_HEAD_REASON_MARKER;
+    if (options.headCoverageSatisfied !== true) {
+      return {
+        ...instance,
+        classification: 'awaiting-fresh-review',
+        reason: `advisory-convergence verdict reports "${matched}"; rerunning cannot clear this -- wait for a fresh review covering the current HEAD rather than spending the rerun-once budget (#1775)`,
+      };
+    }
+    return {
+      ...instance,
+      classification: 'rerun-eligible',
+      reason: `advisory-convergence verdict historically reported "${matched}", but a live check now confirms the current HEAD is covered by a fresh review; the historical hold is stale -- safe to rerun (live-coverage recovery, #1806)`,
+    };
+  }
+  // 8. Non-pass, terminal, resolved, pull_request-family -- safe to rerun.
+  // A bot-triggered actor does not withhold this instance by itself
+  // (#1745) -- only a genuinely `action_required` conclusion does, handled
+  // in step 3 above -- so the reason notes bot-triggering when present
+  // instead of asserting "non-bot" for an instance that may well be one.
+  const botNote = botTriggered
+    ? ` (triggering actor ${actorDescription} is a bot, but conclusion "${conclusion}" is not action_required-gated)`
+    : '';
+  return {
+    ...instance,
+    classification: 'rerun-eligible',
+    reason: `conclusion "${conclusion}" is non-passing and resolved (event "${runEvent}")${botNote}; safe to rerun`,
+  };
+}
+/**
+ * `true` when `reason` is an advisory-convergence Clause 1
+ * uncovered-HEAD reason (see {@link UNCOVERED_HEAD_REASON_MARKER}).
+ */
+export function isUncoveredHeadVerdictReason(reason) {
+  return String(reason ?? '')
+    .toLowerCase()
+    .includes(UNCOVERED_HEAD_REASON_MARKER.toLowerCase());
+}
+/**
+ * `true` when a consulted `reasons` list contains an uncovered-HEAD
+ * reason. A `null` / `undefined` list means "not consulted" and never
+ * matches -- so a missing log cannot invent an `awaiting-fresh-review`
+ * hold (#1775).
+ */
+export function hasUncoveredHeadVerdictReason(reasons) {
+  if (!reasons) return false;
+  return reasons.some((reason) => isUncoveredHeadVerdictReason(reason));
+}
+/**
+ * Extract the advisory-convergence JSON verdict's `reasons` array from a
+ * workflow job log (`gh run view --log` / Actions job-logs API output).
+ * Returns `null` when no well-formed verdict JSON is found, so callers
+ * can leave `verdictReasons` unset rather than inventing an empty list
+ * that would look like "fetched, no reasons". Pure and unit-testable;
+ * production collection feeds it the log text for each non-pass run.
+ *
+ * The log lines are typically prefixed with a job/step/timestamp column
+ * (and may carry ANSI color codes); both are stripped before brace-
+ * matching so the same parser works on raw job logs and on
+ * `gh run view --log` output.
+ */
+export function extractAdvisoryVerdictReasonsFromLog(logText) {
+  // Strip ANSI CSI color sequences without a control-character regex
+  // (Biome disallows `\u001b` in regex literals). ESC is code 27.
+  const esc = String.fromCharCode(27);
+  const text = String(logText ?? '')
+    .split(esc)
+    .map((chunk, index) =>
+      index === 0 ? chunk : chunk.replace(/^\[[0-9;]*m/, ''),
+    )
+    .join('');
+  if (!text) return null;
+  // Rebuild candidate JSON payloads by walking braces across lines after
+  // stripping the `gh run view --log` prefix (everything through the
+  // first `Z ` timestamp marker on each line, when present). Prefer the
+  // LAST well-formed advisory-convergence verdict in the log -- a single
+  // job can echo intermediate output, and the final `--assert` document
+  // is what actually determined the check-run conclusion.
+  const payloadChunks = [];
+  let depth = 0;
+  let buf = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const timestampMatch = rawLine.match(/Z (.*)$/);
+    const line =
+      timestampMatch && timestampMatch[1] !== undefined
+        ? timestampMatch[1]
+        : rawLine;
+    for (const ch of line) {
+      if (ch === '{') {
+        if (depth === 0) buf = ['{'];
+        else buf.push(ch);
+        depth += 1;
+      } else if (ch === '}') {
+        if (depth === 0) continue;
+        buf.push(ch);
+        depth -= 1;
+        if (depth === 0) {
+          payloadChunks.push(buf.join(''));
+          buf = [];
+        }
+      } else if (depth > 0) {
+        buf.push(ch);
+      }
+    }
+  }
+  let lastReasons = null;
+  for (const chunk of payloadChunks) {
+    if (!chunk.includes('"reasons"') || !chunk.includes('"ready"')) continue;
+    try {
+      const parsed = JSON.parse(chunk);
+      if (!Array.isArray(parsed.reasons) || typeof parsed.ready !== 'boolean') {
+        continue;
+      }
+      const reasons = parsed.reasons
+        .filter((entry) => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      lastReasons = reasons;
+    } catch {
+      // not valid JSON -- skip
+    }
+  }
+  return lastReasons;
+}
+/**
+ * `true` when the check-run instance's underlying workflow run was
+ * triggered by a bot actor. `type === "Bot"` (checked on both `actor` and
+ * `triggering_actor`) is the primary signal -- GitHub sets this
+ * consistently for App/bot accounts regardless of login spelling. A
+ * configured-login match (`isCopilotReviewerLogin` for the primary
+ * advisory bot, or membership in the resolved `advisoryBotLogins` list)
+ * is a defensive fallback for a payload that omits `type`.
+ *
+ * The `advisoryBotLogins` fallback, and the `primaryBotLogin` comparison
+ * below it, both compare via {@link advisoryBotIdentityToken} (the same
+ * normalization the shared advisory-notice matcher already uses) rather
+ * than a raw, un-normalized comparison: a repository can configure a bare
+ * login (`my-bot`) while the Actions payload reports the GitHub-appended
+ * `[bot]`-suffixed form (`my-bot[bot]`), or vice versa. An un-normalized
+ * comparison would miss that match and let a bot-triggered run fall
+ * through as rerun-eligible (#1434 review, Codex P2).
+ *
+ * `isCopilotReviewerLogin` itself only normalizes this way for the
+ * *default* Copilot login (an exact-set match against `copilot`/
+ * `copilot-pull-request-reviewer`/`copilot-pull-request-reviewer[bot]` --
+ * #1686 narrowed this from a `copilot-pull-request-reviewer*` prefix
+ * match); once a repository configures a non-default
+ * `primaryBotLogin`, it falls back to an exact `normalized === configured`
+ * comparison with no `[bot]`-suffix handling -- the same gap the
+ * `advisoryBotLogins` fallback already closed for its own set, just on
+ * the separate `primaryBotLogin` path (#1434 review, Codex P2, second
+ * occurrence). Re-normalizing `primaryBotLogin` here (rather than
+ * changing the shared `isCopilotReviewerLogin` itself, which many other
+ * callers rely on for its existing exact-match contract) closes it
+ * locally without widening that shared function's behavior.
+ */
+function isBotTriggered(instance, options) {
+  if (instance.actorType === 'Bot' || instance.triggeringActorType === 'Bot') {
+    return true;
+  }
+  const actorLogin = String(instance.actorLogin ?? '')
+    .trim()
+    .toLowerCase();
+  const triggeringLogin = String(instance.triggeringActorLogin ?? '')
+    .trim()
+    .toLowerCase();
+  if (
+    (actorLogin &&
+      isCopilotReviewerLogin(actorLogin, options.primaryBotLogin)) ||
+    (triggeringLogin &&
+      isCopilotReviewerLogin(triggeringLogin, options.primaryBotLogin))
+  ) {
+    return true;
+  }
+  const actorToken = advisoryBotIdentityToken(actorLogin);
+  const triggeringToken = advisoryBotIdentityToken(triggeringLogin);
+  const primaryBotToken = advisoryBotIdentityToken(options.primaryBotLogin);
+  if (
+    primaryBotToken &&
+    ((Boolean(actorToken) && actorToken === primaryBotToken) ||
+      (Boolean(triggeringToken) && triggeringToken === primaryBotToken))
+  ) {
+    return true;
+  }
+  const configuredBotTokens = new Set(
+    options.advisoryBotLogins.map((login) => advisoryBotIdentityToken(login)),
+  );
+  return (
+    (Boolean(actorToken) && configuredBotTokens.has(actorToken)) ||
+    (Boolean(triggeringToken) && configuredBotTokens.has(triggeringToken))
+  );
+}
+/**
+ * Build the ordered, deduplicated-by-run-id rerun plan from an already-
+ * filtered candidate list (the caller decides which classification(s)
+ * qualify -- `rerun-eligible` for the normal plan,
+ * {@link selectRecoveryRefreshCandidates}'s output for the recovery-refresh
+ * plan). A `gh run rerun <id>` targets a workflow run, not a check-run
+ * entry, so two check-run instances that resolved to the same run id
+ * collapse into a single plan entry. Ordered by earliest known `startedAt`
+ * (empty/unknown sorts first, as the more cautious default), then numeric
+ * run id, so the output is deterministic across runs with the same input.
+ *
+ * `owner`/`repo` are embedded as `-R owner/repo` on each generated command
+ * (when both are non-empty) so the plan is safe to run from outside the
+ * checkout this helper itself was invoked from -- `gh run rerun <id>` alone
+ * resolves its target repository from the caller's cwd/`GH_REPO`, not from
+ * whatever `--owner`/`--repo` this helper was given.
+ */
+function buildOrderedPlan(candidates, owner, repo) {
+  const repoFlag = owner && repo ? ` -R ${owner}/${repo}` : '';
+  const byRunId = new Map();
+  for (const instance of candidates) {
+    // Both candidate sources already guarantee a resolved, non-null runId
+    // (rerun-eligible via classifyInstance step 4; recovery-refresh via
+    // selectRecoveryRefreshCandidates's own filter), but guard defensively
+    // rather than trusting that invariant silently.
+    const runId = String(instance.runId ?? '').trim();
+    if (!runId) continue;
+    const list = byRunId.get(runId) ?? [];
+    list.push(instance);
+    byRunId.set(runId, list);
+  }
+  const entries = [...byRunId.entries()].map(([runId, items]) => {
+    const startedAts = items
+      .map((item) => item.startedAt)
+      .filter((value) => Boolean(value))
+      .sort();
+    return {
+      runId,
+      command: `gh run rerun ${runId}${repoFlag}`,
+      // Sorted (not insertion order, which merely reflects the source
+      // API/candidate iteration order and is not guaranteed stable) so
+      // the emitted JSON is deterministic for the same logical plan
+      // (#1434 review, Copilot).
+      checkRunIds: [...new Set(items.map((item) => item.checkRunId))].sort(),
+      startedAt: startedAts[0] ?? '',
+    };
+  });
+  entries.sort((left, right) => {
+    if (left.startedAt !== right.startedAt) {
+      return left.startedAt < right.startedAt ? -1 : 1;
+    }
+    const leftId = Number(left.runId);
+    const rightId = Number(right.runId);
+    if (
+      Number.isFinite(leftId) &&
+      Number.isFinite(rightId) &&
+      leftId !== rightId
+    ) {
+      return leftId - rightId;
+    }
+    return left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0;
+  });
+  return entries;
+}
+/**
+ * Parse a workflow run id out of a GitHub Actions check-run `html_url` (or
+ * `details_url`) such as
+ * `https://github.com/{owner}/{repo}/actions/runs/<run-id>/job/<job-id>` --
+ * the same URL shape `idd-ci.instructions.md`'s Rerun mechanics already
+ * document extracting a run id from. Returns `null` (fails closed) rather
+ * than guessing when the URL does not match.
+ *
+ * The run id may be followed by `/` (a job segment), `?` (GitHub appends
+ * query strings such as `?check_suite_focus=true` to some check-run
+ * permalinks), or end-of-string -- a run id immediately followed by `?`
+ * was previously misclassified `unresolved` (#1434 review, Copilot).
+ */
+export function parseRunIdFromUrl(url) {
+  const match = /\/actions\/runs\/(\d+)(?:[/?]|$)/.exec(String(url ?? ''));
+  return match ? match[1] : null;
+}
+/** A conservative GitHub owner/repo identifier character class --
+ * alphanumeric, hyphen, underscore, period. Not GitHub's own exact
+ * validation rule (real usernames additionally forbid a leading/trailing
+ * hyphen and consecutive hyphens); this is a defensive CLI-input guard,
+ * not the authoritative source of what GitHub itself allows, so erring
+ * slightly permissive-of-valid-names is fine -- the goal is rejecting
+ * whitespace and shell metacharacters, not exactly replicating GitHub's
+ * own registration rules. */
+const GITHUB_IDENTIFIER_PATTERN = /^[A-Za-z0-9_.-]+$/;
+/**
+ * Rewrite a `--pr VALUE` pair into the single token `--pr=VALUE` whenever
+ * `VALUE` starts with a single dash (not `--`) -- `node:util`'s own
+ * `parseArgs` (`strict: true`) throws `ERR_PARSE_ARGS_INVALID_OPTION_VALUE`
+ * ("... argument is ambiguous") for a bare `--pr -5`, since a
+ * single-dash-prefixed value could plausibly be another short option
+ * instead. Left uncaught, this crashed the CLI with a raw, uncaught Node
+ * stack trace instead of this file's own documented `--pr` contract ("an
+ * invalid --pr resolves to null (fails closed at the caller)") --
+ * verified empirically (`--pr -5` threw before this fix; a negative PR
+ * number is never valid, but the failure mode should be the same clean
+ * `prNumber: null` every other malformed `--pr` value already gets, not
+ * an uncaught crash) (self-discovered while evaluating #1446's shared
+ * `cli-args.mts` wrapper, which solves this same class of gap generically
+ * -- adopting it here is out of scope for #1431; this is the narrow,
+ * `--pr`-only equivalent). Only `--pr` needs this: none of this file's
+ * other flags (`--owner`, `--repo`, `--now`) can realistically take a
+ * dash-prefixed value, and `--help`/`-h` is boolean (no value to
+ * disambiguate).
+ */
+function disambiguateSingleDashPrValue(argv) {
+  const rewritten = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    const next = argv[index + 1];
+    const isAmbiguousValue =
+      typeof next === 'string' &&
+      next.startsWith('-') &&
+      !next.startsWith('--');
+    if (token === '--pr' && isAmbiguousValue) {
+      rewritten.push(`--pr=${next}`);
+      index += 1;
+      continue;
+    }
+    rewritten.push(token);
+  }
+  return rewritten;
+}
+/**
+ * Mechanical CLI-argument parsing is delegated to `node:util`'s own
+ * stable (since Node 20; this repo's engines floor is `^22.22.2 || >=24`)
+ * `parseArgs`, per a maintainer's review suggestion on PR #1434: it
+ * already rejects a missing value, a value that looks like another
+ * option (long `--foo` or short `-h` alike -- the hand-rolled
+ * `requireFlagValue` this replaced only checked for `--`, so `--owner -h`
+ * silently consumed `-h` as the owner instead of erroring), and an
+ * unknown option, each with Node's own stable `ERR_PARSE_ARGS_*` error
+ * codes. `allowPositionals: false` closes one more gap `strict: true`
+ * alone does not: `strict` governs unknown *options*, not leftover
+ * positional (non-option) tokens, so an invocation like
+ * `--pr 1431 extra` would otherwise silently accept `extra` instead of
+ * failing fast -- risky for a recovery/rerun helper where a typo should
+ * error, not run against unintended, silently-ignored input (#1434
+ * review, Copilot). This function's own job narrows to the
+ * domain-specific validation `parseArgs` cannot express declaratively:
+ * the `--pr` value must be all digits (not just numeric-prefixed), and
+ * `--owner`/`--repo` must be given together or not at all.
+ */
+export function parseArgs(argv) {
+  const { values } = nodeParseArgs({
+    args: disambiguateSingleDashPrValue(argv),
+    options: {
+      pr: { type: 'string' },
+      owner: { type: 'string' },
+      repo: { type: 'string' },
+      now: { type: 'string' },
+      help: { type: 'boolean', short: 'h' },
+      apply: { type: 'boolean' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (values.help) {
+    return {
+      prNumber: null,
+      owner: '',
+      repo: '',
+      now: '',
+      help: true,
+      apply: false,
+    };
+  }
+  const owner = String(values.owner ?? '').trim();
+  const repo = String(values.repo ?? '').trim();
+  // A caller inspecting a different repository must fully specify it --
+  // mixing a user-supplied owner with a `gh repo view`-derived repo (or
+  // vice versa) would query a mismatched, unintended repository
+  // (#1434 review, Copilot).
+  if (Boolean(owner) !== Boolean(repo)) {
+    throw new Error('provide both --owner and --repo, or neither');
+  }
+  // A conservative GitHub-identifier character class, rejected otherwise:
+  // --owner/--repo are only trimmed above, never validated, so whitespace
+  // or a shell metacharacter would still build a syntactically-valid
+  // `-R owner/repo` string here, but the generated `gh run rerun <id> -R
+  // owner/repo` recovery commands are meant to be copy-pasted directly
+  // by an operator -- an unvalidated value could make that copy-paste
+  // unsafe (Copilot review, #1434).
+  if (owner && !GITHUB_IDENTIFIER_PATTERN.test(owner)) {
+    throw new Error(
+      '--owner must contain only letters, digits, hyphens, underscores, or periods',
+    );
+  }
+  if (repo && !GITHUB_IDENTIFIER_PATTERN.test(repo)) {
+    throw new Error(
+      '--repo must contain only letters, digits, hyphens, underscores, or periods',
+    );
+  }
+  // Number.parseInt parses only a leading numeric prefix ("1431abc" ->
+  // 1431), which would silently run this recovery helper -- and whatever
+  // `gh run rerun` plan it prints -- against the wrong PR on a typo.
+  // Require the entire value to be digits before parsing (#1434 review,
+  // Codex P2).
+  const rawPr = String(values.pr ?? '').trim();
+  const parsedPr = /^\d+$/.test(rawPr)
+    ? Number.parseInt(rawPr, 10)
+    : Number.NaN;
+  return {
+    prNumber: Number.isInteger(parsedPr) && parsedPr >= 1 ? parsedPr : null,
+    owner,
+    repo,
+    now: String(values.now ?? '').trim(),
+    help: false,
+    apply: Boolean(values.apply),
+  };
+}
+/**
+ * Describe outstanding `pending` / `bot-gated-skip` / `unresolved` /
+ * `awaiting-fresh-review` instance counts, or `''` when none exist.
+ * Extracted from {@link describeNoActionState} so the CLI can surface
+ * these states independently of whether a rerun plan, recovery-refresh
+ * plan, or hold notice ALSO exists for a different instance in the same
+ * run -- previously these were only ever shown when NONE of those three
+ * existed, silently hiding e.g. 2 still-pending instances whenever the
+ * output happened to also have a rerun plan for a different instance
+ * (CodeRabbit review, #1434).
+ */
+export function describeOutstandingStates(plan) {
+  const notes = [];
+  if (plan.counts.pending > 0) {
+    notes.push(
+      `${plan.counts.pending} instance(s) are still running -- wait for them to complete, then re-run this diagnosis`,
+    );
+  }
+  if (plan.counts.botGatedSkip > 0) {
+    notes.push(
+      `${plan.counts.botGatedSkip} instance(s) are bot-gated -- they need a non-bot trigger or maintainer approval (see idd-ci.instructions.md §Rerun mechanics), not a rerun`,
+    );
+  }
+  if (plan.counts.unresolved > 0) {
+    notes.push(
+      `${plan.counts.unresolved} instance(s) could not be resolved -- inspect each instance's "reason" above manually`,
+    );
+  }
+  if (plan.counts.awaitingFreshReview > 0) {
+    notes.push(
+      `${plan.counts.awaitingFreshReview} instance(s) are awaiting a fresh review covering the current HEAD -- wait for Copilot (or the configured primary bot) to re-review rather than rerunning (#1775)`,
+    );
+  }
+  return notes.join('; ');
+}
+/**
+ * Describe the terminal state when there is truly nothing to report:
+ * no rerun plan, no recovery-refresh plan, no hold notice, AND no
+ * outstanding `pending` / `unresolved` / `bot-gated-skip` /
+ * `awaiting-fresh-review` instance (see {@link describeOutstandingStates},
+ * which the CLI now also consults independently of this function).
+ * "Nothing to do" would be accurate only when every instance is `pass`
+ * (or there are no instances at all) -- `pending`, `unresolved`,
+ * `bot-gated-skip`, and `awaiting-fresh-review` all still require an
+ * operator action (waiting, manual inspection, approval, a non-bot
+ * trigger, or a fresh review, per each instance's own `reason`), so
+ * presenting them as no-action risked leaving a genuinely stuck required
+ * check unresolved (#1434 review, Codex P2; #1775).
+ */
+export function describeNoActionState(plan) {
+  if (plan.counts.total === 0) {
+    return `No "${plan.checkName}" check-run instances found for this HEAD; nothing to do.`;
+  }
+  const notes = describeOutstandingStates(plan);
+  if (!notes) {
+    return 'Every instance is pass-equivalent; nothing to do.';
+  }
+  return `No rerun-eligible instance and no recovery-refresh option, but this is not a clean "nothing to do": ${notes}.`;
+}
+/**
+ * Header line introducing the recovery-refresh section of the CLI's stderr
+ * summary. Two independent conditions ({@link
+ * RerunAdvisoryConvergencePlan.plan} and {@link
+ * RerunAdvisoryConvergencePlan.recoveryRefreshPlan}) can both be non-empty
+ * at once since #1745 (a bot-triggered rerun-eligible instance in `plan`,
+ * e.g. a CANCELLED sibling, does not itself supply the non-bot trigger a
+ * separately bot-gated instance still needs from `recoveryRefreshPlan`) --
+ * a hardcoded "No rerun-eligible instances" header became false in that
+ * combined case (#1752, post-merge Codex review on #1749/#1745).
+ * `idd-ci.instructions.md` §Rerun mechanics documents the recovery-refresh
+ * rerun as the recommended FIRST step in that combined scenario (rerun the
+ * already-passing non-bot instance; only rerun the CANCELLED-conclusion
+ * bot-triggered sibling(s) next if that alone does not clear the rollup),
+ * so the combined-case wording says so explicitly rather than relying on
+ * {@link buildRerunPlanTextSections}'s print order alone.
+ */
+export function describeRecoveryRefreshHeader(plan) {
+  return plan.plan.length > 0
+    ? 'A recovery-refresh option is also available -- try this FIRST, per idd-ci.instructions.md §Rerun mechanics; only fall back to the sequential recovery plan below if it does not clear the rollup:'
+    : 'No rerun-eligible instances, but a recovery-refresh option is available:';
+}
+/**
+ * Ordered, fully-rendered stderr sections for the recovery-refresh option
+ * and the sequential rerun-eligible plan, selected and formatted
+ * independently of each other -- the CLI entry point below previously
+ * treated these as mutually exclusive (`if`/`else if`), so whenever both
+ * `plan.recoveryRefreshPlan` and `plan.plan` were non-empty at once (#1745
+ * made that possible), only the first-checked one ever printed, silently
+ * dropping the other's recovery command from the human-readable summary an
+ * operator actually follows even though the JSON document above already
+ * carried both correctly (#1752). Extracted as its own pure, directly
+ * unit-testable function -- mirroring {@link describeOutstandingStates} /
+ * {@link describeNoActionState} -- so SECTION SELECTION (which sections
+ * appear, and in what order), not just wording, has direct test coverage
+ * instead of being reachable only through the `import.meta.main` CLI entry
+ * point.
+ *
+ * Order: the recoveryRefreshPlan section prints first when both are
+ * present, matching `idd-ci.instructions.md` §Rerun mechanics' documented
+ * recovery order for this exact combined scenario (see {@link
+ * describeRecoveryRefreshHeader}). Each returned entry is pre-joined with
+ * internal newlines; the caller wraps each in the same single leading and
+ * trailing blank line every other CLI-summary section already uses.
+ */
+export function buildRerunPlanTextSections(plan) {
+  const sections = [];
+  if (plan.recoveryRefreshPlan.length > 0) {
+    sections.push(
+      [
+        describeRecoveryRefreshHeader(plan),
+        ...plan.recoveryRefreshPlan.map(
+          (entry, index) => `  ${index + 1}. ${entry.command}`,
+        ),
+        '',
+        plan.recoveryRefreshCaveat,
+      ].join('\n'),
+    );
+  }
+  if (plan.plan.length > 0) {
+    sections.push(
+      [
+        'Sequential recovery plan (run one at a time; wait for each to finish before the next):',
+        ...plan.plan.map((entry, index) => `  ${index + 1}. ${entry.command}`),
+        '',
+        plan.planCaveat,
+      ].join('\n'),
+    );
+  }
+  return sections;
+}
+function printHelp() {
+  process.stdout.write(`Usage:
+  node scripts/rerun-advisory-convergence.mjs --pr <number> [--owner <owner> --repo <repo>] [--now <ISO8601>] [--apply] [--help]
+
+By default (without --apply): read-only. Fetches every
+"${RERUN_PLAN_CHECK_NAME}" check-run instance for the PR's current HEAD SHA
+(commit check-runs API, paged -- not the recent-runs list, which can page
+the target run out of view), classifies each as pass / pending /
+bot-gated-skip / unresolved / awaiting-fresh-review / rerun-eligible, and
+prints the ordered sequential "gh run rerun <id>" recovery plan for the
+rerun-eligible instances (each command includes "-R <owner>/<repo>" when
+the repository is known, so the plan is safe to run outside this
+checkout). An instance whose own advisory-convergence verdict reports
+that the latest review does not cover the current HEAD is classified
+awaiting-fresh-review (not rerun-eligible) so the diagnosis tells the
+operator to wait for a fresh review rather than burning the rerun-once
+budget (#1775). Never calls "gh run rerun" (or any other mutating
+command) itself.
+
+With --apply: after printing the same diagnostic plan as above, executes
+it -- "gh run rerun"-ing each rerun-eligible (never bot-gated-skip,
+awaiting-fresh-review, or rerun-budget-held) instance one at a time,
+waiting for each to reach a terminal state before starting the next,
+exactly as "planCaveat" already documents. Prefers the recovery-refresh
+plan first when one exists, matching idd-ci.instructions.md's documented
+recovery order. After each rerun, the plan is recomputed from fresh
+evidence and the loop stops early as soon as it resolves (no
+rerun-eligible or recovery-refresh instance remains) instead of running
+the rest of the original plan. A final summary of what ran and whether
+the target state resolved is printed to stderr.
+
+--owner and --repo must be given together (to inspect a PR outside the
+current checkout) or omitted together (to auto-detect the current
+checkout's own repository) -- providing only one is rejected.
+
+Honors the inspected repository's configured ciWait.rerunPolicy: when
+it is "hold", both the rerun plan and the recovery-refresh plan stay
+empty (with a notice explaining why) instead of recommending reruns a
+repository has deliberately opted out of -- --apply then has nothing
+eligible to execute either.
+
+On a normal (non-help) run, stdout carries ONLY the JSON plan document
+(safe to pipe into "jq" or similar); the human-readable recovery-plan
+summary (and, under --apply, the final apply summary) is printed to
+stderr. (This --help text itself is the one exception: it is plain usage
+text on stdout, not JSON.)
+`);
+}
+const defaultDeps = { collect: collectFromGitHub };
+/**
+ * Parse argv, collect evidence (via `deps.collect`, real `gh` calls by
+ * default), and compute the plan. Mirrors `runAdvisoryConvergence`'s DI
+ * pattern (advisory-convergence.mts) so tests can substitute a fake
+ * `collect` instead of shelling out to `gh`.
+ */
+export function runRerunAdvisoryConvergence(argv, deps = defaultDeps) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    return { plan: null, help: true, args };
+  }
+  if (!args.prNumber) {
+    throw new Error('missing required --pr <number> argument');
+  }
+  const { input, options } = deps.collect(args);
+  const plan = computeRerunPlan(input, options);
+  return { plan, help: false, args };
+}
+// --- --apply: execute the plan's rerun-eligible instances ---------------
+/** Safety bound on how many `gh run rerun` invocations {@link
+ * applyRerunPlan} will execute in a single call, guarding against an
+ * unexpected oscillating state (a fresh rerun-eligible instance appearing
+ * after every rerun) turning into an unbounded loop. Comfortably above
+ * any real plan observed in dogfooding (5 stale instances was the largest
+ * single-PR case motivating #1766). */
+const MAX_APPLY_RERUNS = 20;
+/**
+ * Execute `initialPlan`'s rerun-eligible instances one at a time, waiting
+ * for each to complete and recomputing the plan before deciding whether
+ * to continue. Pure aside from the injected `deps` (no direct I/O of its
+ * own), mirroring {@link computeRerunPlan}'s own separation of policy
+ * from I/O -- directly unit-testable with a fake `deps`, no network
+ * dependency (#1766 acceptance criteria).
+ *
+ * Prefers `recoveryRefreshPlan`'s next entry over `plan`'s whenever both
+ * are non-empty, matching {@link describeRecoveryRefreshHeader}'s
+ * documented recovery order (try the recovery-refresh rerun first; only
+ * fall back to the sequential plan if it does not clear the rollup).
+ * `bot-gated-skip`, `awaiting-fresh-review`, and rerun-budget-held
+ * instances are never candidates here: neither `plan` nor
+ * `recoveryRefreshPlan` ever contains them (see {@link computeRerunPlan}),
+ * so this loop cannot reach them regardless of `deps.recomputePlan`'s
+ * output (#1775 keeps uncovered-HEAD failures out of both plans).
+ */
+export function applyRerunPlan(initialPlan, deps) {
+  const executed = [];
+  let plan = initialPlan;
+  for (let attempt = 0; attempt < MAX_APPLY_RERUNS; attempt += 1) {
+    const fromRefresh = plan.recoveryRefreshPlan[0];
+    const next = fromRefresh ?? plan.plan[0];
+    if (!next) {
+      return { executed, finalPlan: plan, resolved: true };
+    }
+    const section = fromRefresh ? 'recoveryRefreshPlan' : 'plan';
+    deps.rerunAndWait(next);
+    executed.push({ runId: next.runId, command: next.command, section });
+    plan = deps.recomputePlan();
+  }
+  return { executed, finalPlan: plan, resolved: false };
+}
+/**
+ * Human-readable final summary for `--apply`, printed to stderr after
+ * {@link applyRerunPlan} finishes. Pure and directly unit-testable,
+ * mirroring {@link buildRerunPlanTextSections} / {@link
+ * describeOutstandingStates} rather than being reachable only through the
+ * CLI entry point.
+ */
+export function formatApplySummary(result) {
+  const lines = [`--apply: executed ${result.executed.length} rerun(s).`];
+  for (const [index, entry] of result.executed.entries()) {
+    lines.push(`  ${index + 1}. [${entry.section}] ${entry.command}`);
+  }
+  lines.push(
+    result.resolved
+      ? 'Target state resolved: no rerun-eligible or recovery-refresh instance remains.'
+      : `Target state NOT resolved after ${MAX_APPLY_RERUNS} rerun(s) -- instances still remain. Re-run this helper to continue, or investigate manually.`,
+  );
+  return lines.join('\n');
+}
+/**
+ * Fetch every check-run instance named `checkName` for `ref` via the
+ * commit check-runs API, paginated.
+ *
+ * Deliberately NOT the recent-runs / workflow-runs list
+ * (`GET /repos/{owner}/{repo}/actions/runs?head_sha=...`): that list is
+ * ordered across every workflow in the repository, so a specific run for
+ * a busy SHA can sit many pages deep -- exactly the "paged out of the
+ * recent-runs window" problem the issue calls out. This endpoint is
+ * scoped to the single commit and check name instead, via the documented
+ * `check_name` query parameter.
+ *
+ * `--method GET` is required alongside the `-f check_name=...` field:
+ * `gh api` defaults to POST as soon as any `-f`/`-F` value is present
+ * (its own `--help` text: "The default HTTP request method is GET
+ * normally and POST if any parameters were added"), and this endpoint
+ * only accepts GET -- an unqualified `-f` here silently sends a POST that
+ * 404s, confirmed against the live API while fixing #1431. `--method GET`
+ * is what makes `-f` append to the query string instead.
+ *
+ * `-f filter=all` is required alongside `check_name`: this endpoint's own
+ * `filter` query parameter defaults to `latest`, which -- per GitHub's own
+ * documented behavior, confirmed empirically against this repo's actual
+ * PR history during review -- collapses same-named check runs down to
+ * only the most-recently-completed instance, silently dropping exactly
+ * the older non-passing instance this helper exists to recover. Without
+ * `filter=all`, `instances` can (and did, in the reproduction above) omit
+ * real check-run instances even though `--paginate` runs correctly.
+ *
+ * Not built on {@link ghApiJson}'s own `paginate` option: that option
+ * hardcodes `--jq '.[]'`, which assumes a bare top-level array, but this
+ * endpoint's shape is `{ total_count, check_runs: [...] }` -- so this
+ * function passes `--jq '.check_runs[]'` directly and reuses the same
+ * {@link parsePaginatedGhNdjson} parser `ghApiJson` uses internally.
+ */
+/**
+ * Args for downloading one workflow run's combined job logs as plain
+ * text via `gh run view --log`. Prefer this over
+ * `GET /repos/.../actions/jobs/{id}/logs`, which redirects to a ZIP
+ * archive that `ghText` would decode as garbage UTF-8 and leave
+ * `verdictReasons` null (Copilot review on #1790). Scoped with `-R
+ * owner/repo` so a cross-repository diagnosis still hits the right
+ * run.
+ */
+export function buildRunViewLogArgs(owner, repo, runId) {
+  return ['run', 'view', runId, '-R', `${owner}/${repo}`, '--log'];
+}
+/**
+ * Fetch and parse the advisory-convergence `reasons` array for one
+ * workflow run, or `null` when the log cannot be read / parsed. Uses
+ * {@link buildRunViewLogArgs} (`gh run view --log`) for plain-text logs
+ * and feeds them to {@link extractAdvisoryVerdictReasonsFromLog}.
+ * Failures are swallowed into `null` so a flaky log download cannot
+ * invent an uncovered-HEAD hold or abort the whole diagnosis (#1775).
+ */
+function fetchAdvisoryVerdictReasonsForRun(owner, repo, runId) {
+  try {
+    const logText = ghText(
+      buildRunViewLogArgs(owner, repo, runId),
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+    return extractAdvisoryVerdictReasonsFromLog(logText);
+  } catch {
+    return null;
+  }
+}
+export function buildCheckRunsForRefArgs(owner, repo, ref, checkName) {
+  const path = `repos/${owner}/${repo}/commits/${ref}/check-runs`;
+  return [
+    'api',
+    path,
+    '--method',
+    'GET',
+    '-f',
+    `check_name=${checkName}`,
+    '-f',
+    'filter=all',
+    '--paginate',
+    '--jq',
+    '.check_runs[]',
+  ];
+}
+/**
+ * Resolve the URL used to extract a check-run's workflow-run id, preferring
+ * `details_url` over `html_url`. For a GitHub-Actions-created check run
+ * (which `idd-advisory-convergence` always is) the two are typically
+ * identical, but the Checks API's own field semantics make `html_url` the
+ * one more likely to diverge to a non-Actions permalink (e.g. a
+ * `/checks/<check_run_id>`-shaped URL) -- `details_url` is documented as
+ * "the full details of the check" and is the one this repo's own
+ * `idd-ci.instructions.md` Rerun mechanics already document extracting a
+ * run id from. Preferring it first costs nothing when the two agree and
+ * avoids a spurious `unresolved` classification when they do not.
+ */
+export function resolveCheckRunUrl(run) {
+  return String(run.details_url ?? run.html_url ?? '');
+}
+function fetchCheckRunsForRef(owner, repo, ref, checkName) {
+  // GH_TEXT_LOOP_TIMEOUT_OPTIONS (stdin ignored, 30s timeout) here too --
+  // sibling gap to the per-run lookup loop's own fix above. Not the FIRST
+  // `gh` call this helper makes overall (collectFromGitHub's own
+  // `repo view` / `pr view` calls run before this one) but the first
+  // potentially long-running one: `--paginate` can mean several HTTP
+  // round-trips within the one `execFileSync` invocation on a busy PR's
+  // check-run history, so a stalled or unexpectedly-interactive `gh`
+  // (rate limiting, network stall, an auth re-prompt) here would hang
+  // this read-only helper before it ever reaches the fail-closed
+  // classification logic below, let alone the per-run loop's own timeout
+  // (#1434 review, Copilot).
+  const raw = ghText(
+    buildCheckRunsForRefArgs(owner, repo, ref, checkName),
+    GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+  );
+  return parsePaginatedGhNdjson(raw);
+}
+/**
+ * Fetch and parse `.github/idd/config.json` for `owner/repo` **at `ref`**
+ * via the Contents API. Used unconditionally -- both a same-repo and a
+ * true cross-repository invocation -- rather than a local `readFileSync`
+ * fallback for the same-repo case (`loadIddConfig`, idd-config.mts).
+ *
+ * `ref` must be the repository's TRUSTED default branch (see
+ * {@link resolveDefaultBranch}), never `prHeadSha` and never a local
+ * working-tree read: the `idd-advisory-convergence` workflow this helper
+ * diagnoses deliberately checks out the DEFAULT branch, not the PR head,
+ * for both its verdict script and `.github/idd/config.json` --
+ * `idd-advisory-convergence.yml`'s own header comment documents this
+ * exact "trusted-code checkout" posture, precisely so a PR cannot edit
+ * its own bot-identity config to disguise a bot-triggered run as
+ * non-bot, or loosen `ciWait.rerunPolicy` to grant itself a rerun the
+ * repository's real policy forbids. This helper must resolve the SAME
+ * trusted config the workflow itself used to produce the check-run
+ * verdicts being diagnosed, or its classification and rerun
+ * recommendations can disagree with (and be gamed relative to) what
+ * actually governed those runs (#1434 review, Codex P2, second
+ * occurrence -- reverts this file's own prior "always prHeadSha" fix,
+ * which solved the "unpinned ref" bug but pinned the wrong ref).
+ *
+ * `--method GET` is required alongside the `-f ref=...` field, for the
+ * same reason `buildCheckRunsForRefArgs` above needs it: `gh api` defaults
+ * to POST as soon as any `-f` value is present, and the Contents API only
+ * accepts GET -- an unqualified `-f ref=...` here would 404 on every call
+ * (confirmed empirically), which this function's own catch block would
+ * silently treat as "config genuinely absent, use defaults" instead of
+ * surfacing the real problem.
+ *
+ * Returns `null` -- falls back to documented defaults, same as a missing
+ * local file -- **only** on a confirmed 404 (`ref` genuinely has no
+ * config committed, the same "absent" state `loadIddConfig` treats as
+ * "use defaults" locally). Any other failure -- a permission error, a
+ * transient Contents API failure, or malformed content -- means this
+ * helper cannot confirm whether `ref` configures a non-default bot
+ * identity, so silently substituting defaults could misclassify a
+ * bot-triggered run there as rerun-eligible. Per this repo's own
+ * fail-closed default (`idd-overview-core.instructions.md`), that
+ * ambiguity throws instead of guessing, rejecting the diagnosis outright
+ * rather than proceeding on unconfirmed bot identity (#1434 review, Codex
+ * P2).
+ */
+export function buildIddConfigContentsArgs(owner, repo, ref) {
+  return [
+    'api',
+    `repos/${owner}/${repo}/contents/.github/idd/config.json`,
+    '--method',
+    'GET',
+    '-f',
+    `ref=${ref}`,
+    '--jq',
+    '.content',
+  ];
+}
+function loadRemoteIddConfig(owner, repo, ref) {
+  try {
+    const encoded = ghText(
+      buildIddConfigContentsArgs(owner, repo, ref),
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+    const decoded = Buffer.from(encoded.replace(/\n/g, ''), 'base64').toString(
+      'utf8',
+    );
+    return JSON.parse(decoded);
+  } catch (error) {
+    if (deriveGhHttpStatus(error) === 404) {
+      return null;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `cannot confirm .github/idd/config.json for ${owner}/${repo}@${ref}: bot-identity resolution for this diagnosis requires this file to be readable or genuinely absent (404) at this ref, not merely unreadable -- ${message}`,
+    );
+  }
+}
+/**
+ * Resolve `owner/repo`'s default branch via the Repository API -- the
+ * `ref` {@link loadRemoteIddConfig} must read `.github/idd/config.json`
+ * from (see its own doc comment for why). Never hardcoded to `main`:
+ * both this source repository's own `idd-advisory-convergence.yml` and
+ * the `idd-template/` copy distributed to adopters document their
+ * checkout's `ref: main` as standing in for "your own default branch
+ * name if it differs" -- a portable, reusable helper must resolve this
+ * dynamically per target repository rather than assume the source
+ * repository's own convention. No `-f` value is present, so `gh api`
+ * defaults to GET here without needing `--method GET` (confirmed
+ * empirically; the POST-default only triggers once a `-f`/`-F` value is
+ * added, unlike the other `gh api` calls in this file).
+ */
+function resolveDefaultBranch(owner, repo) {
+  return ghText(
+    ['api', `repos/${owner}/${repo}`, '--jq', '.default_branch'],
+    GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+  );
+}
+/**
+ * Discard whichever of `ciWait`, `advisoryWait`, and `advisoryBotLogins`
+ * fails schema validation against {@link POLICY_SCHEMA}, treating an
+ * invalid section as absent -- the same fail-closed contract
+ * `readCiWaitPolicy` (ci-wait-policy.mts) and `readAdvisoryPrimaryBotLogin`
+ * (advisory-wait-policy.mts) already give their own local-disk config
+ * reads, applied here to the already-fetched remote config object instead
+ * (those two functions read from a local file path; this helper's config
+ * comes from the Contents API, so their own validation cannot be reused
+ * directly -- only the shared {@link validateConfigSection} check they
+ * both build on can).
+ *
+ * Without this, a `ciWait` section shaped like `{ rerunPolicy: "hold",
+ * unknownProperty: true }` (an otherwise-valid `rerunPolicy` value
+ * alongside a schema violation elsewhere in the same section --
+ * `additionalProperties: false` in policy.schema.json) would still have
+ * this helper's `normalizeCiWaitPolicy` read `rerunPolicy: "hold"`
+ * directly and suppress every recovery command, even though
+ * `readCiWaitPolicy` discards the WHOLE section on that same violation
+ * and falls back to the documented default `"rerun-once"` -- letting
+ * this helper disagree with, and incorrectly override, the established
+ * policy resolution (#1434 review, Codex P2). `advisoryWait`
+ * (`primaryBotLogin`) and the top-level `advisoryBotLogins` array get the
+ * identical treatment for the same reason, on the bot-identity side.
+ *
+ * Every downstream resolver this helper calls (`resolveAdvisoryPrimaryBotLogin`,
+ * `resolveAdvisoryBotLogins`, `normalizeCiWaitPolicy`) already treats an
+ * ABSENT section as "use the default", so discarding an invalid section
+ * here is enough -- no caller-side change needed beyond running the
+ * fetched config through this function once.
+ */
+export function sanitizeRemoteConfig(config) {
+  if (!config || typeof config !== 'object') {
+    return config;
+  }
+  const sanitized = { ...config };
+  for (const sectionKey of ['ciWait', 'advisoryWait', 'advisoryBotLogins']) {
+    if (validateConfigSection(config, POLICY_SCHEMA, sectionKey).length > 0) {
+      delete sanitized[sectionKey];
+    }
+  }
+  return sanitized;
+}
+/**
+ * Live counterpart to the uncovered-HEAD hold (#1806): re-derives whether
+ * the latest trusted primary-bot review's commit now matches the PR's
+ * current HEAD, reusing `review-clause.mts`'s own review-clause evidence
+ * (`fetchReviewsAndHeadCommit` + `resolveLatestCopilotReviewClause` -- the
+ * SAME evidence `advisory-convergence.mts`'s real `converged` verdict is
+ * built on) instead of a second ad-hoc GraphQL path. Only called from
+ * `collectFromGitHub` when at least one collected instance's own
+ * historical `verdictReasons` already reports an uncovered-HEAD reason --
+ * see that call site -- so a PR with no such instance never pays for this
+ * extra fetch.
+ *
+ * Fails closed to `null` ("evidence unreadable") on ANY error -- never
+ * `false` -- so a transient GraphQL/network failure can never be
+ * indistinguishable from "checked, not covered" if a future caller wants
+ * to tell the two apart; `classifyInstance`'s uncovered-HEAD step treats
+ * both `false` and `null` identically (hold), matching the existing
+ * `verdictReasons`-null pattern elsewhere in this file (a missing/failed
+ * fetch never invents a hold OR a rerun).
+ */
+function resolveLiveHeadCoverage(
+  owner,
+  repo,
+  prNumber,
+  prHeadSha,
+  primaryBotLogin,
+) {
+  try {
+    const { reviews } = fetchReviewsAndHeadCommit(owner, repo, prNumber);
+    return resolveLatestCopilotReviewClause(reviews, prHeadSha, primaryBotLogin)
+      .matchesHead;
+  } catch {
+    return null;
+  }
+}
+function collectFromGitHub(args) {
+  // A true cross-repository invocation only when the caller explicitly
+  // named both --owner and --repo (parseArgs already rejects naming only
+  // one) -- the common case (neither given) auto-detects the local
+  // checkout's own repo below. Same-repo and cross-repo are no longer
+  // treated differently anywhere in this function: both fetch
+  // .github/idd/config.json from owner/repo's trusted default branch
+  // (resolveDefaultBranch + loadRemoteIddConfig below), and neither reads
+  // the caller's own IDD_ADVISORY_BOT_LOGINS environment variable (the
+  // idd-advisory-convergence workflow's own verdict step never reads it
+  // either -- see the doc comment on `resolveAdvisoryBotLogins`'s call
+  // site below). A same-repo/cross-repo distinction is no longer needed
+  // (#1434 review, Copilot + Codex P2: this comment, and the
+  // now-unused `isCrossRepo` boolean it used to justify, both went stale
+  // in stages as each remaining local-context special-case was removed).
+  // GH_TEXT_LOOP_TIMEOUT_OPTIONS on every `gh` call in this function,
+  // including these first three (owner/repo/PR-head resolution) -- same
+  // hang hazard as fetchCheckRunsForRef and the per-run lookup loop below:
+  // a stalled or unexpectedly-interactive `gh` here would hang this
+  // read-only helper before it resolves even the basic identity of what
+  // it is diagnosing (#1434 review, Copilot).
+  const owner =
+    args.owner ||
+    ghText(
+      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+  const repo =
+    args.repo ||
+    ghText(
+      ['repo', 'view', '--json', 'name', '--jq', '.name'],
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+  const repoRef = `${owner}/${repo}`;
+  const prHeadSha = ghText(
+    [
+      'pr',
+      'view',
+      String(args.prNumber),
+      '-R',
+      repoRef,
+      '--json',
+      'headRefOid',
+      '--jq',
+      '.headRefOid',
+    ],
+    GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+  ).toLowerCase();
+  const rawCheckRuns = fetchCheckRunsForRef(
+    owner,
+    repo,
+    prHeadSha,
+    RERUN_PLAN_CHECK_NAME,
+  );
+  // Resolve each unique run id exactly once (a direct by-ID GET, never a
+  // list scan -- see fetchCheckRunsForRef's doc comment for why lists are
+  // avoided here).
+  const runIdsToResolve = [
+    ...new Set(
+      rawCheckRuns
+        .map((run) => parseRunIdFromUrl(resolveCheckRunUrl(run)))
+        .filter((id) => id !== null),
+    ),
+  ];
+  const runMetaById = new Map();
+  // GH_TEXT_LOOP_TIMEOUT_OPTIONS (stdin ignored, 30s timeout), not a bare
+  // `ghApiJson` call: this loop can run once per distinct run id on a busy
+  // PR, and `ghApiJson` execs `gh` with no stdio override and no timeout,
+  // so a single stalled or unexpectedly-interactive `gh` invocation (rate
+  // limiting, network stall, an auth re-prompt) would hang this read-only
+  // helper indefinitely instead of failing closed into the existing
+  // per-run `catch` below -- the same tight-loop hazard every other
+  // high-volume `gh api` loop in this repo already guards against with
+  // this shared options constant (#1434 review, Copilot).
+  for (const runId of runIdsToResolve) {
+    try {
+      const runPayload = JSON.parse(
+        ghText(
+          ['api', `repos/${owner}/${repo}/actions/runs/${runId}`],
+          GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+        ),
+      );
+      runMetaById.set(runId, {
+        event: runPayload.event ? String(runPayload.event) : null,
+        actorLogin: runPayload.actor?.login ?? null,
+        actorType: runPayload.actor?.type ?? null,
+        triggeringActorLogin: runPayload.triggering_actor?.login ?? null,
+        triggeringActorType: runPayload.triggering_actor?.type ?? null,
+        runAttempt:
+          typeof runPayload.run_attempt === 'number' &&
+          Number.isInteger(runPayload.run_attempt)
+            ? runPayload.run_attempt
+            : null,
+      });
+    } catch {
+      runMetaById.set(runId, null);
+    }
+  }
+  // Per-run advisory-convergence verdict reasons (#1775). Only non-pass
+  // terminal check-runs need them -- pass / pending never reach the
+  // uncovered-HEAD classifier, so skipping those saves a log download
+  // per green instance. Failures to fetch or parse leave the map entry
+  // absent (`null` on the instance) rather than inventing an empty list,
+  // so a flaky log API cannot invent an awaiting-fresh-review hold.
+  const runIdsNeedingVerdict = new Set(
+    rawCheckRuns
+      .map((run) => {
+        const conclusion = run.conclusion
+          ? String(run.conclusion).trim().toLowerCase()
+          : '';
+        if (!conclusion || PASS_CONCLUSIONS.has(conclusion)) return null;
+        return parseRunIdFromUrl(resolveCheckRunUrl(run));
+      })
+      .filter((id) => id !== null),
+  );
+  const verdictReasonsByRunId = new Map();
+  for (const runId of runIdsNeedingVerdict) {
+    verdictReasonsByRunId.set(
+      runId,
+      fetchAdvisoryVerdictReasonsForRun(owner, repo, runId),
+    );
+  }
+  const instances = rawCheckRuns.map((run) => {
+    const url = resolveCheckRunUrl(run);
+    const runId = parseRunIdFromUrl(url);
+    const meta = runId !== null ? runMetaById.get(runId) : undefined;
+    return {
+      checkRunId: String(run.id ?? ''),
+      status: String(run.status ?? ''),
+      conclusion: run.conclusion ? String(run.conclusion) : null,
+      htmlUrl: url,
+      startedAt: run.started_at ? String(run.started_at) : null,
+      completedAt: run.completed_at ? String(run.completed_at) : null,
+      runId,
+      runLookupFailed: runId !== null && meta === null,
+      runEvent: meta?.event ?? null,
+      actorLogin: meta?.actorLogin ?? null,
+      actorType: meta?.actorType ?? null,
+      triggeringActorLogin: meta?.triggeringActorLogin ?? null,
+      triggeringActorType: meta?.triggeringActorType ?? null,
+      runAttempt: meta?.runAttempt ?? null,
+      verdictReasons:
+        runId !== null ? (verdictReasonsByRunId.get(runId) ?? null) : null,
+    };
+  });
+  // Fetched from owner/repo's TRUSTED DEFAULT BRANCH, unconditionally --
+  // same-repo and cross-repo alike -- never the PR head and never a local
+  // `loadIddConfig()` read: the idd-advisory-convergence workflow whose
+  // check-runs this helper diagnoses deliberately checks out the default
+  // branch (never the PR head) for both its verdict script and this
+  // config, so this is the config that actually governed the runs being
+  // diagnosed. Reading the PR-head config instead (this file's own prior
+  // fix) would let a PR redefine its own bot identity or loosen
+  // `ciWait.rerunPolicy` to influence its own classification/rerun
+  // recommendation -- see buildIddConfigContentsArgs's doc comment for
+  // the full rationale (#1434 review, Codex P2, second occurrence).
+  const configRef = resolveDefaultBranch(owner, repo);
+  // Schema-validated the same way readCiWaitPolicy / readAdvisoryPrimaryBotLogin
+  // already validate their own local-disk reads, before ANY resolver below
+  // sees it -- see sanitizeRemoteConfig's own doc comment for the full
+  // rationale (#1434 review, Codex P2).
+  const rawConfig = sanitizeRemoteConfig(
+    loadRemoteIddConfig(owner, repo, configRef),
+  );
+  const primaryBotLogin = resolveAdvisoryPrimaryBotLogin(rawConfig);
+  // Never read IDD_ADVISORY_BOT_LOGINS from the caller's own local
+  // environment -- for a same-repo invocation any more than a cross-repo
+  // one. The idd-advisory-convergence workflow's own verdict step
+  // supplies only GH_TOKEN (.github/workflows/idd-advisory-convergence.yml);
+  // it never reads this env var, so it describes only the CALLER's own
+  // machine/session, never the trusted config that actually governed the
+  // runs being diagnosed. `resolveAdvisoryBotLogins` gives an env value
+  // priority over `config`, so passing it through at all -- even scoped
+  // to same-repo only, this file's own prior fix -- could still let a
+  // locally-set env var silently override the target repository's own
+  // configured bot logins and disagree with the workflow's real
+  // behavior: if the env var omits a bot the repo's config lists, and
+  // that bot's run happens to omit `actor.type`, the run would be
+  // misclassified as non-bot and rerun-eligible (#1434 review, Codex P2,
+  // third occurrence -- same family as the earlier PR-head-vs-default-
+  // branch config fix).
+  const { logins: advisoryBotLogins } = resolveAdvisoryBotLogins({
+    config: rawConfig,
+  });
+  // Same config source as the bot-identity fields above -- the trusted
+  // default-branch ciWait.rerunPolicy, never a stale local read, the PR's
+  // own (possibly loosened) policy, or (for a cross-repo invocation) the
+  // caller's own repo's policy.
+  const { rerunPolicy } = normalizeCiWaitPolicy(rawConfig?.ciWait);
+  // #1806: only pay for the live-coverage fetch when at least one
+  // collected instance's own historical verdict already reports an
+  // uncovered-HEAD reason -- the ONLY situation `classifyInstance`'s
+  // uncovered-HEAD step consults `headCoverageSatisfied` at all. A PR
+  // with no such instance never triggers the extra GraphQL round trip.
+  const anyHistoricalUncoveredHead = [...verdictReasonsByRunId.values()].some(
+    (reasons) => hasUncoveredHeadVerdictReason(reasons),
+  );
+  const headCoverageSatisfied = anyHistoricalUncoveredHead
+    ? resolveLiveHeadCoverage(
+        owner,
+        repo,
+        Number(args.prNumber),
+        prHeadSha,
+        primaryBotLogin,
+      )
+    : null;
+  return {
+    input: {
+      prNumber: Number(args.prNumber),
+      prHeadSha,
+      checkName: RERUN_PLAN_CHECK_NAME,
+      owner,
+      repo,
+      instances,
+    },
+    options: {
+      now: args.now || new Date().toISOString().replace('.000Z', 'Z'),
+      primaryBotLogin,
+      advisoryBotLogins,
+      rerunPolicy,
+      headCoverageSatisfied,
+    },
+  };
+}
+/** Polling interval for {@link waitForNewAttempt}. A synchronous sleep
+ * (`Atomics.wait` on a throwaway `SharedArrayBuffer`, not a subprocess),
+ * so this file can stay fully synchronous like every other helper here. */
+const APPLY_POLL_INTERVAL_MS = 5_000;
+/** Safety bound: {@link waitForNewAttempt} fails closed (throws) instead
+ * of polling forever when a rerun never reaches a new completed attempt
+ * within this window. A workflow run can legitimately take several
+ * minutes, unlike this file's other quick read-only `gh` calls (all
+ * bounded by {@link GH_TEXT_LOOP_TIMEOUT_OPTIONS}'s 30s). */
+const APPLY_POLL_TIMEOUT_MS = 15 * 60_000;
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+/**
+ * Blocks until `runId` (within `owner`/`repo`) reports BOTH a
+ * `run_attempt` strictly greater than `priorAttempt` AND
+ * `status === 'completed'` -- i.e. the NEW attempt `gh run rerun` just
+ * requested has actually finished, never a stale read of the attempt
+ * that existed before the rerun.
+ *
+ * Deliberately does not shell out to `gh run watch`: that command's very
+ * first status read can race a just-issued `gh run rerun` -- GitHub's
+ * backend has not necessarily flipped the run's `status` off its
+ * PRE-rerun `completed` value by the time `gh run watch` takes its first
+ * look, which would make the caller's wait return instantly against the
+ * OLD attempt instead of the new one, silently defeating the
+ * one-at-a-time, wait-for-completion guarantee `--apply` exists to
+ * provide (the exact failure mode `planCaveat`'s ordering rule protects
+ * against). Comparing `run_attempt` against the value captured
+ * immediately BEFORE `gh run rerun` closes that race by construction: a
+ * stale `completed` read is correctly recognized as still describing the
+ * OLD attempt, and polling continues. Reuses the same `gh api
+ * repos/{owner}/{repo}/actions/runs/{run_id}` shape
+ * (`RawWorkflowRunPayload`) `collectFromGitHub`'s own per-run lookup loop
+ * already parses.
+ */
+function waitForNewAttempt(owner, repo, runId, priorAttempt) {
+  const deadline = Date.now() + APPLY_POLL_TIMEOUT_MS;
+  for (;;) {
+    const payload = JSON.parse(
+      ghText(
+        ['api', `repos/${owner}/${repo}/actions/runs/${runId}`],
+        GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+      ),
+    );
+    const attempt =
+      typeof payload.run_attempt === 'number' ? payload.run_attempt : null;
+    const isNewAttempt = attempt !== null && attempt > priorAttempt;
+    if (isNewAttempt && payload.status === 'completed') {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `timed out waiting for run ${runId} (${owner}/${repo}) to complete a new attempt after rerun`,
+      );
+    }
+    sleepSync(APPLY_POLL_INTERVAL_MS);
+  }
+}
+/** Resolves `{owner, repo}` the same way {@link collectFromGitHub} does
+ * (explicit `--owner`/`--repo` first, else `gh repo view` auto-detection)
+ * -- duplicated as these two lines rather than extracted into a shared
+ * helper `collectFromGitHub` also calls, since that function's own
+ * structure has already been shaped by several rounds of review (#1434)
+ * and splitting it now for this narrow reuse is not worth the regression
+ * risk. */
+function resolveOwnerRepo(args) {
+  const owner =
+    args.owner ||
+    ghText(
+      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+  const repo =
+    args.repo ||
+    ghText(
+      ['repo', 'view', '--json', 'name', '--jq', '.name'],
+      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+    );
+  return { owner, repo };
+}
+/** Production {@link RerunApplyDeps}: a real `gh run rerun` plus {@link
+ * waitForNewAttempt} polling, and a fresh {@link collectFromGitHub} +
+ * {@link computeRerunPlan} for `recomputePlan`. `rerunAndWait` never
+ * swallows a failure -- unlike this file's many read-only lookups, a
+ * mutating `gh run rerun` (or a poll that never observes a new completed
+ * attempt) genuinely failing is worth surfacing to the operator, not
+ * silently treating as "no change" (matching `ghText`'s own
+ * throw-by-default contract). `owner`/`repo` are resolved once, up
+ * front, and reused for every rerun in the loop -- `recomputePlan` still
+ * re-resolves them itself on each call (via its own fresh
+ * `collectFromGitHub`), which is redundant but harmless (two cheap `gh
+ * repo view` calls) and keeps `recomputePlan` a self-contained unit. */
+function buildProductionApplyDeps(args) {
+  const { owner, repo } = resolveOwnerRepo(args);
+  return {
+    rerunAndWait: (command) => {
+      const priorPayload = JSON.parse(
+        ghText(
+          ['api', `repos/${owner}/${repo}/actions/runs/${command.runId}`],
+          GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+        ),
+      );
+      // Fail closed BEFORE issuing the rerun (Copilot review, #1772):
+      // waitForNewAttempt's whole race-avoidance guarantee rests on
+      // comparing this pre-rerun run_attempt against the post-rerun
+      // value, so a missing/non-numeric run_attempt here means that
+      // guarantee cannot be verified at all -- proceeding anyway (e.g.
+      // treating "unknown" as automatically "new") would silently
+      // reopen the exact stale-read race this function exists to close.
+      if (typeof priorPayload.run_attempt !== 'number') {
+        throw new Error(
+          `cannot verify a new rerun attempt for run ${command.runId} (${owner}/${repo}): the current run_attempt is missing or non-numeric`,
+        );
+      }
+      const priorAttempt = priorPayload.run_attempt;
+      ghText(
+        ['run', 'rerun', command.runId, '-R', `${owner}/${repo}`],
+        GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+      );
+      waitForNewAttempt(owner, repo, command.runId, priorAttempt);
+    },
+    recomputePlan: () => {
+      const { input, options } = collectFromGitHub(args);
+      return computeRerunPlan(input, options);
+    },
+  };
+}
+// CLI: emit the plan as JSON plus a human-readable ordered command list.
+// Guarded behind `import.meta.main` (Node's own native CLI-entry-point
+// detection, matching every other already-migrated helper in this repo)
+// so importing this module (for unit tests) never parses process.argv,
+// prints usage, or makes a `gh` call.
+if (import.meta.main) {
+  const { plan, help, args } = runRerunAdvisoryConvergence(
+    process.argv.slice(2),
+  );
+  if (help) {
+    printHelp();
+  } else if (plan) {
+    // stdout carries ONLY the JSON document -- nothing else -- so the
+    // overall stdout stream stays valid, machine-parseable JSON (e.g.
+    // safely pipeable into `jq`). The human-readable recovery-plan
+    // summary below is real, useful output, but it belongs on stderr:
+    // mixing it into stdout after the JSON previously broke piping
+    // despite the stream *starting* with a well-formed document
+    // (#1434 review, Copilot).
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+    // plan.recoveryRefreshPlan and plan.plan are printed as two
+    // INDEPENDENT sections (never else-if): #1745 made it possible for
+    // both to be non-empty at once (a bot-triggered rerun-eligible
+    // instance in `plan` does not itself supply the non-bot trigger a
+    // separately bot-gated instance still needs from
+    // `recoveryRefreshPlan`), and an `else if` here previously printed
+    // only whichever section was checked first, silently dropping the
+    // other's recovery command from this human-readable summary even
+    // though the JSON document above already carried both correctly
+    // (#1752, post-merge Codex review on #1749/#1745). Section selection
+    // and order are delegated to buildRerunPlanTextSections so the
+    // combined case has direct unit-test coverage instead of being
+    // reachable only through this CLI entry point.
+    for (const section of buildRerunPlanTextSections(plan)) {
+      process.stderr.write(`\n${section}\n`);
+    }
+    // Independent of whichever section(s) above fired: rerunPolicyHoldNotice
+    // describes a policy-held or budget-held instance, which is a
+    // DIFFERENT instance than whichever one just populated `plan` or
+    // `recoveryRefreshPlan` above -- printing it only in an `else if`
+    // alongside those two hid it whenever any instance ALSO had a plan
+    // entry, even though the JSON output (and a genuinely-held instance)
+    // still carried it (Copilot review, #1434; same family as the
+    // describeOutstandingStates fix immediately below, a distinct
+    // remaining gap in the same exclusive-branching area).
+    if (plan.rerunPolicyHoldNotice) {
+      process.stderr.write(`\n${plan.rerunPolicyHoldNotice}\n`);
+    }
+    // Independent of all of the above: outstanding pending / bot-gated /
+    // unresolved instances are reported unconditionally whenever they
+    // exist, rather than only when NONE of the branches above already
+    // had something to say -- those branches are about a DIFFERENT
+    // instance's rerun/refresh/hold outcome, and previously hid a
+    // genuinely-still-outstanding instance (e.g. 2 pending check-runs)
+    // any time a rerun plan also existed for a separate instance in the
+    // same run (CodeRabbit review, #1434).
+    const outstanding = describeOutstandingStates(plan);
+    if (outstanding) {
+      process.stderr.write(`\n${outstanding}\n`);
+    } else if (
+      plan.plan.length === 0 &&
+      plan.recoveryRefreshPlan.length === 0 &&
+      !plan.rerunPolicyHoldNotice
+    ) {
+      // Genuinely nothing to report at all.
+      process.stderr.write(`\n${describeNoActionState(plan)}\n`);
+    }
+    // --apply executes AFTER the full read-only diagnosis above has
+    // already printed -- an operator (or a log) always sees the same
+    // diagnostic output whether or not --apply was passed, with the
+    // execution summary appended, never substituted in its place.
+    if (args.apply) {
+      const applyResult = applyRerunPlan(plan, buildProductionApplyDeps(args));
+      process.stderr.write(`\n${formatApplySummary(applyResult)}\n`);
+    }
+  }
+  // Set exitCode and let the process end naturally instead of calling
+  // process.exit(0) directly: an explicit exit() can terminate the process
+  // before a large stdout write finishes flushing through a pipe (a
+  // well-established Node.js footgun, confirmed empirically during
+  // review), silently truncating the emitted JSON or recovery plan.
+  process.exitCode = 0;
+}
