@@ -115,6 +115,42 @@ describe('Carousel', () => {
     );
   });
 
+  it("computes the scroll target from bounding-rect deltas and the container's own scrollLeft, not offsetLeft", () => {
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
+    const ul = container.querySelector('ul');
+    if (!ul) throw new Error('ul not found');
+    const lis = [...container.querySelectorAll('li')];
+
+    // The container sits at viewport x=100 and is 300px wide (center
+    // at x=250), already scrolled 50px, and is itself offset from a
+    // non-positioned ancestor -- `offsetLeft` would read a value tied
+    // to that ancestor chain instead of this geometry.
+    Object.defineProperty(ul, 'scrollLeft', {
+      configurable: true,
+      value: 50,
+    });
+    vi.spyOn(ul, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 0, 300, 200),
+    );
+    // Item 1 (the next item autoplay advances to) sits at viewport
+    // x=440, 40px wide (center at x=460).
+    vi.spyOn(lis[1] as HTMLElement, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(440, 0, 40, 200),
+    );
+
+    const scrollTo = vi.mocked(Element.prototype.scrollTo);
+    vi.advanceTimersByTime(3_000);
+
+    // left = scrollLeft(50) + (targetLeft(440) - containerLeft(100) +
+    // targetWidth(40)/2)(360) - containerWidth(300)/2(150) = 260.
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      behavior: 'smooth',
+      left: 260,
+    });
+  });
+
   it('advances one item after 3 seconds of inactivity, repeatedly, while mounted', () => {
     const { container } = render(() => (
       <Carousel items={items} label="Example carousel" />

@@ -153,14 +153,28 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
       else child.removeAttribute(ACTIVE_ATTRIBUTE);
     }
     const target = children[index];
-    if (!(target instanceof HTMLElement)) return;
+    if (!target) return;
     // Scroll only this container's own horizontal position -- never
     // `target.scrollIntoView()`, which would also walk and scroll
     // every scrollable ancestor up to the page itself, yanking a
     // visitor who has since scrolled elsewhere on the page back to
     // the carousel on every autoplay tick.
+    //
+    // Computed from `getBoundingClientRect()` deltas (the same source
+    // {@link nearestIndex} reads) plus the container's own current
+    // `scrollLeft`, rather than `target.offsetLeft` -- `offsetLeft` is
+    // relative to `offsetParent`, which is not necessarily this
+    // container (neither the `<ul>` nor its ancestors are
+    // CSS-positioned here), so it would silently compute the wrong
+    // value instead of failing loudly.
+    const containerRect = listRef.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const targetCenterFromContainerLeft =
+      targetRect.left - containerRect.left + targetRect.width / 2;
     const left =
-      target.offsetLeft + target.offsetWidth / 2 - listRef.clientWidth / 2;
+      listRef.scrollLeft +
+      targetCenterFromContainerLeft -
+      containerRect.width / 2;
     listRef.scrollTo?.({ behavior: 'smooth', left });
   });
 
