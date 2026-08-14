@@ -189,7 +189,13 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
     // `setActiveIndex` call (a manual prev/next control, say) should
     // never reintroduce animated motion for a reduced-motion visitor
     // just because this effect didn't independently enforce it.
-    const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    //
+    // `'instant'`, not `'auto'`: the `carousel` class sets CSS
+    // `scroll-behavior: smooth` unconditionally, and `'auto'` defers to
+    // that computed value per the CSSOM View spec rather than
+    // overriding it -- only `'instant'` forces an immediate jump
+    // regardless of the element's CSS `scroll-behavior`.
+    const behavior = prefersReducedMotion() ? 'instant' : 'smooth';
     listRef.scrollTo?.({ behavior, left });
   });
 

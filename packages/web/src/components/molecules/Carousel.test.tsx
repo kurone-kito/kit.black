@@ -217,8 +217,11 @@ describe('Carousel', () => {
     // effect (the only thing that can call `scrollTo`) still applies
     // `prefers-reduced-motion` independently -- defense-in-depth
     // against a future direct `setActiveIndex` caller re-animating.
+    // `'instant'`, not `'auto'`: the `carousel` class sets CSS
+    // `scroll-behavior: smooth`, which `'auto'` would defer to instead
+    // of overriding.
     expect(scrollTo).toHaveBeenLastCalledWith(
-      expect.objectContaining({ behavior: 'auto' }),
+      expect.objectContaining({ behavior: 'instant' }),
     );
   });
 
