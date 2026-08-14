@@ -34,16 +34,11 @@ export interface SceneCarouselProps {
 const AUTOPLAY_INTERVAL_MS = 3_000;
 
 /**
- * Options shared by every programmatic scroll this component performs.
- * `inline: 'center'` matches the `carousel-center` class's own
- * `scroll-snap-align: center` on each item, so the JS-driven scroll
- * agrees with the CSS snap point instead of fighting it.
+ * The attribute marking the currently active item, purely as an
+ * inert hook (no CSS binds to it): a test-observable, non-ARIA signal
+ * for {@link activeIndex} that doesn't risk any accessibility surface.
  */
-const SCROLL_OPTIONS = {
-  behavior: 'smooth',
-  block: 'nearest',
-  inline: 'center',
-} as const satisfies ScrollIntoViewOptions;
+const ACTIVE_ATTRIBUTE = 'data-carousel-active';
 
 /**
  * The carousel component.
@@ -150,7 +145,23 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
   });
 
   createEffect(() => {
-    listRef?.children.item(activeIndex())?.scrollIntoView?.(SCROLL_OPTIONS);
+    if (!listRef) return;
+    const index = activeIndex();
+    const children = Array.from(listRef.children);
+    for (const [i, child] of children.entries()) {
+      if (i === index) child.setAttribute(ACTIVE_ATTRIBUTE, 'true');
+      else child.removeAttribute(ACTIVE_ATTRIBUTE);
+    }
+    const target = children[index];
+    if (!(target instanceof HTMLElement)) return;
+    // Scroll only this container's own horizontal position -- never
+    // `target.scrollIntoView()`, which would also walk and scroll
+    // every scrollable ancestor up to the page itself, yanking a
+    // visitor who has since scrolled elsewhere on the page back to
+    // the carousel on every autoplay tick.
+    const left =
+      target.offsetLeft + target.offsetWidth / 2 - listRef.clientWidth / 2;
+    listRef.scrollTo?.({ behavior: 'smooth', left });
   });
 
   onMount(() => {

@@ -43,6 +43,19 @@ const fire = (target: EventTarget, type: string): void => {
 };
 
 /**
+ * Reads which item the carousel currently marks as active, via the
+ * `data-carousel-active` test hook -- avoids depending on the mocked
+ * `scrollTo` call arguments, which jsdom's zero-layout geometry would
+ * make indistinguishable across indices.
+ * @param container The rendered container.
+ * @returns The active item's index, or -1 if none is marked.
+ */
+const activeIndexOf = (container: HTMLElement): number =>
+  [...container.querySelectorAll('li')].findIndex((li) =>
+    li.hasAttribute('data-carousel-active'),
+  );
+
+/**
  * Fakes a measurable layout for the carousel and its items, so
  * {@link Carousel}'s scroll-position resync logic has real geometry to
  * read instead of falling back to the last known index. `nearIndex`
@@ -69,7 +82,7 @@ const stubLayout = (container: HTMLElement, nearIndex: number): void => {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  Element.prototype.scrollIntoView = vi.fn();
+  Element.prototype.scrollTo = vi.fn();
   stubMatchMedia(false);
 });
 
@@ -84,34 +97,48 @@ afterEach(() => {
 });
 
 describe('Carousel', () => {
+  it('scrolls only its own container, never an ancestor, on every advance', () => {
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
+    const scrollTo = vi.mocked(Element.prototype.scrollTo);
+
+    vi.advanceTimersByTime(3_000);
+
+    // `scrollTo` is called on the `<ul>` itself, never on a `<li>` or
+    // an ancestor -- unlike `Element.scrollIntoView`, it never walks
+    // or scrolls anything outside this element.
+    const ul = container.querySelector('ul');
+    expect(scrollTo.mock.instances.at(-1)).toBe(ul);
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: 'smooth' }),
+    );
+  });
+
   it('advances one item after 3 seconds of inactivity, repeatedly, while mounted', () => {
     const { container } = render(() => (
       <Carousel items={items} label="Example carousel" />
     ));
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
 
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[1]);
+    expect(activeIndexOf(container)).toBe(1);
 
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[2]);
+    expect(activeIndexOf(container)).toBe(2);
 
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[3]);
+    expect(activeIndexOf(container)).toBe(3);
   });
 
   it('loops back to the first item after reaching the last', () => {
     const { container } = render(() => (
       <Carousel items={items} label="Example carousel" />
     ));
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
 
     for (let i = 0; i < items.length; i += 1) {
       vi.advanceTimersByTime(3_000);
     }
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[0]);
+    expect(activeIndexOf(container)).toBe(0);
   });
 
   it('resets the pending timer on a manual interaction; no advance occurs until 3 more seconds of inactivity', () => {
@@ -120,37 +147,31 @@ describe('Carousel', () => {
     ));
     const ul = container.querySelector('ul');
     if (!ul) throw new Error('ul not found');
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
-    const callsBefore = scrollIntoView.mock.calls.length;
 
     vi.advanceTimersByTime(2_000);
     fire(ul, 'scroll');
     vi.advanceTimersByTime(2_000);
-    expect(scrollIntoView.mock.calls.length).toBe(callsBefore);
+    expect(activeIndexOf(container)).toBe(0);
 
     vi.advanceTimersByTime(1_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[1]);
+    expect(activeIndexOf(container)).toBe(1);
   });
 
   it('never starts the timer when prefers-reduced-motion: reduce is requested', () => {
     stubMatchMedia(true);
-    render(() => <Carousel items={items} label="Example carousel" />);
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
     expect(vi.getTimerCount()).toBe(0);
 
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const callsAfterMount = scrollIntoView.mock.calls.length;
     vi.advanceTimersByTime(60_000);
-    expect(scrollIntoView.mock.calls.length).toBe(callsAfterMount);
+    expect(activeIndexOf(container)).toBe(0);
   });
 
   it('does not advance while the tab is hidden, and resumes once it is visible again', () => {
     const { container } = render(() => (
       <Carousel items={items} label="Example carousel" />
     ));
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
-    const callsBefore = scrollIntoView.mock.calls.length;
 
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -158,7 +179,7 @@ describe('Carousel', () => {
     });
     fire(document, 'visibilitychange');
     vi.advanceTimersByTime(10_000);
-    expect(scrollIntoView.mock.calls.length).toBe(callsBefore);
+    expect(activeIndexOf(container)).toBe(0);
 
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -166,7 +187,7 @@ describe('Carousel', () => {
     });
     fire(document, 'visibilitychange');
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[1]);
+    expect(activeIndexOf(container)).toBe(1);
   });
 
   it('pauses while hovered, and resumes once the pointer leaves', () => {
@@ -175,17 +196,14 @@ describe('Carousel', () => {
     ));
     const ul = container.querySelector('ul');
     if (!ul) throw new Error('ul not found');
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
-    const callsBefore = scrollIntoView.mock.calls.length;
 
     fire(ul, 'mouseenter');
     vi.advanceTimersByTime(10_000);
-    expect(scrollIntoView.mock.calls.length).toBe(callsBefore);
+    expect(activeIndexOf(container)).toBe(0);
 
     fire(ul, 'mouseleave');
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[1]);
+    expect(activeIndexOf(container)).toBe(1);
   });
 
   it('pauses while keyboard focus is inside it, and resumes once focus leaves', () => {
@@ -194,17 +212,35 @@ describe('Carousel', () => {
     ));
     const ul = container.querySelector('ul');
     if (!ul) throw new Error('ul not found');
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
-    const callsBefore = scrollIntoView.mock.calls.length;
 
     fire(ul, 'focusin');
     vi.advanceTimersByTime(10_000);
-    expect(scrollIntoView.mock.calls.length).toBe(callsBefore);
+    expect(activeIndexOf(container)).toBe(0);
 
     fire(ul, 'focusout');
     vi.advanceTimersByTime(3_000);
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[1]);
+    expect(activeIndexOf(container)).toBe(1);
+  });
+
+  it('pausing on hover and focus together lifts only once both end', () => {
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
+    const ul = container.querySelector('ul');
+    if (!ul) throw new Error('ul not found');
+
+    fire(ul, 'mouseenter');
+    fire(ul, 'focusin');
+    vi.advanceTimersByTime(10_000);
+    expect(activeIndexOf(container)).toBe(0);
+
+    fire(ul, 'mouseleave');
+    vi.advanceTimersByTime(10_000);
+    expect(activeIndexOf(container)).toBe(0);
+
+    fire(ul, 'focusout');
+    vi.advanceTimersByTime(3_000);
+    expect(activeIndexOf(container)).toBe(1);
   });
 
   it('resumes autoplay from the actual scroll position rather than a stale remembered index', () => {
@@ -213,8 +249,6 @@ describe('Carousel', () => {
     ));
     const ul = container.querySelector('ul');
     if (!ul) throw new Error('ul not found');
-    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
-    const lis = () => [...container.querySelectorAll('li')];
 
     // Simulate the visitor manually scrolling straight to item 2
     // (skipping the internal activeIndex signal, still at 0) and
@@ -223,7 +257,7 @@ describe('Carousel', () => {
     fire(ul, 'scroll');
     vi.advanceTimersByTime(3_000);
 
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[3]);
+    expect(activeIndexOf(container)).toBe(3);
   });
 
   it('does not schedule a timer for an empty item list', () => {
