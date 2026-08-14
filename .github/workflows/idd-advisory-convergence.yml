@@ -22,7 +22,11 @@ name: IDD advisory-convergence gate
 # that mandates self-hosted runners even on github.com/GHEC hits the
 # same wall and can use the same variable. This mechanism works for
 # whatever the shipped fallback value is now or later, not
-# specifically `ubuntu-latest`.
+# specifically `ubuntu-latest`. A self-hosted runner set via
+# CI_RUNNER_LABEL must also have the GitHub CLI (`gh`) installed and
+# authenticated -- the run: step's helper (scripts/advisory-convergence.mjs)
+# shells out to `gh`, and GitHub-hosted runners ship it preinstalled,
+# but a bare self-hosted image may not.
 #
 # Adjust the pinned `actions/checkout` SHA (or use a floating tag, as
 # shipped here), the checkout `ref:` (see below), and the
