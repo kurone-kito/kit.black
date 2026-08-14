@@ -33,11 +33,16 @@ export interface SceneCarouselProps {
 /** How often autoplay advances to the next item, in milliseconds. */
 const AUTOPLAY_INTERVAL_MS = 3_000;
 
-/** Options shared by every programmatic scroll this component performs. */
+/**
+ * Options shared by every programmatic scroll this component performs.
+ * `inline: 'center'` matches the `carousel-center` class's own
+ * `scroll-snap-align: center` on each item, so the JS-driven scroll
+ * agrees with the CSS snap point instead of fighting it.
+ */
 const SCROLL_OPTIONS = {
   behavior: 'smooth',
   block: 'nearest',
-  inline: 'start',
+  inline: 'center',
 } as const satisfies ScrollIntoViewOptions;
 
 /**
@@ -113,6 +118,12 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
    * one. Does nothing while unmounted, reduced-motion is requested, or
    * autoplay is paused -- callers rely on this to both start the
    * initial timer and to postpone it on manual interaction.
+   *
+   * Also bound as the `scroll` handler, so autoplay's own smooth
+   * scroll counts as activity and pushes the next advance out by up to
+   * one interval too -- an accepted, self-correcting pacing nuance
+   * (never a stuck timer), consistent with "advance after N seconds of
+   * inactivity" rather than a hard fixed-cadence clock.
    */
   const scheduleAdvance = () => {
     clearTimer();

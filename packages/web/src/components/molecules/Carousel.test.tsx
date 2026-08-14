@@ -225,4 +225,16 @@ describe('Carousel', () => {
 
     expect(scrollIntoView.mock.instances.at(-1)).toBe(lis()[3]);
   });
+
+  it('does not schedule a timer for an empty item list', () => {
+    render(() => <Carousel items={[]} label="Example carousel" />);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not schedule a timer for a single-item list', () => {
+    render(() => (
+      <Carousel items={items.slice(0, 1)} label="Example carousel" />
+    ));
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
