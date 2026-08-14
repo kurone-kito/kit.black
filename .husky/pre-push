@@ -7,7 +7,8 @@
 # full behavior. This chains the same check husky routes core.hooksPath
 # through, since `pnpm install`'s `"prepare": "husky"` script keeps
 # core.hooksPath pointed at .husky/_ rather than .githooks.
-idd_guard="$(git rev-parse --show-toplevel)/.githooks/_idd-worktree-guard.sh"
+idd_repo_root="$(git rev-parse --show-toplevel 2> /dev/null)" || exit 0
+idd_guard="$idd_repo_root/.githooks/_idd-worktree-guard.sh"
 if [ -f "$idd_guard" ]; then
   . "$idd_guard"
   idd_worktree_guard_check push || exit 1
