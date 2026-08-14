@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kurone-kito.github.io/idd-skill/schemas/phase-graph.schema.json",
+  "title": "IDD Phase Graph",
+  "description": "Machine-readable phase graph for the core IDD loop.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "nodes"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of the machine-readable phase graph."
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Phase nodes and their outgoing workflow transitions.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Za-z0-9.-]*$",
+            "description": "Unique identifier of an IDD phase node."
+          },
+          "next": {
+            "type": "array",
+            "description": "Phase identifiers reachable after this node.",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Za-z0-9.-]*$"
+            }
+          }
+        }
+      }
+    }
+  }
+}
