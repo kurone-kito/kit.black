@@ -1,0 +1,34 @@
+{
+  "protocolVersion": "1",
+  "prHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lastCopilotCommit": "",
+  "copilotPending": false,
+  "copilotPendingCoversHead": false,
+  "outcome": "REQUEST_NEEDED",
+  "f3Outcome": "SATISFIED",
+  "secondaryBotLogin": "",
+  "secondaryRequestNeeded": false,
+  "now": "2026-05-11T17:00:00Z",
+  "requestCap": 30,
+  "pendingWindowMinutes": 30,
+  "settledWindowMinutes": 10,
+  "pollIntervalMinutes": 2,
+  "capExhaustedRoute": "phase-specific",
+  "elapsedMinutes": 0,
+  "sameHeadMarkerPresent": false,
+  "earliestSameHeadAt": "",
+  "sameHeadMarkerCount": 0,
+  "requestMarkerCount": 0,
+  "trustedMarkerSummary": {
+    "viewerLogin": "idd-bot",
+    "configuredTrustedActors": [],
+    "collaboratorTrustEnabled": false,
+    "trustedMarkerLogins": [
+      "idd-bot"
+    ],
+    "trustedSameHeadMarkerCount": 0,
+    "untrustedSameHeadMarkerCount": 0,
+    "trustedRequestMarkerCount": 0,
+    "untrustedRequestMarkerCount": 0
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kurone-kito.github.io/idd-skill/schemas/post-idd-marker.schema.json",
+  "title": "Post IDD Marker Result",
+  "description": "Dry-run body preview or apply result for POSTing a canonical IDD operational marker comment to an issue or PR.",
+  "type": "object",
+  "required": ["mode", "type", "target", "number"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["dry-run", "apply"],
+      "description": "Whether the helper previewed a marker or posted it."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "claim",
+        "unclaim",
+        "activation-nonce",
+        "watermark",
+        "baseline",
+        "advisory",
+        "advisory-recovery",
+        "advisory-reroll",
+        "copilot-unavailable"
+      ],
+      "description": "Operational marker type rendered for the comment."
+    },
+    "target": {
+      "type": "string",
+      "enum": ["issue", "pr"],
+      "description": "GitHub object kind receiving the marker comment."
+    },
+    "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue or pull request number receiving the marker."
+    },
+    "body": {
+      "type": "string",
+      "description": "Byte-exact marker body that dry-run would post; omitted in apply mode."
+    },
+    "commentId": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Identifier of the comment created in apply mode."
+    },
+    "url": {
+      "type": "string",
+      "description": "URL of the comment created in apply mode."
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-blocking diagnostics reported while preparing or posting the marker.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

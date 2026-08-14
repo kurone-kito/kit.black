@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kurone-kito.github.io/idd-skill/schemas/idd-merge-execute.schema.json",
+  "title": "IDD Merge Execute",
+  "description": "F3 merge-gate verdict and (under --apply) execution result for a PR head.",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "decisionAuthority",
+    "mode",
+    "prNumber",
+    "prHeadSha",
+    "ready",
+    "blockers",
+    "mergeCommand",
+    "merged",
+    "mergeResult",
+    "adminFallbackUsed"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^1$",
+      "description": "Protocol version of the F3 merge-execution verdict."
+    },
+    "decisionAuthority": {
+      "type": "string",
+      "enum": ["instructions"],
+      "description": "Source of the merge decision represented by this verdict."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["dry-run", "apply"],
+      "description": "Whether the helper produced a merge plan or attempted execution."
+    },
+    "prNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request evaluated by the F3 merge gate."
+    },
+    "prHeadSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "PR head SHA bound to the readiness check and merge command."
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "Whether the merge-gate checklist has no blocking conditions."
+    },
+    "blockers": {
+      "type": "array",
+      "description": "Merge-gate conditions that prevented readiness, if any.",
+      "items": {
+        "type": "object",
+        "required": ["gate", "detail"],
+        "properties": {
+          "gate": {
+            "type": "string",
+            "description": "Name of the merge gate that blocked readiness."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Evidence or explanation for the blocking gate."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "mergeCommand": {
+      "type": "string",
+      "description": "Head-bound merge command planned or used by the helper."
+    },
+    "merged": {
+      "type": "boolean",
+      "description": "Whether apply mode completed a successful merge."
+    },
+    "mergeResult": {
+      "type": "string",
+      "description": "Human-readable result or error from merge execution."
+    },
+    "adminFallbackUsed": {
+      "type": "boolean",
+      "description": "#1521: true only when the plain merge command failed with the self-CODEOWNER \"base branch policy prohibits the merge\" error and this run retried with --admin (successfully or not). False for every other path, including a successful plain merge and a merge failure not eligible for the fallback."
+    }
+  },
+  "additionalProperties": false
+}
