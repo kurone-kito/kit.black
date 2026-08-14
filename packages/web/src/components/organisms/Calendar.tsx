@@ -1,6 +1,6 @@
-import { tupleMap, weekRange, formatDate } from '@kurone-kito/kit.black-lib';
 import type { Component } from 'solid-js';
 import rows from '../../data.json';
+import { dateRangeOf } from '../../modules/dateRange.js';
 import { calendarDownloadFilename } from '../../modules/downloadFilename.js';
 import { useTranslator } from '../../modules/createI18N.js';
 import { Article } from '../atoms/Article.js';
@@ -9,12 +9,16 @@ import { DownloadCalendarButton } from '../atoms/DownloadCalendarButton.js';
 import { Calendar as MoleculeCalendar } from '../molecules/calendar/Calendar.js';
 
 /*
- * Captured once, at build time -- this must stay aligned with the
- * `data.json` the same build produced, so it is intentionally not a
- * reactive value. Do not replace this with a live-updating clock; doing
- * so would desynchronize the displayed range from the fetched rows.
+ * Derived once, at build time, from the same `rows` the component
+ * renders below -- so this must stay aligned with the `data.json` the
+ * same build produced, and is intentionally not a reactive value. Do
+ * not replace this with a wall-clock read (`new Date()`); this module
+ * evaluates once server-side during prerender and again client-side on
+ * hydration, and a wall-clock value can disagree between the two once
+ * real time has passed -- see #174.
  */
-const [since, until] = tupleMap(weekRange(new Date()), formatDate);
+const typedRows = rows as readonly RowProps[];
+const [since, until] = dateRangeOf(typedRows);
 
 /**
  * The calendar component.
@@ -67,7 +71,7 @@ export const Calendar: Component = () => {
       <MoleculeCalendar
         id="calendar"
         ref={calendarRef}
-        rows={rows as readonly RowProps[]}
+        rows={typedRows}
         since={since}
         until={until}
       />
