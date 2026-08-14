@@ -42,6 +42,7 @@ export const Kito: Component<KitoProps> = (props) => {
         alt={props.altKito}
         anchorClass="right-[3cqw] top-[3cqh] h-[7cqh] w-[20cqw]"
         class="carousel-item @container-[size]/kito"
+        fetchpriority="high"
         height={2403}
         id={kitoId}
         nextId={momonekoId}

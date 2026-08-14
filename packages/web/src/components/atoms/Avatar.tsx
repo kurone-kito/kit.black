@@ -6,7 +6,7 @@ import { twMerge } from 'tailwind-merge';
 export interface AvatarProps
   extends Pick<
     Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
-    'alt' | 'class' | 'height' | 'id' | 'src' | 'width'
+    'alt' | 'class' | 'fetchpriority' | 'height' | 'id' | 'src' | 'width'
   > {
   /** The CSS classes for anchor. */
   readonly anchorClass?: string | undefined;
@@ -36,7 +36,7 @@ export const Avatar: Component<AvatarProps> = (props) => (
       alt={props.alt}
       class="w-full object-contain drop-shadow-lg"
       decoding="async"
-      fetchpriority="low"
+      fetchpriority={props.fetchpriority ?? 'low'}
       height={props.height}
       src={props.src}
       width={props.width}

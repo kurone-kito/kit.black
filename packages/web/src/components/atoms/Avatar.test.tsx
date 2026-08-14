@@ -26,4 +26,22 @@ describe('Avatar', () => {
     ));
     expect(container.querySelector('a')).toBeNull();
   });
+
+  it('defaults the image to fetchpriority="low" when the prop is omitted', () => {
+    const { container } = render(() => <Avatar nextId="next" src="a.webp" />);
+    expect(container.querySelector('img')).toHaveAttribute(
+      'fetchpriority',
+      'low',
+    );
+  });
+
+  it('renders fetchpriority="high" when explicitly requested', () => {
+    const { container } = render(() => (
+      <Avatar fetchpriority="high" nextId="next" src="a.webp" />
+    ));
+    expect(container.querySelector('img')).toHaveAttribute(
+      'fetchpriority',
+      'high',
+    );
+  });
 });
