@@ -7,10 +7,12 @@ import type { IntRange } from 'type-fest';
 /** Type definition for the properties. */
 export interface LogoProps extends JSX.AriaAttributes {
   /**
-   * The heading level.
+   * The heading level, or `false` to render the wordmark without a
+   * heading element at all (for decorative or repeated occurrences that
+   * must not appear in the document's heading outline).
    * @default 1
    */
-  readonly level?: IntRange<1, 7> | undefined;
+  readonly level?: IntRange<1, 7> | false | undefined;
 
   /** The CSS classes. */
   readonly class?: string | undefined;
@@ -38,7 +40,7 @@ export const Logo: Component<LogoProps> = (props) => {
     >
       <Dynamic
         class="-ml-[3.5cqh] break-all p-0 text-[44.5cqh] font-black leading-[32.8cqh] after:absolute after:bottom-[1cqh] after:right-[2.1cqh] after:text-[5cqh] after:font-black after:leading-none after:content-['TM']"
-        component={`h${local.level}` as const}
+        component={local.level === false ? 'p' : (`h${local.level}` as const)}
       >
         <span class="-tracking-[4.5cqh]">Kuroné</span>
         <span class="-tracking-[7.4cqh]">Kito</span>

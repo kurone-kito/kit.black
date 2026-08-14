@@ -20,11 +20,15 @@ export interface HeaderProps {
 export const Header: Component<HeaderProps> = (props) => (
   <header class="flex items-end gap-4 drop-shadow lg:basis-4/12 lg:flex-col-reverse">
     <div class="relative w-full basis-3/12 sm:basis-4/12">
-      <Logo class="lg:text-stroke-3 max-md:opacity-80" level={3} />
-      <Logo aria-hidden class="absolute top-0 w-full max-md:hidden" level={3} />
+      <Logo class="lg:text-stroke-3 max-md:opacity-80" level={false} />
+      <Logo
+        aria-hidden
+        class="absolute top-0 w-full max-md:hidden"
+        level={false}
+      />
     </div>
     <div class="text-stroke-3">
-      <h4 class="text-[4.5cqi] font-semibold lg:text-[3.1cqi] xl:text-[3.2cqi] 2xl:text-[3.1cqi]">
+      <h3 class="text-[4.5cqi] font-semibold lg:text-[3.1cqi] xl:text-[3.2cqi] 2xl:text-[3.1cqi]">
         予定表:
         <Show when={props.dateSpan}>
           &nbsp;
@@ -33,7 +37,7 @@ export const Header: Component<HeaderProps> = (props) => (
             {props.dateSpan}
           </span>
         </Show>
-      </h4>
+      </h3>
       <p class="font-semibold md:text-[2.8cqi] lg:text-[2.7cqi]">
         #️⃣&nbsp;
         <Anchor
