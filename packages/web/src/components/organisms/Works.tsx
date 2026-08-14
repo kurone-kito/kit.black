@@ -144,6 +144,7 @@ export const Works: Component = () => {
         />
       </ul>
       <aside
+        aria-label={t('worksMore')}
         class="prose [&_a]:link [&_a]:link-primary [&_a]:font-semibold"
         innerHTML={aside('text')}
       />

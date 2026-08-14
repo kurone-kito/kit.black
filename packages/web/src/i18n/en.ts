@@ -10,6 +10,7 @@ const resources: Resources = {
   calendar:
     'The following live streaming schedule is automatically generated based on information extracted from the Calendar app eight times daily.',
   downloadCalendar: 'Save the schedule calendar as an image',
+  footerCredits: 'Copyright and site links',
   hamburgerMenu: 'Menu',
   heroAbout: 'About Kuroné Kito',
   heroIntroduction: 'Kuroné Kito’s introduction',
@@ -25,13 +26,12 @@ const resources: Resources = {
   siteDescription:
     'The official site of Kuroné Kito (くろねきと), a black cat VTuber.',
   splashLoading: 'Loading the website',
-  toDark: 'Switch to dark mode',
   toggleTheme: 'Toggle theme',
-  toLight: 'Switch to light mode',
   wishlist: 'Wishlist',
   worksDescription:
     'Kuroné Kito has developed several apps using live programming. Here, we’ll introduce some of the main ones.',
   worksHeading: 'Kuroné Kito’s works',
+  worksMore: 'More of Kuroné Kito’s works on GitHub',
 };
 
 export default resources;

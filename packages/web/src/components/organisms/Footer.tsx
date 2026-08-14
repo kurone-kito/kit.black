@@ -12,7 +12,11 @@ export const Footer: Component = () => {
   const t = useTranslator();
   return (
     <footer class="footer footer-center bg-base-300 text-base-content px-safe pb-safe-or-6 pt-6 font-extralight">
-      <aside class="flex font-thin tracking-wide" translate="no">
+      <aside
+        aria-label={t('footerCredits')}
+        class="flex font-thin tracking-wide"
+        translate="no"
+      >
         <p>
           &copy; 2018-{new Date().getFullYear()} {t('author')}
         </p>

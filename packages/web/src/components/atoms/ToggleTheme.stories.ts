@@ -9,8 +9,6 @@ export const Default: StoryObj<Target> = {};
 
 export default {
   args: {
-    labelToDark: 'Dark',
-    labelToLight: 'Light',
     themes: ['light', 'dark'],
     toggleTooltip: 'Toggle theme',
   },

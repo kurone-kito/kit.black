@@ -10,6 +10,7 @@ const resources: Resources = {
   calendar:
     '以下の配信スケジュールは、カレンダー アプリから毎日 8 回抽出した情報に基づき、自動生成しております。',
   downloadCalendar: 'スケジュール表を画像として保存',
+  footerCredits: '著作権表示とサイトリンク',
   hamburgerMenu: 'メニュー',
   heroAbout: '黒音キトについて',
   heroIntroduction: '黒音キトの自己紹介',
@@ -25,13 +26,12 @@ const resources: Resources = {
   siteDescription:
     '黒猫にゃんにゃん VTuber、黒音キト (くろねきと) の公式サイトです。',
   splashLoading: 'ウェブサイトを読み込み中',
-  toDark: 'ダークモードにする',
   toggleTheme: 'テーマ切り替え',
-  toLight: 'ライトモードにする',
   wishlist: 'ほしい物リスト',
   worksDescription:
     '黒音キトはライブ プログラミングでいくつかのアプリを開発しています。そのうち主要なものを幾つか紹介いたします。',
   worksHeading: '黒音キトの主な作品',
+  worksMore: '黒音キトの GitHub 上のその他の作品',
 };
 
 export default resources;
