@@ -1,6 +1,9 @@
 import { MemoryRouter, Route } from '@solidjs/router';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import rows from '../../data.json';
+import { dateRangeOf } from '../../modules/dateRange.js';
+import type { RowProps } from '../atoms/calendar/Row.js';
 import { Calendar } from './Calendar.js';
 
 // `vi.mock` factories may only reference hoisted bindings, so the mock
@@ -39,6 +42,18 @@ afterEach(() => {
 });
 
 describe('Calendar organism', () => {
+  it('renders the date span derived from data.json rows, not the wall clock', () => {
+    const [since, until] = dateRangeOf(rows as readonly RowProps[]);
+
+    const { getByText } = render(() => (
+      <MemoryRouter>
+        <Route path="/:language?" component={Calendar} />
+      </MemoryRouter>
+    ));
+
+    expect(getByText(`${since}〜${until}`)).toBeInTheDocument();
+  });
+
   it('captures the calendar element and downloads it with the computed filename', async () => {
     URL.createObjectURL = createObjectURL;
     URL.revokeObjectURL = revokeObjectURL;

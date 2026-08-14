@@ -8,6 +8,10 @@ import type { RowProps } from '../components/atoms/calendar/Row.js';
  * keeps the displayed range in agreement with what is actually
  * rendered, regardless of when or where (server prerender vs. client
  * hydration) this is evaluated -- see #174.
+ *
+ * Assumes `rows` is already in chronological order, which
+ * `packages/fetcher/src/parseEvent.mts` guarantees for the generated
+ * `data.json`; this function does not itself sort.
  * @param rows The schedule rows this build's `data.json` produced.
  * @returns A `[since, until]` tuple; each is `''` when no row carries a
  *   `date` (for example, an empty `rows`).
