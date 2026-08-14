@@ -64,7 +64,15 @@ const ACTIVE_ATTRIBUTE = 'data-carousel-active';
 export const Carousel: Component<SceneCarouselProps> = (props) => {
   let listRef: HTMLUListElement | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const [activeIndex, setActiveIndex] = createSignal(0);
+  // `equals: false`: the next index is geometry-derived (see
+  // `nearestIndex`), so a manual scroll can leave it numerically equal
+  // to the already-current value (e.g. the visitor scrolls back near
+  // where autoplay last left off). Default `Object.is` equality would
+  // silently drop that `setActiveIndex` call as a no-op, and since the
+  // reschedule effect below only re-runs when this signal actually
+  // notifies, autoplay would stop scheduling entirely until the next
+  // manual interaction. Always notifying keeps the reschedule alive.
+  const [activeIndex, setActiveIndex] = createSignal(0, { equals: false });
   const [hovered, setHovered] = createSignal(false);
   const [focused, setFocused] = createSignal(false);
   const [visible, setVisible] = createSignal(true);

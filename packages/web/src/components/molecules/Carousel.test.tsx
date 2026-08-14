@@ -296,6 +296,39 @@ describe('Carousel', () => {
     expect(activeIndexOf(container)).toBe(3);
   });
 
+  it('keeps autoplaying even when the resync-derived next index numerically equals the current one', () => {
+    const { container } = render(() => (
+      <Carousel items={items} label="Example carousel" />
+    ));
+    const ul = container.querySelector('ul');
+    if (!ul) throw new Error('ul not found');
+
+    // First tick uses the default (no measurable layout) fallback, so
+    // it advances 0 -> 1 normally.
+    vi.advanceTimersByTime(3_000);
+    expect(activeIndexOf(container)).toBe(1);
+
+    // Now the visitor manually scrolls back near item 0. The next
+    // resync-derived advance is (0 + 1) % 4 = 1 -- numerically identical to
+    // the already-current activeIndex signal value. A default-equals
+    // signal would treat that `setActiveIndex` as a no-op and never
+    // notify, silently stopping the reschedule effect from running
+    // again -- this pins that autoplay survives the collision instead.
+    stubLayout(container, 0);
+    fire(ul, 'scroll');
+    vi.advanceTimersByTime(3_000);
+    expect(activeIndexOf(container)).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Drop back to the no-measurable-layout fallback (nearestIndex
+    // now reads the current signal directly again) to confirm the
+    // rescheduled timer keeps advancing on its own, rather than only
+    // checking that one timer object exists.
+    Object.defineProperty(ul, 'clientWidth', { configurable: true, value: 0 });
+    vi.advanceTimersByTime(3_000);
+    expect(activeIndexOf(container)).toBe(2);
+  });
+
   it('does not schedule a timer for an empty item list', () => {
     render(() => <Carousel items={[]} label="Example carousel" />);
     expect(vi.getTimerCount()).toBe(0);
