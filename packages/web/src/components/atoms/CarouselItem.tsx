@@ -17,13 +17,13 @@ export interface CarouselItemProps
 export const CarouselItem: Component<CarouselItemProps> = (props) => {
   const [local, rest] = splitProps(props, ['class']);
   return (
-    <div class={twMerge('aspect-video', local.class)} role="listitem">
+    <li class={twMerge('aspect-video', local.class)}>
       <img
         class="rounded-box saturate-100 transition-[filter] duration-500 hover:saturate-100 lg:saturate-[.33]"
         decoding="async"
         fetchpriority="low"
         {...rest}
       />
-    </div>
+    </li>
   );
 };
