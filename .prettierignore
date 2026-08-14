@@ -38,7 +38,9 @@ profiles/
 # re-synced verbatim from kurone-kito/idd-skill; carries generated-from
 # banners that must stay byte-identical to upstream across every
 # re-import). prettier-plugin-sh and prettier-plugin-sort-json would
-# reformat these on every run, so they are excluded entirely.
-scripts/
-schemas/
-fixtures/schemas/
+# reformat these on every run, so they are excluded entirely. Anchored
+# to the repository root so nested package dirs of the same name (e.g.
+# packages/web/scripts/) are not accidentally swept in.
+/scripts/
+/schemas/
+/fixtures/schemas/
