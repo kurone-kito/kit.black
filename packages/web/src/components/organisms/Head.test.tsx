@@ -1,13 +1,15 @@
 import { MetaProvider } from '@solidjs/meta';
 import { createMemoryHistory, MemoryRouter, Route } from '@solidjs/router';
-import { cleanup, render } from '@solidjs/testing-library';
-import { Suspense } from 'solid-js';
+import { cleanup, render, waitFor } from '@solidjs/testing-library';
+import type { Component } from 'solid-js';
+import { onMount, Suspense } from 'solid-js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Head } from './Head.js';
 
 afterEach(() => {
   cleanup();
   document.head.innerHTML = '';
+  document.documentElement.lang = '';
 });
 
 /**
@@ -119,5 +121,48 @@ describe('organisms/Head', () => {
         'link[rel="alternate"][hreflang="x-default"]',
       ),
     ).toHaveAttribute('href', 'https://kit.black/about');
+  });
+
+  it('sets document.documentElement.lang to match the initial en page', async () => {
+    renderHead('/en/');
+    await waitFor(() => expect(document.documentElement.lang).toBe('en'));
+  });
+
+  it('sets document.documentElement.lang to match the initial ja page', async () => {
+    renderHead('/ja/');
+    await waitFor(() => expect(document.documentElement.lang).toBe('ja'));
+  });
+
+  it('keeps document.documentElement.lang synchronized after a client-side navigation, without remounting Head', async () => {
+    // A naive `onMount`-only implementation could pass a lang assertion
+    // alone by coincidentally remounting on this navigation. Wrapping
+    // `Head` with a mount-count probe keeps this test honest: it fails
+    // if the fix ever starts relying on a remount instead of reacting
+    // to `useLanguage()` in place, matching how `Head` is actually
+    // mounted once at the router root (`RootTemplate`) in production.
+    let mountCount = 0;
+    const ProbedHead: Component = () => {
+      onMount(() => {
+        mountCount += 1;
+      });
+      return <Head />;
+    };
+    const history = createMemoryHistory();
+    history.set({ value: '/en/', replace: true });
+    render(() => (
+      <MetaProvider>
+        <MemoryRouter history={history}>
+          <Suspense>
+            <Route path="/:language?/*" component={ProbedHead} />
+          </Suspense>
+        </MemoryRouter>
+      </MetaProvider>
+    ));
+    await waitFor(() => expect(document.documentElement.lang).toBe('en'));
+    expect(mountCount).toBe(1);
+
+    history.set({ value: '/ja/', replace: true });
+    await waitFor(() => expect(document.documentElement.lang).toBe('ja'));
+    expect(mountCount).toBe(1);
   });
 });
