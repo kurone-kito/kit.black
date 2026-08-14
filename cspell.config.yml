@@ -8,6 +8,9 @@ import:
 ignorePaths:
   - node_modules
   - storybook-static
+  - /scripts
+  - /schemas
+  - /fixtures/schemas
 version: '0.2'
 words:
   - agentic
