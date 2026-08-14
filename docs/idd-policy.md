@@ -194,13 +194,20 @@ from the **primary** worktree while HEAD is on an implementation branch
 (`issue/*` or `roadmap-audit/*`), enforcing the B1 disposable-worktree
 rule locally. The hooks are pure POSIX sh.
 
-`core.hooksPath` is a local, uncommitted setting, so each clone must opt
-in once:
+`pnpm install`'s `"prepare": "husky"` script keeps `core.hooksPath`
+pointed at `.husky/_` in this repository, so the `.githooks/` hooks never
+fire on their own. `.husky/pre-commit` and `.husky/pre-push` chain the
+same guard check (`.githooks/_idd-worktree-guard.sh`) at the end of
+their own scripts, so the guard is active by default after a normal
+`pnpm install` — no manual `core.hooksPath` opt-in is required.
+
+Anyone who prefers routing hooks through `.githooks/` directly (for
+example, outside this repo's husky wiring) can still opt in manually:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-After that, IDD implementation work must happen in a sibling worktree
+Either way, IDD implementation work must happen in a sibling worktree
 (`git worktree add ../<repo>.<branch> -b <branch> origin/main`), not by
 switching the primary worktree onto the issue branch.

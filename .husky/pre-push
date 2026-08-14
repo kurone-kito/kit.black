@@ -2,12 +2,10 @@
 # -*- mode: sh -*-
 # vim: set ft=sh :
 
-pnpm exec lint-staged
-
 # IDD disposable-worktree guard. Opt-in via worktreeGuard.enabled in
 # .github/idd/config.json; see .githooks/_idd-worktree-guard.sh for the
 # full behavior. This chains the same check husky routes core.hooksPath
 # through, since `pnpm install`'s `prepare: husky` script keeps
 # core.hooksPath pointed at .husky/_ rather than .githooks.
 . "$(git rev-parse --show-toplevel)/.githooks/_idd-worktree-guard.sh"
-idd_worktree_guard_check commit || exit 1
+idd_worktree_guard_check push || exit 1
