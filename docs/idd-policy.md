@@ -57,8 +57,8 @@ repository moved from the 2026-07-03 `iddVersion: 0.3.0` baseline onto
   `docs/idd-design-rationale.md`), and the four `profiles/` READMEs are
   present; `.github/idd/config.json` validates against
   `schemas/policy.schema.json`.
-- The corrupted `< placeholder >`-as-shell-redirection command examples
-  the 0.3.0 import shipped (root-caused and fixed in #123) are confirmed
+- The corrupted `<placeholder>`-as-shell-redirection command examples the
+  0.3.0 import shipped (root-caused and fixed in #123) are confirmed
   gone and cannot come back:
   `grep -rn '< [a-z-]* >' .github/instructions docs profiles .claude/skills`
   returns no matches, and `pnpm run lint:fix` produces no diff under the
