@@ -183,6 +183,51 @@ so IDD PRs carry real build/lint/test CI signal in addition to lint + test
 run locally in the worktree (pre-push-validate), CodeQL, Copilot, and
 CodeRabbit.
 
+## Project Commands
+
+**Policy** (`commands`, set in #208): the human-readable mirror of
+`.github/idd/config.json`'s `commands` object, kept in sync in the same
+change.
+
+<!-- dprint-ignore-start -->
+
+| Name                  | Commands                                                                                                    |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **fix-validate**      | `pnpm run lint:fix && pnpm run lint`                                                                        |
+| **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test`                      |
+| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test` |
+| **install-deps**      | `pnpm install --prefer-frozen-lockfile`                                                                     |
+
+<!-- dprint-ignore-end -->
+
+`pre-push-validate` and `post-fix-validate` build `packages/lib` first:
+`packages/lib`'s `package.json` resolves `main` to `dist/index.mjs`, which
+only exists after `pnpm run build`, and both `packages/fetcher` and
+`packages/web` import `@kurone-kito/kit.black-lib` as a workspace
+dependency. Without the build, `pnpm run test` in a freshly created IDD
+worktree fails to resolve that import even though nothing is actually
+broken. `fix-validate` is deliberately left unchanged — lint alone never
+touches workspace `dist/` output, so it has no equivalent gap.
+
+Building `packages/lib` alone (not a full `pnpm run build`) is
+deliberate: a root build also runs `packages/web`'s `prebuild:fetcher`
+script, which calls the live Google Calendar API and needs credentials
+(`CLIENT_ID`/`CLIENT_SECRET`/`ID_*`/`REFRESH_TOKEN`) that do not exist in
+a fresh worktree. `packages/web`'s `Calendar.test.tsx` statically imports
+the resulting `src/data.json` with no fallback, so it stays a known,
+separate, credential-bound gap outside `pre-push-validate`'s scope — see
+the v0.6.0 re-import verification note above and #208.
+
+A sibling, non-credential-bound gap exists alongside it: `Head.test.tsx`
+statically imports `packages/web/src/constants.json`, which is generated
+by the separate `prebuild:yaml` script (no credentials needed) and is
+also absent in a fresh worktree. `pre-push-validate` does not run
+`prebuild:yaml` either, so `Head.test.tsx` fails the same way
+`Calendar.test.tsx` does today, even though nothing blocks fixing it the
+same credential-free way `packages/lib`'s build gap was fixed here.
+Whether to fold `prebuild:yaml` into `pre-push-validate` is left open for
+a future decision, same as the `Calendar.test.tsx`/`data.json` follow-up.
+
 ## Role Labels
 
 **Policy** (`labels`, set in #126): `roadmapLabelName: roadmap`,
