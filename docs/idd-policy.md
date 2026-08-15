@@ -30,9 +30,13 @@ passed:
   the issue-authoring companion is installed at
   `.claude/skills/issue-authoring/`.
 - All seven onboarding placeholders are resolved. The only remaining
-  `{{...}}` token is the literal doc example `{{placeholder}}` in
-  vendored upstream onboarding docs (routed upstream in
-  kurone-kito/idd-skill#1207), not an unresolved onboarding placeholder.
+  onboarding-scoped `{{...}}` token is the literal doc example
+  `{{placeholder}}` in vendored upstream onboarding docs (routed
+  upstream in kurone-kito/idd-skill#1207), not an unresolved onboarding
+  placeholder. A separate, unrelated `{{...}}` class — the app's own
+  `packages/web/src/i18n/{en,ja}.ts` runtime template tokens — is
+  documented below; it predates this repository's IDD adoption and is
+  not an onboarding placeholder either.
 
 From this point the repository's own `.github/instructions/` are
 authoritative; the upstream ("theirs") bootstrap flow is no longer
