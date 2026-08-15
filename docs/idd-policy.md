@@ -83,9 +83,10 @@ repository moved from the 2026-07-03 `iddVersion: 0.3.0` baseline onto
     (`gh api repos/{owner}/{repo}/branches/main/protection` returns `404`;
     `gh api repos/{owner}/{repo}/rulesets` returns the repository's two
     active rulesets, neither of which contains a `required_status_checks`
-    rule). This is the fail-closed `ciGate.trustEmptyProtectionReads`
-    default doing its job, per design — see Deferred below for why the
-    key stays unset rather than flipped here.
+    rule). This was the fail-closed `ciGate.trustEmptyProtectionReads`
+    default doing its job, per design, at the time of this verification
+    pass — see Required-Check-Read Trust below for the #241 decision
+    that later flipped the key to `true`.
   - The autopilot-suitability score/label warning on issue #136 is
     accurate by design: #136 carries a stale score of 3 alongside its
     intentional `status:blocked-by-human` label.
@@ -218,8 +219,34 @@ Dependabot), a maintainer can bind a waiver to the sentinel claim-id
 `none` via `scripts/external-check-waiver.mjs --claimless` — the vendored
 helper bundle (#225) ships this script now.
 
-`ciGate.trustEmptyProtectionReads` intentionally stays unset (fail-closed
-default) — see Deferred below.
+## Required-Check-Read Trust
+
+**Policy** (`ciGate.trustEmptyProtectionReads`, set in #241): `true`.
+
+Across four consecutive autopilot runs (2026-08-13 through 2026-08-15)
+and all 10 merges in the most recent run (PRs #231-#240), the
+branch-protection and ruleset reads were independently reconfirmed
+genuinely empty every time with no drift
+(`branches/main/protection` → 404 "Branch not protected"; `rulesets` →
+200, two active rulesets, neither containing a `required_status_checks`
+rule). But the fail-closed default formally held every one of those 10
+merges — `pre-merge-readiness.mjs` returned `ready: false` on
+`protectionReadsUnreadable: true` each time — forcing a manual `gh pr
+merge --match-head-commit` override instead of the sanctioned
+`idd-merge-execute.mjs --apply` helper (PRs #238-#240 carry an explicit
+disclosed-override PR comment recording this). This is exactly the "a
+404 that starts actually holding merges" condition the prior Deferred
+entry named as its own revisit trigger, so #241 recorded the decision to
+flip the key.
+
+The repository operator accepts the residual risk this opts into: a
+token-scope problem masquerading as a `404` is no longer distinguished
+from a genuine empty read — this key restores the pre-`#1377` trusting
+behavior described in
+[`idd-ci.instructions.md`](../.github/instructions/idd-ci.instructions.md)'s
+Required-check discovery step. Revisit if that risk materializes — a
+`404` that turns out to mask a real permission gap rather than a
+genuinely empty read.
 
 ## Advisory-Convergence Gate
 
@@ -374,14 +401,6 @@ re-import:
   properties, so setting this key today fails `idd-doctor`'s schema
   validation outright rather than merely doing nothing. Revisit once
   upstream's schema accepts the field.
-- **`ciGate.trustEmptyProtectionReads`** — left at the fail-closed
-  default. `#128` verification reconfirmed the branch-protection and
-  ruleset reads genuinely 404 (`gh api .../branches/main/protection` →
-  404; `gh api .../rulesets` → 200, no `required_status_checks` rule), but
-  this has not held any merge — this repository's own IDD sessions have
-  proceeded on that direct 404 evidence across every PR merged since the
-  rulesets were introduced, with no merge blocked by it. Revisit only if
-  that changes (a 404 that starts actually holding merges).
 - **`advisoryWait.exemptBotAuthoredPrs`** — left unset (default `false`).
   It only matters under `advisoryWait.convergenceScope: "all-prs"`; this
   repository uses `"idd-claimed"`, which already keeps claimless PRs out
