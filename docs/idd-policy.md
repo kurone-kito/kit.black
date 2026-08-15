@@ -45,11 +45,13 @@ track #128 — see the roadmap for the full prerequisite-track list). The
 repository moved from the 2026-07-03 `iddVersion: 0.3.0` baseline onto
 **upstream tag `v0.6.0` (commit `f1666048`)**.
 
-- Roadmap #122 originally targeted a SHA-pinned snapshot (`4e8c7043`)
-  because upstream had not cut a tag past `v0.4.0` when the roadmap was
-  opened (2026-07-27); it re-baselined onto the `v0.6.0` tag on 2026-08-12
-  once upstream cut it. `.github/idd/config.json`'s `iddVersion` carries
-  the tag's declared template value, `"0.6.0"`.
+- Roadmap #122 opened 2026-07-14 targeting the `v0.4.0` tag plus a
+  forward-port from upstream commit `4103665`. A 2026-07-27 re-plan
+  pinned a SHA snapshot (`4e8c7043`) instead, once upstream had moved
+  `main` past `v0.4.0` without cutting a new tag; it re-baselined onto
+  the `v0.6.0` tag on 2026-08-12 once upstream cut it.
+  `.github/idd/config.json`'s `iddVersion` carries the tag's declared
+  template value, `"0.6.0"`.
 - The Step 6 checklist passed again against the re-imported set: all
   `.github/instructions/idd-*.instructions.md` files (now including the
   `lite/` weak-model-tier bundle), the expanded `docs/` set (adding
@@ -218,8 +220,10 @@ default) — see Deferred below.
 ## Advisory-Convergence Gate
 
 **Status**: hosted as a **non-required** check (`.github/workflows/idd-advisory-convergence.yml`,
-added in #127, copied verbatim from the `idd-template/` artifact upstream
-ships at `v0.6.0`). It triggers on `pull_request`, `pull_request_review`,
+added in #127, adapted from the `idd-template/` artifact upstream ships
+at `v0.6.0` — this repository's copy pins `actions/checkout@v7` instead
+of upstream's `@v4`, matching the sibling `push.yml`/`push-main.yml`
+workflows). It triggers on `pull_request`, `pull_request_review`,
 `pull_request_review_comment`, and manual `workflow_dispatch` (for
 re-checking after a maintainer waiver), and produces a convergence verdict
 on every PR today.
