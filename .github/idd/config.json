@@ -37,7 +37,7 @@
   },
   "discover": { "selectionDesync": "session-offset" },
   "helperRuntime": {
-    "profile": "instructions-only"
+    "profile": "vendored-node"
   },
   "iddVersion": "0.6.0",
   "issueScope": "roadmap-first",
