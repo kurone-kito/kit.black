@@ -218,6 +218,16 @@ the resulting `src/data.json` with no fallback, so it stays a known,
 separate, credential-bound gap outside `pre-push-validate`'s scope — see
 the v0.6.0 re-import verification note above and #208.
 
+A sibling, non-credential-bound gap exists alongside it: `Head.test.tsx`
+statically imports `packages/web/src/constants.json`, which is generated
+by the separate `prebuild:yaml` script (no credentials needed) and is
+also absent in a fresh worktree. `pre-push-validate` does not run
+`prebuild:yaml` either, so `Head.test.tsx` fails the same way
+`Calendar.test.tsx` does today, even though nothing blocks fixing it the
+same credential-free way `packages/lib`'s build gap was fixed here.
+Whether to fold `prebuild:yaml` into `pre-push-validate` is left open for
+a future decision, same as the `Calendar.test.tsx`/`data.json` follow-up.
+
 ## Role Labels
 
 **Policy** (`labels`, set in #126): `roadmapLabelName: roadmap`,
