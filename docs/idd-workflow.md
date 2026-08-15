@@ -305,6 +305,7 @@ and whether your repository has authored any of its own:
 | A5 Claim                 | `idd-claim.instructions.md`         | `lite/idd-claim-lite.instructions.md`         |
 | B1-C6 Work               | `idd-work.instructions.md`          | `lite/idd-work-lite.instructions.md`          |
 | D1-D4 PR-submit          | `idd-pr-submit.instructions.md`     | `lite/idd-pr-submit-lite.instructions.md`     |
+| E1-E3 Review-snapshot    | `idd-review-snapshot.instructions.md` | `lite/idd-review-snapshot-lite.instructions.md` |
 | E9-E15 Review-fix        | `idd-review-fix.instructions.md`    | `lite/idd-review-fix-lite.instructions.md`    |
 | F1-F2 helper-read subset | `idd-pre-merge.instructions.md`     | `lite/idd-pre-merge-lite.instructions.md`     |
 | F2.5 handoff-stop        | `idd-merge-handoff.instructions.md` | `lite/idd-merge-handoff-lite.instructions.md` |
