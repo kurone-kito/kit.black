@@ -18,7 +18,8 @@
       "mode": "maintainer-authorized",
       "authorityPolicy": "owners-and-maintainers-only",
       "maxValidity": "PT24H"
-    }
+    },
+    "trustEmptyProtectionReads": true
   },
   "ciWait": {
     "runningTimeout": "PT30M",
