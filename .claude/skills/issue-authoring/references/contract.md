@@ -1627,8 +1627,9 @@ only approval boundary.
   any published body; the `audit-authored-issue` linter (or its manual
   fallback) is green on every published body in the set. Keep the authoring
   label in place until the checklist passes and the user explicitly requests
-  release from the authoring hold, except for the narrow auto-release
-  exception below. Keep the set anchor held until every other
+  release from the authoring hold — this repository disables upstream's
+  narrow auto-release exception (see below); explicit release is the only
+  release path here. Keep the set anchor held until every other
   target's label removal is verified, and remove the anchor label last. For
   every target, first re-fetch owner comments during release-marker preflight.
   **Mandatory release-time hide-on-supersede sweep (#2896, #2935).** At
@@ -1752,8 +1753,9 @@ only approval boundary.
   and verify the restored set state; leave every target generation open and
   stop. If restoration cannot be completed or a newer owner has appeared,
   record a set-level recovery hold and never claim a partial release. Release
-  is a human action; nothing in this bundle auto-releases a held issue set,
-  except the narrow, marker-scoped exception immediately below.
+  is a human action; this repository disables upstream's narrow,
+  marker-scoped auto-release exception (see below) — nothing in this bundle
+  auto-releases a held issue set.
 - **Closing sweep (after Stage 2 closes, #2896 review, Codex; #2935).**
   The two sweep points above run _before_ Stage 2's own later marker
   appends for the same generation -- the per-target `release` marker,
@@ -1861,70 +1863,20 @@ only approval boundary.
   helper runtime unavailable" -- naming the reason. This never blocks
   release either; it only ensures a fully-silent skip never happens even
   in the one failure mode the mechanical signal cannot itself cover.
-- **Narrow auto-release exception (review-fix-loop-cutoff).** A
-  follow-up issue whose body carried the exact marker
-  `<!-- <marker-prefix>-authoring-defer-source: review-fix-loop-cutoff -->` at
-  Stage 1 publication time — part of the initial `authoring-publication` body
-  write, never added by a later edit — may complete the full Stage 2
-  sequence above (release-marker preflight, release-guard, heartbeat
-  renewal, verified label removal, release-complete reconciliation,
-  every other mechanical gate unchanged) without the "user explicitly
-  requests release" precondition, immediately after Stage 1 publication
-  completes for that issue. The exception is additive, not a
-  relaxation: it replaces only that one precondition; it applies only
-  to the single target carrying the marker, never to a roadmap anchor
-  or a sibling target in the same authoring set that lacks it; and a
-  marker added after Stage 1 publication never qualifies a target
-  retroactively. **Provenance check (`#2877`):** before honoring this
-  exception, the releasing session must recompute the target's current
-  body-sha256 from a fresh read and compare it against that same
-  target's own `mode=acquire` owner marker's `body-sha256` (hashed from
-  the fresh read taken immediately before that marker was posted, so it
-  already reflects the published body — see "Per-target ownership"
-  above). A mismatch — the body changed since Stage 1 acquire — fails
-  closed: the auto-release exception does not apply for that release
-  attempt (this does not retroactively fail Stage 1 itself), and the
-  target falls back to the ordinary human-release-request precondition.
-  Perform this comparison immediately before the label-removal step
-  itself, not only once earlier in the sequence -- matching this
-  section's existing discipline of re-verifying immediately before
-  each removal for owner/set/anchor/session and the expected
-  label/body snapshot -- so a body edit landing between an earlier
-  check and the actual removal cannot silently bypass this
-  precondition. The `authoring-owner-provenance` helper (`node
-  scripts/authoring-owner-provenance.mjs --issue <number>`; see
-  `docs/idd-helper-scripts.md`) performs and verifies this comparison
-  mechanically (`#2891`). This
-  exists because
-  `idd-review-triage.instructions.md`'s round-count cutoff files this
-  exact marker on a follow-up issue during unattended autonomous
-  execution, where no human is present to issue a release request —
-  left under the ordinary human-gated boundary above, that deferred
-  work would sit under the authoring label indefinitely on a fully
-  autonomous repository, silently defeating the point of deferring it
-  at all (preventive; no observed incident yet). **Roadmap-anchor
-  scope (accepted limitation, `#2877`):** the "never to a roadmap
-  anchor" exclusion above is permanent, not a gap awaiting a fix — a
-  roadmap anchor carrying this marker under `issue-scope: roadmap`
-  with orphan discovery disabled still requires the ordinary
-  human-gated explicit release request, since this exception's
-  single-target design intentionally does not extend to anchor
-  release. See `docs/idd-autonomy-contract.md`'s Stage 2 label-removal
-  row for the same note in table form. **Sequencing with the
-  originating issue (`#2877`):** the round-count cutoff's follow-up
-  issue also carries a `Refs #<originating-issue>` line back to the
-  deferred work (the D3 follow-up-issue rule in
-  `idd-pr-submit.instructions.md`); `discover-readiness-check.mts`
-  treats that specific `Refs` reference as a hard blocker — resolved
-  the same way an ordinary `Blocked by #<N>` line is — while
-  `#<originating-issue>` stays open, a narrow exception to `Refs`
-  otherwise being non-blocking everywhere else in this workflow. The
-  marked follow-up must carry exactly one `Refs` keyword line naming
-  exactly one issue: nothing in body text lets Discover safely tell the
-  true origin apart from an unrelated `Refs` citation that also starts
-  its own line, or apart from a second number on the same line, so more
-  than one line or more than one number fails closed instead of
-  guessing.
+- **Auto-release exception disabled (local policy).** Upstream defines
+  a narrow auto-release exception (`review-fix-loop-cutoff`) that lets
+  a marked follow-up issue skip the "user explicitly requests release"
+  precondition. This repository disables that exception: explicit
+  human release is the **only** release path for every target,
+  including a `review-fix-loop-cutoff`-marked follow-up. A follow-up
+  issue created by `idd-review-triage.instructions.md`'s round-count
+  cutoff stays under the authoring hold, like any other authored issue,
+  until a human explicitly requests release — even though this
+  repository runs `fully_autonomous_merge`. This is a deliberate local
+  divergence, not an oversight: see
+  [issue #249](https://github.com/kurone-kito/kit.black/issues/249)'s
+  acceptance criteria, which require that this hold "must not be
+  released implicitly."
 
 ## Publication boundary
 
@@ -1934,6 +1886,6 @@ need a separate user approval once it passes the mechanical
 [Authoring hold and release](#authoring-hold-and-release) above for the
 full two-stage contract. Removing the authoring label and starting the
 IDD execution loop both require the user's explicit hold-release
-request, except the narrow auto-release exception documented in
-[Authoring hold and release](#authoring-hold-and-release) above; nothing
-else authorizes either.
+request — this repository disables upstream's narrow auto-release
+exception (see [Authoring hold and release](#authoring-hold-and-release)
+above); nothing else authorizes either.
