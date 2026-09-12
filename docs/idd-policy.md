@@ -197,7 +197,7 @@ change.
 | **install-deps**      | `pnpm install --prefer-frozen-lockfile`                                                                     |
 | **fix-validate**      | `pnpm run lint:fix && pnpm run lint`                                                                        |
 | **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test`                      |
-| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test`
+| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test` |
 
 <!-- dprint-ignore-end -->
 
