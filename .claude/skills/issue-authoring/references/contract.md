@@ -475,8 +475,11 @@ Ask these checks:
      `v<iddVersion>` tag matching what they actually imported either.
    - **Target ref.** The new release/ref the resync targets.
    - **Scope.** Intersect both trees with the Step 2 "File list" core
-     file set as it reads **at the target ref**
-     ([`idd-template/ONBOARDING.md`'s generated file-list block](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md#file-list))
+     file set as it reads **at the target ref** — `idd-template/ONBOARDING.md`'s
+     generated file-list block
+     (`https://github.com/kurone-kito/idd-skill/blob/<target-ref>/idd-template/ONBOARDING.md#file-list`,
+     substituting the actual target ref/tag, not a hardcoded `main` —
+     the file list itself can gain or lose entries between refs) —
      plus whichever optional profile artifacts the adopter selected, not
      the complete `idd-template/` tree — a file such as
      [`idd-template/ONBOARDING.md` itself](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md)
