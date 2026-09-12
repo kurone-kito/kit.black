@@ -23,7 +23,8 @@ an afterthought once a marker is already half-drafted.
   context, stop and ask instead of emitting a guessed marker
   (preventive; no observed incident yet). A prefix the operator already
   confirmed during an onboarding hearing (Steps 1A-1C of
-  `idd-template/ONBOARDING.md`) counts as a resolved value under "user
+  [`idd-template/ONBOARDING.md`](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md#step-1a--auto-derive-candidate-values))
+  counts as a resolved value under "user
   context" — even before it is committed anywhere in the target
   repository's tree — and does not require asking again.
 
@@ -431,7 +432,8 @@ Ask these checks:
    is exactly the named gap to document in the resync issue, not a
    documentation-consultation failure. Either the target ref's
    `docs/customization.md` section or, from a source checkout of
-   `idd-skill` itself, `idd-template/ONBOARDING.md`'s "Re-importing"
+   `idd-skill` itself,
+   [`idd-template/ONBOARDING.md`'s "Re-importing"](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md#re-importing-import-named-gaps-not-a-blind-resync)
    section, documents the same named gap: an adopter's own rule
    customizations for these files need a by-hand merge into the new
    import rather than an assumed carry-forward, and
@@ -474,10 +476,11 @@ Ask these checks:
    - **Target ref.** The new release/ref the resync targets.
    - **Scope.** Intersect both trees with the Step 2 "File list" core
      file set as it reads **at the target ref**
-     (`idd-template/ONBOARDING.md`'s generated file-list block) plus
-     whichever optional profile artifacts the adopter selected, not
+     ([`idd-template/ONBOARDING.md`'s generated file-list block](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md#file-list))
+     plus whichever optional profile artifacts the adopter selected, not
      the complete `idd-template/` tree — a file such as
-     `idd-template/ONBOARDING.md` itself is never copied into an
+     [`idd-template/ONBOARDING.md` itself](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md)
+     is never copied into an
      adopter, so reporting it as changed is noise. Use the target
      ref's manifest, not the baseline ref's: a file the target release
      newly added to the core or a selected profile is exactly the kind
@@ -493,8 +496,9 @@ Ask these checks:
      "Final placeholder meanings" table
      (`docs/onboarding/placeholders.md`). An older ref has no such
      file — the placeholders were documented directly inside
-     `idd-template/ONBOARDING.md`'s own "Step 1C — Collect placeholder
-     values" section instead; use that section's list as the
+     [`idd-template/ONBOARDING.md`'s own "Step 1C — Collect placeholder
+     values"](https://github.com/kurone-kito/idd-skill/blob/main/idd-template/ONBOARDING.md#step-1c--collect-placeholder-values)
+     section instead; use that section's list as the
      allowlist for a baseline ref that old. Never match every
      `{{...}}`-shaped span unfiltered either way — an unrestricted
      match also catches ordinary GitHub Actions expressions such as
