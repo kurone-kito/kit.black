@@ -41,6 +41,14 @@
     "comparisonRoute": "proceed",
     "comparisonReason": "snapshot-current"
   },
+  "secondaryQuietWindow": {
+    "minutes": 0,
+    "anchorAt": "2026-05-11T23:56:00Z",
+    "elapsedMinutes": null,
+    "elapsed": true,
+    "remainingMinutes": 0,
+    "declined": false
+  },
   "threads": {
     "unresolvedCount": 1,
     "actionableCount": 0,
@@ -149,6 +157,8 @@
     "discardedNonPassingRequiredChecks": [],
     "sourcePinnedRequiredCheckNames": [],
     "sourcePinnedUnresolved": false,
+    "identityUnresolvedRequiredCheckNames": [],
+    "preDowngradeStatus": "success",
     "checks": [
       {
         "name": "lint",
@@ -180,7 +190,25 @@
     "wrongClaim": [],
     "unauthorized": [],
     "malformed": [],
-    "notConfigured": []
+    "notConfigured": [],
+    "modeDisabled": []
+  },
+  "advisoryConvergenceWaiverPrecondition": {
+    "checkSelector": "idd-advisory-convergence",
+    "deadlineMinutes": 1440,
+    "headCommittedAt": "none",
+    "elapsedMinutes": null,
+    "deadlinePassed": false,
+    "terminalUnavailable": false,
+    "open": false
+  },
+  "claimIdentityInstalledAt": "2026-05-11T23:20:00Z",
+  "staleSelfWaiver": {
+    "stale": false,
+    "checkSelector": "idd-advisory-convergence",
+    "reason": null,
+    "expiresAt": "",
+    "waiverClaimId": ""
   },
   "branchCurrency": {
     "mergeStateStatus": "CLEAN",

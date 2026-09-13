@@ -10,6 +10,7 @@
     "prHeadSha",
     "now",
     "reviewCurrency",
+    "secondaryQuietWindow",
     "threads",
     "unrepliedComments",
     "reviewerStates",
@@ -17,6 +18,9 @@
     "ci",
     "claim",
     "waiverEvidence",
+    "advisoryConvergenceWaiverPrecondition",
+    "claimIdentityInstalledAt",
+    "staleSelfWaiver",
     "branchCurrency",
     "ready",
     "blockers"
@@ -824,6 +828,8 @@
         "discardedNonPassingRequiredChecks",
         "sourcePinnedRequiredCheckNames",
         "sourcePinnedUnresolved",
+        "identityUnresolvedRequiredCheckNames",
+        "preDowngradeStatus",
         "checks"
       ],
       "additionalProperties": false,
@@ -893,7 +899,7 @@
         },
         "discardedNonPassingRequiredChecks": {
           "type": "array",
-          "description": "#1745: same-name/type/workflowName required-check instances discarded by the latest-per-producer dedup while the dedup-selected representative for that group is pass-equivalent -- surfaces the exact PR #1741 divergence, where a CANCELLED idd-advisory-convergence instance was masked by a same-name SUCCESS instance even though GitHub's own statusCheckRollup.state disagreed. Empty (never omitted) when no such discarded sibling exists.",
+          "description": "#1745: same-producer (name/type/workflowName/workflowPath -- kurone-kito/idd-skill#2919 widened this from the original name/type/workflowName 3-tuple) required-check instances discarded by the latest-per-producer dedup while the dedup-selected representative for that group is pass-equivalent -- surfaces the exact PR #1741 divergence, where a CANCELLED idd-advisory-convergence instance was masked by a same-producer SUCCESS instance even though GitHub's own statusCheckRollup.state disagreed. Empty (never omitted) when no such discarded sibling exists.",
           "items": {
             "type": "object",
             "required": [
@@ -921,7 +927,7 @@
               },
               "selectedState": {
                 "type": "string",
-                "description": "State of the same-name/type/workflow instance the dedup selected as latest instead of this discarded one.",
+                "description": "State of the same-producer instance the dedup selected as latest instead of this discarded one.",
                 "minLength": 1
               },
               "selectedCompletedAt": {
@@ -951,6 +957,25 @@
         "sourcePinnedUnresolved": {
           "type": "boolean",
           "description": "#1689: true when the downgrade above fired at least partly because of a pinned source that could not be attributed to any check name (a ruleset `workflows` rule, or a pinned entry with no `context`/`name`/`check`). Distinct from `sourcePinnedRequiredCheckNames` being empty, which alone is ambiguous between \"no pinning\" and \"pinning exists but is unnamed.\" An unresolvable pinned source is never covered by the `ciGate.trustSourcePinnedRequiredChecks` opt-in, even when a separate, named-and-pinned entry also exists on the same required-check set."
+        },
+        "identityUnresolvedRequiredCheckNames": {
+          "type": "array",
+          "description": "kurone-kito/idd-skill#2919 (round 2): required check names whose green state was downgraded to `unknown` (via `status` above) because this collection pass could not fully resolve their real workflow-file producer identity (a parse failure on some, but not all, live instances; a thrown `listCheckRunWorkflowPaths` call; an empty resolved path; a `detailsUrl` that repeats -- either among the resolved `checkSuite.workflowRun` associations or among the live rollup's own matching instances -- and so cannot be joined back to a single instance safely (kurone-kito/idd-skill#2926); or a run-id count exceeding the collector's own lookup ceiling) -- see `CheckLike`'s own doc comment for why an unresolved producer identity cannot be trusted as passing (it cannot rule out a same-display-name decoy workflow). Lets a caller's blocker detail name this cause explicitly instead of a generic \"CI is not all-passing\" message. Empty (never omitted) when no such downgrade occurred.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preDowngradeStatus": {
+          "type": "string",
+          "description": "kurone-kito/idd-skill#2919 (round 5): the dedup+waiver-adjusted classification `status` BEFORE the source-pinned/identity-unresolved downgrades above could narrow it -- `success` here means every required check was already fully resolved as passing through `classifyCiChecks`'s own dedup/waiver logic, so any non-success final `status` can only be attributed to those two named downgrades. Lets a caller (`computePreMergeReadinessBlockers`) determine, exactly, whether a genuinely separate concurrent CI cause exists alongside a pinned/identity-unresolved cause, without re-deriving per-check pass/fail evidence itself. `unknown` when no required checks are configured, mirroring `status`'s own initial default in that case.",
+          "enum": [
+            "missing",
+            "success",
+            "pending",
+            "failed",
+            "unknown"
+          ]
         },
         "checks": {
           "type": "array",
@@ -1070,7 +1095,8 @@
             "missing-active-claim",
             "claim-id-mismatch",
             "agent-id-mismatch",
-            "activation-nonce-mismatch"
+            "activation-nonce-mismatch",
+            "not-applicable"
           ]
         }
       }
@@ -1165,7 +1191,7 @@
               },
               "hint": {
                 "type": "string",
-                "description": "Diagnostic-only note, present only when applicable: this comment is a recognized advisory non-review notice with an IDD-agent reply that used the wrong disposition phrase, naming the exact phrase the notice-specific carry-forward requires."
+                "description": "Diagnostic-only note, present only when applicable: names the exact required disposition phrase or literal prefix an IDD-agent reply attempt was close to but missed -- either a recognized advisory non-review notice with a wrong-phrase reply (#1833), or any missing comment with a plain-text reply attempt that never satisfies the required bold **Accepted**/**Rejected** prefix (#2249)."
               }
             }
           }
@@ -1225,7 +1251,8 @@
         "wrongClaim",
         "unauthorized",
         "malformed",
-        "notConfigured"
+        "notConfigured",
+        "modeDisabled"
       ],
       "additionalProperties": false,
       "properties": {
@@ -1238,7 +1265,9 @@
               "authorLogin",
               "checkSelector",
               "reason",
-              "expiresAt"
+              "expiresAt",
+              "createdAt",
+              "runId"
             ],
             "additionalProperties": false,
             "properties": {
@@ -1257,6 +1286,15 @@
               "expiresAt": {
                 "type": "string",
                 "description": "Waiver's recorded expiry timestamp."
+              },
+              "createdAt": {
+                "type": "string",
+                "description": "Waiver comment's own creation timestamp (#2034), or 'none' when unparseable; the moment a generic waivable check's waiver became genuinely active, used to gate coveredByWaiver on a fresh post-waiver check run.",
+                "pattern": "^(none|\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)$"
+              },
+              "runId": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2657: the marker's optional run-id: field, verbatim ('' when absent). Only the self-referential-bootstrap-auto consumer in advisory-convergence.mts reads this; every other caller of the shared summarizer is unaffected by its presence."
               }
             }
           }
@@ -1269,7 +1307,10 @@
             "required": [
               "authorLogin",
               "checkSelector",
-              "expiresAt"
+              "expiresAt",
+              "reason",
+              "runId",
+              "createdAt"
             ],
             "additionalProperties": false,
             "properties": {
@@ -1284,6 +1325,18 @@
               "expiresAt": {
                 "type": "string",
                 "description": "Waiver's recorded expiry timestamp."
+              },
+              "reason": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911: the marker's reason: field, verbatim -- needed to identify a self-referential-bootstrap-auto marker even after it has expired out of the valid bucket."
+              },
+              "runId": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911: the marker's optional run-id: field, verbatim ('' when absent) -- mirrors the valid bucket's own runId field."
+              },
+              "createdAt": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911 (Copilot review, PR #2915): the marker comment's own createdAt server timestamp -- the lower bound of the marker's validity window, paired with expiresAt as the upper bound."
               }
             }
           }
@@ -1323,7 +1376,11 @@
             "required": [
               "authorLogin",
               "checkSelector",
-              "waiverClaimId"
+              "waiverClaimId",
+              "reason",
+              "runId",
+              "createdAt",
+              "expiresAt"
             ],
             "additionalProperties": false,
             "properties": {
@@ -1338,6 +1395,22 @@
               "waiverClaimId": {
                 "type": "string",
                 "description": "Claim id recorded on the waiver, which does not match the active claim."
+              },
+              "reason": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911: see expired[].reason's description above -- the identical need applies to a wrongClaim-classified marker, which likewise never reaches the valid bucket."
+              },
+              "runId": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911: see expired[].runId's description above."
+              },
+              "createdAt": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911 (Copilot review, PR #2915): see expired[].createdAt's description above -- the identical lower-bound need applies to a wrongClaim-classified marker."
+              },
+              "expiresAt": {
+                "type": "string",
+                "description": "kurone-kito/idd-skill#2911 (Codex review, PR #2915, P2): the marker's recorded expiry timestamp -- wrongClaim classification runs before the expiry check in summarizeExternalCheckWaivers, so a marker can be both wrong-claim and already-expired yet only ever reach this bucket; needed as the upper bound of the marker's validity window, paired with createdAt as the lower bound."
               }
             }
           }
@@ -1417,6 +1490,160 @@
               }
             }
           }
+        },
+        "modeDisabled": {
+          "type": "array",
+          "description": "#2046: waivers that passed every validity and waivable-selector check but the policy's ciGate.externalCheckWaivers.mode is not maintainer-authorized; excluded from valid and never fold a check into requiredChecksPassing, mirroring advisory-convergence.mts's own mode guard.",
+          "items": {
+            "type": "object",
+            "required": [
+              "authorLogin",
+              "checkSelector",
+              "expiresAt"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "authorLogin": {
+                "type": "string",
+                "description": "Login of the waiver's author, normalized to lowercase."
+              },
+              "checkSelector": {
+                "type": "string",
+                "description": "Check-name selector the waiver targets."
+              },
+              "expiresAt": {
+                "type": "string",
+                "description": "Waiver's recorded expiry timestamp."
+              }
+            }
+          }
+        }
+      }
+    },
+    "advisoryConvergenceWaiverPrecondition": {
+      "type": "object",
+      "description": "#2021: deadline/terminal precondition gating whether a posted idd-advisory-convergence waiver counts toward ci.coveredByWaiver -- mirrors advisory-convergence.mts's own deadline clock (a 24h deadline anchored on the current HEAD commit's own committedDate) and its terminal Copilot-unavailability escape hatch, so this evidence collector never reports a check as covered before that gate itself would call the waiver waived.",
+      "required": [
+        "checkSelector",
+        "deadlineMinutes",
+        "headCommittedAt",
+        "elapsedMinutes",
+        "deadlinePassed",
+        "terminalUnavailable",
+        "open"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "checkSelector": {
+          "type": "string",
+          "description": "The idd-advisory-convergence check selector this precondition gates."
+        },
+        "deadlineMinutes": {
+          "type": "number",
+          "description": "Configured advisory convergence deadline in minutes (advisoryWait.convergenceDeadline, default 1440 = 24h).",
+          "minimum": 0
+        },
+        "headCommittedAt": {
+          "type": "string",
+          "description": "ISO timestamp of the current HEAD commit itself, or the literal 'none' when unavailable."
+        },
+        "elapsedMinutes": {
+          "type": ["integer", "null"],
+          "description": "Whole minutes elapsed from headCommittedAt to now, or null when headCommittedAt is invalid or absent."
+        },
+        "deadlinePassed": {
+          "type": "boolean",
+          "description": "True when elapsedMinutes is known and has reached deadlineMinutes."
+        },
+        "terminalUnavailable": {
+          "type": "boolean",
+          "description": "The caller-supplied #1572 terminal Copilot-unavailability verdict (same value as advisoryWait.copilotUnavailable)."
+        },
+        "open": {
+          "type": "boolean",
+          "description": "True when deadlinePassed or terminalUnavailable -- the precondition that must hold before a posted idd-advisory-convergence waiver counts toward ci.coveredByWaiver."
+        }
+      }
+    },
+    "secondaryQuietWindow": {
+      "type": "object",
+      "description": "#2335: the advisoryWait.secondaryQuietWindow gate status -- once the E-phase convergence conditions are already met, requires the configured window to have elapsed since the last substantive (non-ack-only) activity before treating the review as settled. Anchored on reviewCurrency.live.effective.maxActivityUpdatedAt; stateless by design.",
+      "required": [
+        "minutes",
+        "anchorAt",
+        "elapsedMinutes",
+        "elapsed",
+        "remainingMinutes",
+        "declined"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "minutes": {
+          "type": "integer",
+          "description": "Configured secondary quiet window in whole minutes (advisoryWait.secondaryQuietWindow, default 0 = off).",
+          "minimum": 0
+        },
+        "anchorAt": {
+          "type": "string",
+          "pattern": "^(none|declined|\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)$",
+          "description": "ISO timestamp of the last substantive (non-ack-only) activity this window anchors on, the literal 'none' when no such activity exists, or the literal 'declined' when the #2547 secondaryBotDeclined short-circuit fired. Still the real timestamp (not 'none') when minutes is 0 but a valid activity timestamp exists."
+        },
+        "elapsedMinutes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Whole minutes elapsed from anchorAt to now, or null when the window is off, declined is true (anchorAt is the literal 'declined', not a timestamp), anchorAt is otherwise invalid/absent, or now failed to parse."
+        },
+        "elapsed": {
+          "type": "boolean",
+          "description": "True when the configured window has elapsed since anchorAt -- always true when minutes is 0 (off), anchorAt is unavailable, or declined is true."
+        },
+        "remainingMinutes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Whole minutes remaining until the window elapses. 0 when the window is off (minutes is 0), declined is true, or anchorAt is invalid/absent; otherwise null only when elapsedMinutes itself is null (now failed to parse)."
+        },
+        "declined": {
+          "type": "boolean",
+          "description": "#2547: true when the configured secondary advisory bot has definitively declined (a rate-limit / skip-review notice, with no later genuine comment) to review the CURRENT HEAD -- the wait is skipped entirely (elapsed: true, remainingMinutes: 0) rather than requiring the full configured window."
+        }
+      }
+    },
+    "claimIdentityInstalledAt": {
+      "type": "string",
+      "description": "kurone-kito/idd-skill#2911: the non-mutable timestamp at which the active claim's (agentId, claimId) identity was last installed (a fresh claim, a stale takeover, or a forced handoff) -- as opposed to claim.activeClaim.createdAt, which is overwritten on every same-claim heartbeat. '' when no event ever produced an active claim. Deliberately outside claim (not claim.activeClaimInstalledAt): ClaimValidationSummary's shape is embedded in schemas beyond this one, so this stays a top-level, pre-merge-readiness-only field instead."
+    },
+    "staleSelfWaiver": {
+      "type": "object",
+      "description": "kurone-kito/idd-skill#2911: evidence for the stale-self-waiver merge blocker -- whether the currently-passing idd-advisory-convergence check (the deduplicated newest instance) rests on a self-referential-bootstrap-auto waiver that has since gone stale (expired, or claim-invalid across a genuine claim-identity transition), with no rerun since. Reported unconditionally (never omitted); stale is false and reason is null whenever the blocker does not apply (including when touchesSelfReferentialAllowlist was not supplied as true, or the configured ciGate.externalCheckWaivers.mode/waivableSelectors policy could never have made this mechanism's waiver valid).",
+      "required": [
+        "stale",
+        "checkSelector",
+        "reason",
+        "expiresAt",
+        "waiverClaimId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stale": {
+          "type": "boolean",
+          "description": "True when the currently-passing check's pass rests on a stale, run-verified self-referential-bootstrap-auto waiver."
+        },
+        "checkSelector": {
+          "type": "string",
+          "description": "The advisory-convergence check selector this evidence evaluates."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "enum": ["expired", "wrong-claim", null],
+          "description": "Which stale condition fired: an expired marker with no rerun since, or a marker bound to a claim identity the current transition no longer matches. null when stale is false."
+        },
+        "expiresAt": {
+          "type": "string",
+          "description": "The stale marker's own recorded expiry timestamp, when reason is 'expired'; '' otherwise."
+        },
+        "waiverClaimId": {
+          "type": "string",
+          "description": "The stale marker's own recorded claim id, when reason is 'wrong-claim'; '' otherwise."
         }
       }
     },
@@ -1483,6 +1710,36 @@
       "type": "string",
       "description": "Provenance of trustedMarkerActors: an explicit flag, an environment variable, repository config, or none configured.",
       "enum": ["flag", "env", "config", "none"]
+    },
+    "localValidationEvidence": {
+      "type": "object",
+      "description": "#2323: the caller-precomputed resolveLocalValidationEvidence result (local-validation-evidence.mts), reported verbatim. Omitted entirely when the caller does not pass it. Purely informational -- computePreMergeReadinessBlockers has no reference to this field, so it can never remove or downgrade a required-check blocker; an unavailable required check stays a blocker regardless of this field's contents.",
+      "additionalProperties": true
+    },
+    "developmentBranchTarget": {
+      "type": "object",
+      "description": "#2272: the caller-precomputed resolveEffectiveDevelopmentBranch result (policy-helpers.mts) paired with the live PR baseRefName, reported verbatim. Omitted entirely when the caller does not pass it. Unlike localValidationEvidence above, this DOES feed computePreMergeReadinessBlockers: an invalid/unavailable status, or a branch that differs from baseRefName, adds a development-branch-target blocker.",
+      "required": ["status", "baseRefName"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "'configured' (an explicit developmentBranch policy value) or 'default' (policy absent, live repository default branch used) never block; 'invalid' (malformed policy value) or 'unavailable' (policy absent and the live default branch could not be read) always block.",
+          "enum": ["configured", "default", "invalid", "unavailable"]
+        },
+        "branch": {
+          "type": "string",
+          "description": "Present when status is 'configured' or 'default'."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Present when status is 'invalid'."
+        },
+        "baseRefName": {
+          "type": "string",
+          "description": "The PR's live base branch, read alongside the same headRefOid/baseRefName pr view fetch this report already performs."
+        }
+      }
     },
     "ready": {
       "description": "Strict merge-gate rollup: true only when blockers is empty. Does NOT apply the dispositionEvidence.soleCauseAckOnlyPostDisposition override (a separate flag the F2 checklist layers on top).",
