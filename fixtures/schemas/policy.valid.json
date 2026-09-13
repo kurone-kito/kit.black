@@ -60,14 +60,18 @@
   },
   "discover": {
     "activeClaimPreScanBatchSize": 10,
-    "legacyRoots": [1234]
+    "legacyRoots": [1234],
+    "milestoneScope": "v0.8.0"
   },
   "claim": {
     "verifySettleDelay": "PT5S"
   },
   "critiqueLoop": {
     "cPhaseLowSeveritySkipAfter": 3,
-    "e10NoProgressHoldAfter": 3
+    "e10NoProgressHoldAfter": 3,
+    "telemetryHook": {
+      "command": "notify-critique-telemetry"
+    }
   },
   "reviewEscalation": {
     "changesRequestedFirstEscalation": "PT24H",
@@ -80,7 +84,8 @@
   "issueAuthoring": {
     "maxClarificationRounds": 3,
     "authoringLabelName": "status:authoring",
-    "authoringStaleAge": "PT4H"
+    "authoringStaleAge": "PT4H",
+    "heartbeatCoalesceWindow": "PT2M"
   },
   "autopilotSuitability": {
     "floor": 3,
@@ -93,7 +98,8 @@
   "labels": {
     "roadmapLabelName": "roadmap",
     "blockedByHumanLabelName": "status:blocked-by-human",
-    "needsDecisionLabelName": "status:needs-decision"
+    "needsDecisionLabelName": "status:needs-decision",
+    "untrustedLabelerLogins": ["triage-bot"]
   },
   "mergeGate": {
     "soloCodeownerAdminFallback": "auto-admin-retry"
