@@ -23,7 +23,12 @@
 // `suitability-triage.mts`'s own CLI glue, which the issue does not name as
 // part of the extraction.
 import { normalizeContentionPath } from './discover-shared-file-overlap.mjs';
+import { stripMarkdownCodeRegions } from './markdown-code.mjs';
+import { escapeRegex } from './marker-regex.mjs';
 
+/** Default `{prefix}` for every marker this module parses, matching
+ * `autopilot-suitability.mts`'s own default. */
+const DEFAULT_MARKER_PREFIX = 'idd-skill';
 /** Upper bound on the #1484 bounded merged-PR scan (mirrors B2.0's own
  * documented `gh pr list --limit 50`). */
 const MERGED_PR_SCAN_LIMIT = 50;
@@ -181,7 +186,240 @@ export const SUITABILITY_REJECTION_PREFIX = 'A4.5 suitability gate rejection';
 // never invents a token the protocol doesn't recognize.
 const SUITABILITY_REJECTION_OUTCOME_PATTERN =
   /outcome:\s*(unclear|needs-decision|blocked-by-human|duplicate|out-of-scope|invalid)\b/i;
-const SUITABILITY_REJECTION_CHECK_PATTERN = /Check\s+\d+\s*\([^)]+\)/i;
+const SUITABILITY_REJECTION_CHECK_PATTERN_GLOBAL = /Check\s+\d+\s*\([^)]+\)/gi;
+const SUITABILITY_REJECTION_FAILURE_VERB_PATTERN = /\bfail(?:s|ed|ing)?\b/gi;
+/**
+ * Distance between two half-open text spans `[aStart, aEnd)` and
+ * `[bStart, bEnd)`: 0 when they overlap or touch, otherwise the gap between
+ * the nearer edges. Codex and CodeRabbit review findings on PR #2732 both
+ * caught that comparing match *start* positions alone (as an earlier
+ * revision of this function did) misattributes a failure verb to the wrong
+ * check once check names have different lengths -- e.g. "Check 4
+ * (Duplicate or Superseded Work) fails, while Check 5 (Actionability)
+ * passes": Check 5's short *start*-to-start gap to "fails" can read as
+ * closer than Check 4's own, immediately-adjacent *span*-to-span gap.
+ * Measuring from the nearer span edge instead of the start alone fixes
+ * this regardless of either match's length.
+ */
+function spanDistance(aStart, aEnd, bStart, bEnd) {
+  if (aEnd <= bStart) {
+    return bStart - aEnd;
+  }
+  if (bEnd <= aStart) {
+    return aStart - bEnd;
+  }
+  return 0;
+}
+/**
+ * Extract the `Check N (<Name>)` excerpt describing the comment's actual
+ * failed check, not merely an incidentally-mentioned one (#2708). A
+ * rejection comment may mention more than one check in the same sentence --
+ * one it actually fails, and another cited only for context. Both relative
+ * orderings occur in practice ("Check 5 (Actionability) was previously
+ * cited, but on review this time it fails Check 7 (Verifiability)" vs.
+ * "Check 7 (Verifiability): ... Check 5 (Actionability) passes ... outcome:
+ * ..."), and both place every `Check N (...)` mention before the trailing
+ * `outcome:` line -- so neither "first match", "last match", nor anchoring
+ * to the `outcome:` line's position can discriminate the two shapes; each
+ * of those gets one shape right and the other wrong.
+ *
+ * The signal that actually discriminates them is not position, it is that
+ * the failed check is described with a failure verb ("fails"/"failed"/
+ * "failing") near its own mention, while a merely-cited check is not. When
+ * a failure verb appears anywhere in the body, this returns the `Check N
+ * (...)` mention closest to it ({@link spanDistance} between the two
+ * matched spans, not merely their start positions -- see that function's
+ * own doc comment for why; ties keep the earlier mention). When no failure
+ * verb appears at all -- the common case: a
+ * comment stating its verdict as a headline, "Check N (<Name>): reason",
+ * with no other check mentioned, or a comment mentioning a second check
+ * only as passing with no failure verb anywhere -- this falls back to the
+ * first mention, the documented headline convention (the verdict check is
+ * stated first; anything mentioned afterward is context).
+ *
+ * This is a best-effort heuristic over freely-authored prose, not a
+ * guarantee against every possible phrasing: see {@link
+ * SuitabilityRejectionRecord.check}'s own doc comment for why that is an
+ * acceptable, bounded limitation here.
+ */
+function extractSuitabilityVerdictCheckMatch(body) {
+  const checkMatches = [
+    ...body.matchAll(SUITABILITY_REJECTION_CHECK_PATTERN_GLOBAL),
+  ];
+  if (checkMatches.length <= 1) {
+    return checkMatches[0] ?? null;
+  }
+  const failureVerbMatches = [
+    ...body.matchAll(SUITABILITY_REJECTION_FAILURE_VERB_PATTERN),
+  ];
+  if (failureVerbMatches.length === 0) {
+    return checkMatches[0] ?? null;
+  }
+  let closest = checkMatches[0] ?? null;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (const checkMatch of checkMatches) {
+    const checkStart = checkMatch.index ?? 0;
+    const checkEnd = checkStart + checkMatch[0].length;
+    for (const verbMatch of failureVerbMatches) {
+      const verbStart = verbMatch.index ?? 0;
+      const verbEnd = verbStart + verbMatch[0].length;
+      const distance = spanDistance(checkStart, checkEnd, verbStart, verbEnd);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = checkMatch;
+      }
+    }
+  }
+  return closest;
+}
+/** The four A4.5 outcomes with no dedicated label (#2243): the only values
+ * `<!-- {prefix}-triage-verdict: <outcome> -->` may declare.
+ * `needs-decision`/`blocked-by-human` are deliberately excluded -- those
+ * two already carry a stable label and never emit this marker. */
+export const SUITABILITY_TRIAGE_VERDICT_OUTCOMES = [
+  'unclear',
+  'duplicate',
+  'out-of-scope',
+  'invalid',
+];
+function isSuitabilityTriageVerdictOutcome(value) {
+  return SUITABILITY_TRIAGE_VERDICT_OUTCOMES.includes(value);
+}
+/**
+ * Canonical parser for the authored `<!-- {prefix}-triage-verdict:
+ * <outcome> -->` marker (#2243), mirroring
+ * `autopilot-suitability.mts`'s `parseAutopilotSuitabilityMarker` shape and
+ * fail-safe rules: `present` is false only when no marker appears at all;
+ * `outcome` is the single coherent token when it is one of
+ * {@link SUITABILITY_TRIAGE_VERDICT_OUTCOMES}, or `null` (fail-safe = "no
+ * marker") when the marker is absent, carries an unrecognized token, or
+ * repeats with disagreeing values; `malformed` is true only when a marker
+ * is present but does not resolve to a coherent outcome.
+ *
+ * `body` is masked with {@link stripMarkdownCodeRegions} first so a marker
+ * merely *quoted* in prose (for example, an issue or comment explaining
+ * this marker's own syntax in a code span, as #2243's own body does)
+ * cannot be mistaken for a live one (#1614, #1121 precedent).
+ */
+export function parseSuitabilityTriageVerdictMarker(
+  body,
+  markerPrefix = DEFAULT_MARKER_PREFIX,
+) {
+  const prefix =
+    typeof markerPrefix === 'string' && markerPrefix.length > 0
+      ? markerPrefix
+      : DEFAULT_MARKER_PREFIX;
+  const regex = new RegExp(
+    `<!--\\s*${escapeRegex(prefix)}-triage-verdict:\\s*([^\\s>]+)\\s*-->`,
+    'gi',
+  );
+  const text = stripMarkdownCodeRegions(String(body ?? ''));
+  let present = false;
+  let outcome = null;
+  let match = regex.exec(text);
+  while (match) {
+    present = true;
+    const raw = (match[1] ?? '').toLowerCase();
+    if (
+      !isSuitabilityTriageVerdictOutcome(raw) ||
+      (outcome !== null && raw !== outcome)
+    ) {
+      return { present: true, outcome: null, malformed: true };
+    }
+    outcome = raw;
+    match = regex.exec(text);
+  }
+  return { present, outcome, malformed: false };
+}
+/**
+ * Staleness anchor for a suitability-rejection marker (#2243): the latest
+ * GitHub `created_at` among the issue's own creation, every timeline
+ * `renamed` event (a title edit -- GitHub emits this event shape for a
+ * title change, never an `edited` event with a `changes.title` payload,
+ * #2762), every timeline `edited` event that changed the title or body
+ * (kept for defensive/forward compatibility; not an observed live shape
+ * as of #2762's investigation, see the worked evidence in that issue), and
+ * every timestamp in `bodyEditTimestamps` (GraphQL `Issue.userContentEdits
+ * { editedAt }` values -- the only place GitHub records a body edit,
+ * #2762). Mirrors `claim-approval-gate.mts`'s private
+ * `resolveLatestSubstantiveEditAt` -- duplicated rather than imported to
+ * keep this module's dependency-light, I/O-free kernel contract intact
+ * (see the file header). Returns `null` only when neither
+ * `issueCreatedAt` nor any qualifying event/timestamp yields a parseable
+ * value -- callers must treat that as "unknown", never as "always stale"
+ * or "never stale".
+ */
+export function resolveLatestSubstantiveIssueEditAt(
+  issueCreatedAt,
+  timelineEvents,
+  bodyEditTimestamps,
+) {
+  const candidates = [];
+  if (typeof issueCreatedAt === 'string' && issueCreatedAt) {
+    candidates.push(issueCreatedAt);
+  }
+  if (Array.isArray(timelineEvents)) {
+    for (const raw of timelineEvents) {
+      const event = raw ?? {};
+      const eventType = String(event.event ?? '');
+      const isRenamed = eventType === 'renamed';
+      const isEditedTitleOrBody =
+        eventType === 'edited' &&
+        Boolean(event.changes?.title || event.changes?.body);
+      if (!isRenamed && !isEditedTitleOrBody) {
+        continue;
+      }
+      if (typeof event.created_at === 'string' && event.created_at) {
+        candidates.push(event.created_at);
+      }
+    }
+  }
+  if (Array.isArray(bodyEditTimestamps)) {
+    for (const raw of bodyEditTimestamps) {
+      if (typeof raw === 'string' && raw) {
+        candidates.push(raw);
+      }
+    }
+  }
+  let latest = null;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const timestamp = Date.parse(candidate);
+    if (!Number.isFinite(timestamp) || timestamp < latestTimestamp) {
+      continue;
+    }
+    latestTimestamp = timestamp;
+    latest = candidate;
+  }
+  return latest;
+}
+/**
+ * Whether a trusted rejection record's marker outcome (#2243) is still
+ * current enough to exclude a candidate from Discover's selection pass:
+ * `true` only when the marker resolved to one of
+ * {@link SUITABILITY_TRIAGE_VERDICT_OUTCOMES} AND the rejection comment's
+ * own `createdAt` is at or after `latestSubstantiveEditAt` -- an issue
+ * legitimately improved after being rejected must not stay excluded by a
+ * now-stale marker. `latestSubstantiveEditAt: null` (unknown anchor) fails
+ * closed toward NOT excluding the candidate, matching this module's
+ * existing fail-safe direction: a wrongly-kept candidate still reaches
+ * A4.5, which re-derives its own verdict; a wrongly-skipped one is
+ * silently lost.
+ */
+export function isSuitabilityTriageVerdictCurrent(
+  record,
+  latestSubstantiveEditAt,
+) {
+  if (!record.markerOutcome || !latestSubstantiveEditAt) {
+    return false;
+  }
+  const rejectionTimestamp = Date.parse(record.createdAt);
+  const editTimestamp = Date.parse(latestSubstantiveEditAt);
+  if (!Number.isFinite(rejectionTimestamp) || !Number.isFinite(editTimestamp)) {
+    return false;
+  }
+  return rejectionTimestamp >= editTimestamp;
+}
 /**
  * Scan `comments` for the most recent trusted-actor `A4.5 suitability gate
  * rejection` comment (#1887): the acceptance-criteria-required detect-only
@@ -208,7 +446,11 @@ const SUITABILITY_REJECTION_CHECK_PATTERN = /Check\s+\d+\s*\([^)]+\)/i;
  * fail-safe contract (an untrusted rejection-shaped comment is never
  * treated as authoritative).
  */
-export function findTrustedSuitabilityRejection(comments, trustedMarkerLogins) {
+export function findTrustedSuitabilityRejection(
+  comments,
+  trustedMarkerLogins,
+  markerPrefix = DEFAULT_MARKER_PREFIX,
+) {
   const trusted = new Set(
     (trustedMarkerLogins ?? [])
       .map((login) =>
@@ -243,7 +485,11 @@ export function findTrustedSuitabilityRejection(comments, trustedMarkerLogins) {
     }
     latestTimestamp = timestamp;
     const outcomeMatch = SUITABILITY_REJECTION_OUTCOME_PATTERN.exec(body);
-    const checkMatch = SUITABILITY_REJECTION_CHECK_PATTERN.exec(body);
+    const checkMatch = extractSuitabilityVerdictCheckMatch(body);
+    const markerDetection = parseSuitabilityTriageVerdictMarker(
+      body,
+      markerPrefix,
+    );
     latest = {
       author,
       createdAt,
@@ -256,6 +502,7 @@ export function findTrustedSuitabilityRejection(comments, trustedMarkerLogins) {
       // downstream string comparison brittle. Normalize before returning.
       outcome: outcomeMatch ? (outcomeMatch[1]?.toLowerCase() ?? null) : null,
       check: checkMatch ? checkMatch[0] : null,
+      markerOutcome: markerDetection.malformed ? null : markerDetection.outcome,
     };
   }
   return latest;
@@ -287,6 +534,32 @@ export function findTrustedSuitabilityRejection(comments, trustedMarkerLogins) {
 export function evaluateHighConfidenceDuplicate(input, candidateIssueNumber) {
   if (!input) {
     return null;
+  }
+  // #2313, Signal 3: an exact-match branch-name lookup, checked first since
+  // it needs no candidate-file set and is unconditionally sufficient on its
+  // own -- a merged PR on this issue's own convention-computed branch name
+  // can only exist because it shipped this issue's work, closing keyword or
+  // Candidate-files overlap notwithstanding.
+  const branchNameMergedPr = input.branchNameMergedPr;
+  if (
+    branchNameMergedPr &&
+    typeof branchNameMergedPr === 'object' &&
+    Number.isInteger(branchNameMergedPr.number) &&
+    branchNameMergedPr.number > 0 &&
+    // CodeRabbit review finding on this PR: an empty `mergedAt` must not
+    // produce Signal 3 evidence -- every other merged-PR evidence shape in
+    // this module requires a merge timestamp (see `HighConfidenceMergedPr`
+    // above), and citing a merge with no date is a malformed/incomplete
+    // input, not a genuine hit. Falls through to the other signals instead
+    // of crashing or manufacturing a false positive.
+    typeof branchNameMergedPr.mergedAt === 'string' &&
+    branchNameMergedPr.mergedAt.length > 0
+  ) {
+    return {
+      pass: false,
+      evidence: `High-confidence duplicate: merged PR #${branchNameMergedPr.number} (merged ${branchNameMergedPr.mergedAt}) already shipped this issue's own IDD-naming-convention-computed branch, independent of closing-keyword presence or Candidate-files overlap.`,
+      tier: 'high-confidence',
+    };
   }
   const closedByMergedPrNumbers = (
     Array.isArray(input.closedByMergedPrNumbers)
@@ -396,6 +669,42 @@ export function buildMergedPrListArgs(repoRef, sinceIso) {
     'number,mergedAt',
     '--limit',
     String(MERGED_PR_SCAN_LIMIT),
+  ];
+}
+/**
+ * Argv for the exact-match merged-PR-by-branch-name lookup (#2313): finds
+ * any merged PR whose `headRefName` equals this issue's own
+ * IDD-naming-convention-computed branch name (`computeBranchName` in
+ * `branch-name.mts`). `--head` filters server-side to PRs with that exact
+ * head branch, so this is a single targeted lookup -- unlike
+ * {@link buildMergedPrListArgs}'s bounded recent-window scan above, no
+ * client-side iteration over unrelated merged PRs is needed.
+ *
+ * Requests `headRepositoryOwner` alongside the other fields (Copilot review
+ * finding on this PR) and raises `--limit` above 1: `gh pr list --head
+ * <branch>` (per `gh pr list --help`, the `"<owner>:<branch>" syntax` is
+ * "not supported") matches on head branch NAME alone, which can also return
+ * a merged PR from a FORK that happens to use the same branch name -- a
+ * `headRepositoryOwner` mismatch would otherwise misclassify an issue as a
+ * high-confidence duplicate even though the in-repo convention branch was
+ * never actually merged. The caller filters to entries whose
+ * `headRepositoryOwner.login` matches the repository owner before treating
+ * any result as a hit.
+ */
+export function buildMergedPrByBranchArgs(repoRef, branchName) {
+  return [
+    'pr',
+    'list',
+    '--repo',
+    repoRef,
+    '--head',
+    branchName,
+    '--state',
+    'merged',
+    '--json',
+    'number,headRefName,mergedAt,headRepositoryOwner',
+    '--limit',
+    '10',
   ];
 }
 /**

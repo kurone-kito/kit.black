@@ -59,7 +59,14 @@ const LIVE_CONFIG_CANDIDATE_FILES = [
   '.github/idd/config.json',
   'idd-policy.json',
 ];
-const NODE_ENGINES = '^22.22.2 || >=24.2.0';
+const NODE_ENGINES = '^22.23.2 || ^24.2.0 || >=26.0.0';
+// Deliberately not a hardcoded release number: a literal version string
+// would silently go stale at the next release with no drift guard (unlike
+// NODE_ENGINES, which audit-docs.mjs's ENGINES_RANGE_MIRRORS keeps honest)
+// -- exactly the misleading-output class idd-skill#1923 exists to fix. Only
+// reached for a foreign/missing package.json root; the source repo,
+// package-manager, and ephemeral-npx paths always read the real version.
+const PACKAGE_VERSION_FALLBACK = 'unknown';
 const SCRIPT_FILE_EXTENSIONS = ['.mjs', '.js', '.json'];
 // Runtime data files a helper reads at execution time (not via `import`),
 // so the import-graph walk cannot discover them. A consumer that vendors
@@ -79,16 +86,12 @@ const EXTRA_RUNTIME_FILES = new Map([
       'schemas/forced-handoff-marker.schema.json',
       'schemas/idd-merge-execute.schema.json',
       'schemas/live-status-digest.schema.json',
-      'schemas/local-validation-evidence.schema.json',
-      'schemas/onboarding-hearing-catalog.schema.json',
-      'schemas/onboarding-hearing-transcript.schema.json',
       'schemas/phase-graph.json',
       'schemas/phase-graph.schema.json',
       'schemas/policy.schema.json',
       'schemas/pre-merge-readiness.schema.json',
-      'schemas/provider-health.schema.json',
-      'schemas/provider-outage-declaration.schema.json',
-      'schemas/provider-outage-park.schema.json',
+      'schemas/onboarding-hearing-catalog.schema.json',
+      'schemas/onboarding-hearing-transcript.schema.json',
       'fixtures/schemas/advisory-wait-state.invalid.json',
       'fixtures/schemas/advisory-wait-state.valid.json',
       'fixtures/schemas/claim-marker.invalid.json',
@@ -99,16 +102,16 @@ const EXTRA_RUNTIME_FILES = new Map([
       'fixtures/schemas/idd-merge-execute.valid.json',
       'fixtures/schemas/live-status-digest.invalid.json',
       'fixtures/schemas/live-status-digest.valid.json',
-      'fixtures/schemas/onboarding-hearing-catalog.invalid.json',
-      'fixtures/schemas/onboarding-hearing-catalog.valid.json',
-      'fixtures/schemas/onboarding-hearing-transcript.invalid.json',
-      'fixtures/schemas/onboarding-hearing-transcript.valid.json',
       'fixtures/schemas/phase-graph.invalid.json',
       'fixtures/schemas/phase-graph.valid.json',
       'fixtures/schemas/policy.invalid.json',
       'fixtures/schemas/policy.valid.json',
       'fixtures/schemas/pre-merge-readiness.invalid.json',
       'fixtures/schemas/pre-merge-readiness.valid.json',
+      'fixtures/schemas/onboarding-hearing-catalog.invalid.json',
+      'fixtures/schemas/onboarding-hearing-catalog.valid.json',
+      'fixtures/schemas/onboarding-hearing-transcript.invalid.json',
+      'fixtures/schemas/onboarding-hearing-transcript.valid.json',
     ],
   ],
 ]);
@@ -140,7 +143,7 @@ const HELPER_COMMANDS = [
     entryPath: 'scripts/audit-authored-issue.mjs',
     vendoredCommand: 'node scripts/audit-authored-issue.mjs',
     description:
-      'Mechanically audit a drafted issue body against the issue-authoring contract: the autopilot-suitability marker, its blocked-by-human cross-field rule, markerPrefix consistency, required headings, dependency-marker rules, and visible/hidden footer agreement.',
+      'Mechanically audit a drafted issue body against the issue-authoring contract: the autopilot-suitability marker, its blocked-by-human cross-field rule, markerPrefix consistency, required headings, dependency-marker rules, visible/hidden footer agreement, and (given pre-fetched comments) the owner-marker/publication-token trail.',
   },
   {
     id: 'audit-pr-cleanup',
@@ -149,6 +152,15 @@ const HELPER_COMMANDS = [
     entryPath: 'scripts/audit-pr-cleanup.mjs',
     vendoredCommand: 'node scripts/audit-pr-cleanup.mjs',
     description: 'Audit or apply post-merge comment cleanup.',
+  },
+  {
+    id: 'authoring-owner-provenance',
+    scriptName: 'idd:authoring-owner-provenance',
+    binName: 'idd-authoring-owner-provenance',
+    entryPath: 'scripts/authoring-owner-provenance.mjs',
+    vendoredCommand: 'node scripts/authoring-owner-provenance.mjs',
+    description:
+      "Compare a live issue body sha256 against that same issue's own trusted mode=acquire authoring-owner marker digest (review-fix-loop-cutoff provenance check).",
   },
   {
     id: 'branch-conflict-state',
@@ -205,6 +217,33 @@ const HELPER_COMMANDS = [
     vendoredCommand: 'node scripts/claim-lock.mjs',
     description:
       'Acquire, reacquire, or inspect a worktree-local same-machine claim lock.',
+  },
+  {
+    id: 'clone-lock',
+    scriptName: 'idd:clone-lock',
+    binName: 'idd-clone-lock',
+    entryPath: 'scripts/clone-lock.mjs',
+    vendoredCommand: 'node scripts/clone-lock.mjs',
+    description:
+      'Serialize a git worktree add/remove or fetch against the shared primary clone across concurrent sessions.',
+  },
+  {
+    id: 'critique-delegate',
+    scriptName: 'idd:critique-delegate',
+    binName: 'idd-critique-delegate',
+    entryPath: 'scripts/idd-critique-delegate.mjs',
+    vendoredCommand: 'node scripts/idd-critique-delegate.mjs',
+    description:
+      'Resolve the effective C1 critiqueLoop.delegate (repository-local, then user-global).',
+  },
+  {
+    id: 'critique-telemetry-hook',
+    scriptName: 'idd:critique-telemetry-hook',
+    binName: 'idd-critique-telemetry-hook',
+    entryPath: 'scripts/idd-critique-telemetry-hook.mjs',
+    vendoredCommand: 'node scripts/idd-critique-telemetry-hook.mjs',
+    description:
+      'Resolve the effective C-phase critiqueLoop.telemetryHook and, with --invoke, fire-and-forget invoke it.',
   },
   {
     id: 'discover-orphan-filter',
@@ -324,6 +363,16 @@ const HELPER_COMMANDS = [
     description: 'Render or apply the optional live status digest.',
   },
   {
+    id: 'local-validation-evidence',
+    scriptName: 'idd:local-validation-evidence',
+    binName: 'idd-local-validation-evidence',
+    entryPath: 'scripts/local-validation-evidence.mjs',
+    vendoredCommand: 'node scripts/local-validation-evidence.mjs',
+    description:
+      'Resolve or record HEAD-pinned local validation evidence for the pre-merge-readiness report during an Actions outage.',
+    contractPaths: ['schemas/local-validation-evidence.schema.json'],
+  },
+  {
     id: 'merge-execute',
     scriptName: 'idd:merge-execute',
     binName: 'idd-merge-execute',
@@ -368,6 +417,36 @@ const HELPER_COMMANDS = [
     vendoredCommand: 'node scripts/pre-merge-readiness.mjs',
     description: 'Collect read-only F2/F3 merge-gate evidence.',
     contractPaths: ['schemas/pre-merge-readiness.schema.json'],
+  },
+  {
+    id: 'provider-health',
+    scriptName: 'idd:provider-health',
+    binName: 'idd-provider-health',
+    entryPath: 'scripts/provider-health.mjs',
+    vendoredCommand: 'node scripts/provider-health.mjs',
+    description:
+      'Read-only, cross-pull-request healthy/degraded/unavailable/unknown verdict for advisory-review and ci-actions.',
+    contractPaths: ['schemas/provider-health.schema.json'],
+  },
+  {
+    id: 'provider-outage-declaration',
+    scriptName: 'idd:provider-outage-declaration',
+    binName: 'idd-provider-outage-declaration',
+    entryPath: 'scripts/provider-outage-declaration.mjs',
+    vendoredCommand: 'node scripts/provider-outage-declaration.mjs',
+    description:
+      'Resolve a repository-scoped outage-relief declaration and evaluate or record its per-pull-request relief.',
+    contractPaths: ['schemas/provider-outage-declaration.schema.json'],
+  },
+  {
+    id: 'provider-outage-park',
+    scriptName: 'idd:provider-outage-park',
+    binName: 'idd-provider-outage-park',
+    entryPath: 'scripts/provider-outage-park.mjs',
+    vendoredCommand: 'node scripts/provider-outage-park.mjs',
+    description:
+      'Read-only list of parked pull requests, or (--park) post a park marker for one blocked solely by an unavailable provider service.',
+    contractPaths: ['schemas/provider-outage-park.schema.json'],
   },
   {
     id: 'rerun-advisory-convergence',
@@ -415,6 +494,15 @@ const HELPER_COMMANDS = [
     description: 'Collect read-only review activity and CI snapshot evidence.',
   },
   {
+    id: 'review-comment-origin',
+    scriptName: 'idd:review-comment-origin',
+    binName: 'idd-review-comment-origin',
+    entryPath: 'scripts/review-comment-origin.mjs',
+    vendoredCommand: 'node scripts/review-comment-origin.mjs',
+    description:
+      'Classify review-thread comments as IDD-originated or ordinary human chatter.',
+  },
+  {
     id: 'review-disposition-verify',
     scriptName: 'idd:review-disposition-verify',
     binName: 'idd-review-disposition-verify',
@@ -452,6 +540,24 @@ const HELPER_COMMANDS = [
     contractPaths: ['schemas/stalled-session-quiet-check.schema.json'],
   },
   {
+    id: 'suggest-untrusted-labelers',
+    scriptName: 'idd:suggest-untrusted-labelers',
+    binName: 'idd-suggest-untrusted-labelers',
+    entryPath: 'scripts/idd-suggest-untrusted-labelers.mjs',
+    vendoredCommand: 'node scripts/idd-suggest-untrusted-labelers.mjs',
+    description:
+      'Sweep GET /repos/{owner}/{repo}/issues/events to completion and report distinct bot logins that produced a labeled event, with a count each (read-only).',
+  },
+  {
+    id: 'suitability-close-execute',
+    scriptName: 'idd:suitability-close-execute',
+    binName: 'idd-suitability-close-execute',
+    entryPath: 'scripts/suitability-close-execute.mjs',
+    vendoredCommand: 'node scripts/suitability-close-execute.mjs',
+    description:
+      'Evaluate the #1485 gated A4.5 high-confidence duplicate/superseded close (dry-run) and, with --apply, post the evidence comment, close the issue, and release the suitability-close coordination claim.',
+  },
+  {
     id: 'suitability-triage',
     scriptName: 'idd:suitability-triage',
     binName: 'idd-suitability-triage',
@@ -459,6 +565,15 @@ const HELPER_COMMANDS = [
     vendoredCommand: 'node scripts/suitability-triage.mjs',
     description:
       'Evaluate A4.5 suitability checks and map deterministic outcomes.',
+  },
+  {
+    id: 'sweep-authoring-markers',
+    scriptName: 'idd:sweep-authoring-markers',
+    binName: 'idd-sweep-authoring-markers',
+    entryPath: 'scripts/sweep-authoring-markers.mjs',
+    vendoredCommand: 'node scripts/sweep-authoring-markers.mjs',
+    description:
+      'Fetch-driven hide-on-supersede sweep for authoring-owner / authoring-publication-intent markers: fetches one or more issues via GraphQL, classifies and filters superseded candidates, and minimizes them via minimize-superseded-markers.mjs.',
   },
 ];
 /**
@@ -599,6 +714,10 @@ export function buildHelperRuntimeManifest({
   const selectedProfiles = normalizedProfile
     ? { [normalizedProfile]: profileCatalog[normalizedProfile] }
     : profileCatalog;
+  const runningBuild = {
+    version: packageMetadata.version,
+    commandListScope: 'running-build',
+  };
   return {
     version: 1,
     sourceRepository: packageMetadata.repository,
@@ -607,6 +726,11 @@ export function buildHelperRuntimeManifest({
     packageSpecPinHint: PACKAGE_SPEC_PIN_HINT,
     nodeEngines: packageMetadata.nodeEngines,
     packageManager: normalizedPackageManager,
+    // commandCatalog above always reflects this running build's own
+    // HELPER_COMMANDS, never the --package-spec target -- runningBuild
+    // discloses that scope machine-readably, plus this build's own
+    // version, independent of --profile (idd-skill#1923).
+    runningBuild,
     recommendation,
     availableProfiles: [...PROFILE_NAMES],
     commandCatalog,
@@ -751,6 +875,7 @@ export function resolveSourcePackageMetadata(packageRoot = PACKAGE_ROOT) {
     name: PACKAGE_NAME,
     repository: SOURCE_REPOSITORY,
     nodeEngines: NODE_ENGINES,
+    version: PACKAGE_VERSION_FALLBACK,
   };
   const packageJsonPath = resolve(packageRoot, 'package.json');
   if (!existsSync(packageJsonPath)) {
@@ -765,10 +890,20 @@ export function resolveSourcePackageMetadata(packageRoot = PACKAGE_ROOT) {
       name: PACKAGE_NAME,
       repository: normalizeRepository(packageJson.repository),
       nodeEngines: String(packageJson.engines?.node ?? NODE_ENGINES),
+      version: normalizePackageVersion(packageJson.version),
     };
   } catch {
     return fallback;
   }
+}
+// A non-string version (e.g. an object, if package.json were malformed)
+// must fall back rather than stringify to a misleading value like
+// "[object Object]" -- the exact silently-wrong-output class idd-skill#1923
+// exists to fix (idd-skill#1947 review finding).
+function normalizePackageVersion(version) {
+  return typeof version === 'string' && version
+    ? version
+    : PACKAGE_VERSION_FALLBACK;
 }
 function normalizeRepository(repository) {
   if (typeof repository === 'string' && repository) {
@@ -955,6 +1090,13 @@ Options:
   --from-profile <package-manager|vendored-node|ephemeral-npx|instructions-only>
   --package-manager <npm|pnpm|yarn>
   --package-spec <npm-spec-or-tarball-url>
+                        Affects package-spec-derived output only (each
+                        profile's composed install/invocation strings, the
+                        managed dependency pin, the echoed packageSpec
+                        value); never changes commandCatalog, which always
+                        reflects this running build regardless of profile
+                        or package-spec (see "runningBuild" in the JSON
+                        output).
   --target-root <path>
   --help
 `);

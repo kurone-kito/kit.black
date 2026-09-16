@@ -6,19 +6,22 @@
 // generated .mjs. See docs/typescript-sources.md.
 import { parseCliArgs } from './cli-args.mjs';
 import { isAuthorizedForcedHandoffActor } from './collaborator-permission.mjs';
-import { GH_TEXT_LOOP_TIMEOUT_OPTIONS, ghText } from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
+import { listActivationNonces } from './marker-helpers.mjs';
 import { normalizePolicyConfig } from './policy-helpers.mjs';
 import {
   buildForcedHandoffEnableGate,
   DEFAULT_STALE_AGE_MS,
-  findActivationNonceWinner,
   isStaleByAge,
   normalizeLinkedPrReference,
   parseClaimComment,
   parseReleaseComment,
-  resolveActiveClaim,
+  resolveActiveClaimWithForcedHandoffTrace,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 const LEGACY_CLAIM_PATTERN =
   /^<!--\s*claimed-by:\s+(\S+)\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+branch:\s+([^\s>]+)\s*-->(?:\s*|\s*\n\s*_[^\n]*\bIDD\b[^\n]*_\s*)$/i;
@@ -38,6 +41,7 @@ const RESUME_CLAIM_ROUTING_FLAG_SPEC = {
   '--issue': { type: 'string' },
   '--owner': { type: 'string' },
   '--repo': { type: 'string' },
+  '--gh-token': { type: 'string' },
   '--token': { type: 'string' },
   '--claim-id': { type: 'string' },
   '--nonce': { type: 'string' },
@@ -105,9 +109,11 @@ export function evaluateResumeClaimRouting(input, options = {}) {
   const laterCompetingClaim = state.activeClaim
     ? findLaterCompetingClaim(events, state.activeClaim)
     : null;
-  const activationNonceWinner = state.activeClaim
-    ? findActivationNonceWinner(events, state.activeClaim.claimId)
-    : null;
+  const activationNonces = state.activeClaim
+    ? listActivationNonces(events, state.activeClaim.claimId)
+    : [];
+  const activationNonceWinner =
+    activationNonces.length > 0 ? activationNonces[0] : null;
   const nonceChecked = normalizeToken(input.nonce);
   const warnings = [...state.warnings];
   let routeState = 'unclaimed';
@@ -173,6 +179,13 @@ export function evaluateResumeClaimRouting(input, options = {}) {
       routeState = 'disputed';
       action = 'stop';
       reason = 'activation-nonce-mismatch';
+    } else if (!nonceChecked && activationNonces.length >= 2) {
+      // #1529: omitting --nonce is no longer a full opt-out once 2+
+      // trusted activation-nonce markers exist. A cold resume cannot tell
+      // which marker is its own (`agent-id` is shared), so fail closed.
+      routeState = 'disputed';
+      action = 'stop';
+      reason = 'cold-recovery-activation-nonce-collision';
     } else {
       routeState = 'already_owned';
       action = 'keep';
@@ -230,11 +243,27 @@ export function evaluateResumeClaimRouting(input, options = {}) {
     evidence: {
       trusted_event_count: events.length,
       new_format_claim_seen: state.mode === 'new-format',
-      legacy_claim_seen: state.mode === 'legacy-only',
+      legacy_claim_seen: state.hasLegacyClaimMarker,
       same_second_contenders: sameSecondContenders,
       later_competing_claim: laterCompetingClaim,
       activation_nonce_winner: activationNonceWinner,
+      activation_nonce_count: activationNonces.length,
+      forced_handoff: toForcedHandoffEvidence(state.appliedForcedHandoff),
     },
+  };
+}
+/** Render {@link ActiveClaimResolution.appliedForcedHandoff} for JSON output. */
+function toForcedHandoffEvidence(applied) {
+  if (!applied) {
+    return null;
+  }
+  return {
+    old_agent_id: applied.oldAgentId,
+    old_claim_id: applied.oldClaimId,
+    new_agent_id: applied.newAgentId,
+    new_claim_id: applied.newClaimId,
+    forced_by: applied.forcedBy,
+    timestamp: applied.createdAt ?? null,
   };
 }
 /**
@@ -284,36 +313,39 @@ function runCli() {
   if (!Number.isInteger(args.issue) || (args.issue ?? 0) <= 0) {
     throw new Error('--issue is required and must be a positive integer');
   }
-  if (args.token) {
-    process.env.GH_TOKEN = args.token;
-    process.env.GITHUB_TOKEN = args.token;
+  if (args.ghToken) {
+    process.env.GH_TOKEN = args.ghToken;
+    process.env.GITHUB_TOKEN = args.ghToken;
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repository = `${owner}/${repo}`;
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
   const policy = loadPolicy(args.policy);
   const staleAgeMs = args.staleAgeMs > 0 ? args.staleAgeMs : policy.staleAgeMs;
   const trustedLogins = resolveTrustedLogins({
     fromArgs: args.trustedMarkerLogins,
     fromPolicy: policy.trustedMarkerActors,
-    currentLogin: ghText(
-      ['api', 'user', '--jq', '.login'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    ),
+    currentLogin: port.resolveViewerLogin(),
   });
   const trustedSet = new Set(trustedLogins.map((login) => login.toLowerCase()));
-  const comments = fetchIssueComments(repository, args.issue);
-  const issue = ghJson(['api', `repos/${repository}/issues/${args.issue}`]);
+  const comments = fetchIssueComments(port, args.issue);
+  const rawIssue = port.getWorkItem(args.issue ?? 0);
+  if (!rawIssue) {
+    throw new Error(`issue #${args.issue} not found`);
+  }
+  // Remapped back to the raw REST (snake_case) shape the output block
+  // below expects -- ProviderWorkItem's camelCase fields (and getWorkItem's
+  // uppercased state) are a port-level convention, not this file's
+  // pre-migration contract.
+  const issue = {
+    number: rawIssue.number,
+    title: rawIssue.title,
+    state: rawIssue.state.toLowerCase(),
+    html_url: rawIssue.htmlUrl,
+    url: rawIssue.url,
+  };
   const forcedHandoffEnabled = policy.forcedHandoff.mode === 'human-gated';
   const forcedHandoffAuthorityPolicy = policy.forcedHandoff.authorityPolicy;
   const permissionCache = new Map();
@@ -323,7 +355,7 @@ function runCli() {
   // the lookup entirely when forced-handoff mode is off — the gate never
   // honors a handoff then, so the PR context would go unused.
   const expectedLinkedPrReferences = forcedHandoffEnabled
-    ? fetchOpenLinkedPrReferences(repository, args.issue)
+    ? fetchOpenLinkedPrReferences(port, args.issue)
     : new Set();
   const routingEvents = comments.map((comment) => ({
     body: comment.body ?? '',
@@ -412,6 +444,15 @@ function resolveClaimState(events, nowIso, staleAgeMs, options = {}) {
     (event) =>
       parseClaimComment(event.body ?? '', event.createdAt ?? '') !== null,
   );
+  // hasLegacyClaimMarker records whether any legacy-format marker was ever
+  // posted, independent of whether the 'new-format' branch below ignores it
+  // in favor of a co-existing new-format claim (#2317's follow-up finding:
+  // `legacyClaim` alone conflates "no legacy marker existed" with "one
+  // existed but new-format priority skipped resolving it").
+  const hasLegacyClaimMarker = events.some(
+    (event) =>
+      parseLegacyClaimComment(event.body ?? '', event.createdAt ?? '') !== null,
+  );
   const warnings = [];
   const onAnomalousHeartbeat = ({ claimId, activeBranch, heartbeatBranch }) => {
     warnings.push(
@@ -437,8 +478,8 @@ function resolveClaimState(events, nowIso, staleAgeMs, options = {}) {
       );
     }
   };
-  const activeClaim = hasNewFormatClaim
-    ? resolveActiveClaim(events, {
+  const claimTrace = hasNewFormatClaim
+    ? resolveActiveClaimWithForcedHandoffTrace(events, {
         isTrustedAuthor: () => true, // events were already filtered by caller
         isForcedHandoffEnabled,
         isAuthorizedForcedHandoff,
@@ -461,10 +502,12 @@ function resolveClaimState(events, nowIso, staleAgeMs, options = {}) {
   if (hasNewFormatClaim) {
     return {
       mode: 'new-format',
-      activeClaim,
+      activeClaim: claimTrace?.activeClaim ?? null,
+      appliedForcedHandoff: claimTrace?.appliedForcedHandoff ?? null,
       warnings,
       legacyClaim: null,
       legacyReleased: false,
+      hasLegacyClaimMarker,
     };
   }
   const orderedEvents = [...events].sort(compareEvents);
@@ -472,9 +515,11 @@ function resolveClaimState(events, nowIso, staleAgeMs, options = {}) {
   return {
     mode: 'legacy-only',
     activeClaim: null,
+    appliedForcedHandoff: null,
     warnings,
     legacyClaim: legacy.claim,
     legacyReleased: legacy.released,
+    hasLegacyClaimMarker,
   };
 }
 function resolveLegacyClaimState(orderedEvents, _nowIso, _staleAgeMs) {
@@ -663,10 +708,67 @@ function compareEvents(left, right) {
   }
   return compareIso(left.createdAt, right.createdAt);
 }
+function warnDeprecatedFlag(deprecated, canonical) {
+  process.stderr.write(
+    `warning: ${deprecated} is deprecated; use ${canonical} instead.\n`,
+  );
+}
+/**
+ * Find `flag`'s last occurrence in `argv`, recognizing both the
+ * two-token form (`--flag value`) and the single-token `--flag=value`
+ * form `parseCliArgs` also accepts.
+ */
+function findLastFlagOccurrenceIndex(argv, flag) {
+  const equalsPrefix = `${flag}=`;
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    if (argv[index] === flag || argv[index].startsWith(equalsPrefix)) {
+      return index;
+    }
+  }
+  return -1;
+}
+/**
+ * Resolve a canonical/deprecated flag pair: whichever flag's LAST
+ * occurrence comes later in argv wins when both spellings are given
+ * together (matches `pre-merge-readiness.mts`'s `--claim-id` /
+ * `--expected-claim-id` precedent). `-1` (never given) sorts before any
+ * real index, so an absent flag never wins against one that was
+ * actually passed.
+ */
+function resolveLastGivenAlias(
+  argv,
+  canonicalFlag,
+  canonicalValue,
+  deprecatedFlag,
+  deprecatedValue,
+) {
+  if (canonicalValue === undefined) {
+    return deprecatedValue;
+  }
+  if (deprecatedValue === undefined) {
+    return canonicalValue;
+  }
+  const lastCanonicalIndex = findLastFlagOccurrenceIndex(argv, canonicalFlag);
+  const lastDeprecatedIndex = findLastFlagOccurrenceIndex(argv, deprecatedFlag);
+  return lastDeprecatedIndex > lastCanonicalIndex
+    ? deprecatedValue
+    : canonicalValue;
+}
 function parseArgs(argv) {
   const { values, help } = parseCliArgs(argv, RESUME_CLAIM_ROUTING_FLAG_SPEC);
   const issueToken = values.issue;
   const staleAgeMsToken = values['stale-age-ms'];
+  const ghToken = resolveLastGivenAlias(
+    argv,
+    '--gh-token',
+    values['gh-token'],
+    '--token',
+    values.token,
+  );
+  const deprecatedTokenValue = values.token;
+  if (deprecatedTokenValue !== undefined) {
+    warnDeprecatedFlag('--token', '--gh-token');
+  }
   return {
     // Both --issue and --stale-age-ms are kept as lenient Number.parseInt
     // (not the canonical-integer helper), matching the pre-migration
@@ -680,7 +782,7 @@ function parseArgs(argv) {
     issue: issueToken === undefined ? null : Number.parseInt(issueToken, 10),
     owner: values.owner ?? '',
     repo: values.repo ?? '',
-    token: values.token ?? '',
+    ghToken: ghToken ?? '',
     claimId: values['claim-id'] ?? '',
     nonce: values.nonce ?? '',
     now: values.now ?? '',
@@ -694,7 +796,8 @@ function parseArgs(argv) {
 }
 function printHelp() {
   process.stdout.write(`Usage:
-  node scripts/resume-claim-routing.mjs --issue <number> [--owner <owner>] [--repo <repo>] [--token <token>] [--claim-id <token>] [--nonce <token>] [--now <ISO8601>] [--policy <path>] [--stale-age-ms <ms>] [--trusted-marker-logins "<a,b,...>"] [--fresh-claim-gate]
+  node scripts/resume-claim-routing.mjs --issue <number> [--owner <owner>] [--repo <repo>] [--gh-token <token>] [--claim-id <token>] [--nonce <token>] [--now <ISO8601>] [--policy <path>] [--stale-age-ms <ms>] [--trusted-marker-logins "<a,b,...>"] [--fresh-claim-gate]
+  Deprecated aliases (one release): --token -> --gh-token
 
   --fresh-claim-gate  emit the write-side A5(c) claimability verdict for the
                       issue from current marker state, ignoring --claim-id (a
@@ -708,9 +811,11 @@ function printHelp() {
                       earliest nonce among however many were posted). A
                       mismatch means a second, independent session activated
                       the identical claim-id -- routes to "disputed" the same
-                      as a later-competing-claim loss. Omit --nonce, or leave
-                      the claim-id's nonce not posted, to skip the comparison
-                      (unchanged pre-#1522 behavior).
+                      as a later-competing-claim loss. Omit --nonce when
+                      the claim-id has 0 or 1 trusted nonce to skip the
+                      comparison. Omit --nonce when 2+ trusted nonces exist
+                      and this session has no local nonce: route to
+                      disputed/stop (cold-recovery collision, #1529).
 
 Output (selected fields; the JSON also carries repository / issue / policy /
 warnings / evidence):
@@ -724,20 +829,16 @@ warnings / evidence):
 }
 `);
 }
-function fetchIssueComments(repository, issueNumber) {
-  const comments = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const pageItems = ghJson([
-      'api',
-      `repos/${repository}/issues/${issueNumber}/comments?per_page=${pageSize}&page=${page}`,
-    ]);
-    comments.push(...pageItems);
-    if (pageItems.length < pageSize) {
-      break;
-    }
-  }
-  return comments;
+function fetchIssueComments(port, issueNumber) {
+  // Remapped back to the raw snake_case shape this file's own consumers
+  // expect (body / created_at / user.login) -- listWorkItemComments's
+  // camelCase ProviderComment shape is a port-level convention, not this
+  // file's pre-migration contract.
+  return port.listWorkItemComments(issueNumber ?? 0).map((comment) => ({
+    body: comment.body,
+    created_at: comment.createdAt,
+    user: { login: comment.authorLogin },
+  }));
 }
 // Read-and-parse failure semantics (explicit path throws; default path
 // silently falls back only on ENOENT) are converged in idd-config.mts's
@@ -842,43 +943,14 @@ function normalizeToken(value) {
  * issue does not falsely block a legitimate `issue-only` forced handoff.
  * Fails safe to an empty set (no enforcement) on any lookup error.
  */
-function fetchOpenLinkedPrReferences(repository, issueNumber) {
+function fetchOpenLinkedPrReferences(port, issueNumber) {
   const references = new Set();
-  const [owner, repo] = repository.split('/');
-  if (!owner || !repo || !Number.isInteger(issueNumber)) {
+  if (!Number.isInteger(issueNumber)) {
     return references;
   }
-  const query =
-    'query($owner:String!,$repo:String!,$number:Int!){' +
-    'repository(owner:$owner,name:$repo){issue(number:$number){' +
-    // `last` so the most recent connect/disconnect events win: an issue
-    // with many such events must not have newer DISCONNECTED_EVENTs missed.
-    'timelineItems(last:100,itemTypes:[CONNECTED_EVENT,DISCONNECTED_EVENT])' +
-    '{nodes{__typename ' +
-    '... on ConnectedEvent{subject{__typename ... on PullRequest{number state}}} ' +
-    '... on DisconnectedEvent{subject{__typename ... on PullRequest{number}}}' +
-    '}}}}}';
-  let data;
-  try {
-    data = ghJson([
-      'api',
-      'graphql',
-      '-f',
-      `query=${query}`,
-      '-f',
-      `owner=${owner}`,
-      '-f',
-      `repo=${repo}`,
-      '-F',
-      `number=${issueNumber}`,
-    ]);
-  } catch {
-    return references;
-  }
-  const nodes = data?.data?.repository?.issue?.timelineItems?.nodes;
-  if (!Array.isArray(nodes)) {
-    return references;
-  }
+  // Number.isInteger(issueNumber) above already excludes null; TS can't
+  // narrow a plain boolean-returning call the way a type predicate would.
+  const nodes = port.getConnectedPullRequestEventsSingle(issueNumber);
   // The last connect/disconnect event per PR wins (timeline is chronological).
   const connected = new Map();
   const states = new Map();
@@ -906,18 +978,4 @@ function fetchOpenLinkedPrReferences(repository, issueNumber) {
     }
   }
   return references;
-}
-function ghJson(args) {
-  return JSON.parse(runGh(args).trim() || '[]');
-}
-function runGh(args) {
-  try {
-    return ghText(args, GH_TEXT_LOOP_TIMEOUT_OPTIONS);
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    if (stderr) {
-      throw new Error(`gh command failed: ${stderr}`);
-    }
-    throw error;
-  }
 }

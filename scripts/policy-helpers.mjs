@@ -3,6 +3,138 @@
 // The scripts/policy-helpers.mjs copy is generated from the .mts source
 // named above by `pnpm run build`. Edit the .mts source, never the
 // generated .mjs. See docs/typescript-sources.md.
+import { PROVIDER_IDS } from './provider-contract.mjs';
+
+/**
+ * A qualified branch name: a conservative safe charset (letters, digits,
+ * `.`, `_`, `/`, `-` only), with the first character excluding `-`, so
+ * every unquoted `{development-branch}` substitution in the IDD
+ * instruction files' shell command examples is safe by construction.
+ * #2273 review findings this closes: a value like `release/$next` or
+ * `release;stable` would otherwise be a valid, non-whitespace string
+ * that breaks or hijacks an unquoted shell expansion, and a
+ * leading-hyphen value like `-q` would be parsed as an option rather
+ * than a positional argument in a command such as
+ * `git fetch origin {development-branch}` -- disallowing only the
+ * *leading* `-` (mid-string and trailing hyphens remain valid, e.g.
+ * `release-2.0`) keeps that specific ambiguity closed without
+ * rejecting ordinary hyphenated branch names. Checked separately
+ * below: no `refs/heads/` prefix (this policy stores the short branch
+ * name IDD's own claim `branch:` field and `git worktree add <branch>`
+ * already expect, not a full ref).
+ */
+const DEVELOPMENT_BRANCH_PATTERN = /^[A-Za-z0-9._/][A-Za-z0-9._/-]*$/;
+const DEVELOPMENT_BRANCH_REFS_HEADS_PREFIX = 'refs/heads/';
+/**
+ * Inspect `developmentBranch` on a raw policy document without applying
+ * `normalizePolicyConfig`'s fail-safe-to-absent collapse -- mirrors
+ * {@link inspectCritiqueLoopDelegateLayer}'s absent/configured/malformed
+ * shape. Onboarding (and any future consumer) uses this to distinguish
+ * "no opinion, use the live default branch" from "operator configured an
+ * invalid value, fail closed" rather than treating both alike.
+ */
+export function inspectDevelopmentBranch(config) {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return { status: 'absent' };
+  }
+  if (!Object.hasOwn(config, 'developmentBranch')) {
+    return { status: 'absent' };
+  }
+  const value = config.developmentBranch;
+  if (typeof value !== 'string') {
+    return { status: 'invalid', reason: 'developmentBranch must be a string' };
+  }
+  if (!DEVELOPMENT_BRANCH_PATTERN.test(value)) {
+    return {
+      status: 'invalid',
+      reason:
+        'developmentBranch must be non-empty, contain only letters, digits, ".", "_", "/", or "-", and not start with "-"',
+    };
+  }
+  if (value.startsWith(DEVELOPMENT_BRANCH_REFS_HEADS_PREFIX)) {
+    return {
+      status: 'invalid',
+      reason: 'developmentBranch must be a branch name, not a refs/heads/ ref',
+    };
+  }
+  return { status: 'configured', branch: value };
+}
+/**
+ * Resolve the effective development-branch target for enforcement
+ * (#2272): a configured `developmentBranch` policy value wins outright;
+ * an absent policy falls back to the caller-supplied live default branch
+ * (`null` when that read failed or was never attempted, yielding
+ * `'unavailable'`); an invalid policy value fails closed regardless of
+ * whether a live default branch is available, since a present-but-broken
+ * policy must never be silently ignored in favor of the fallback.
+ *
+ * Pure and injectable by design -- `policy-helpers.mts` performs no `gh`
+ * I/O itself; every caller resolves `liveDefaultBranch` (or passes `null`
+ * when unread) via its own evidence reader, mirroring the onboarding
+ * `OnboardEvidenceReaders` injection pattern.
+ */
+export function resolveEffectiveDevelopmentBranch(config, liveDefaultBranch) {
+  const inspection = inspectDevelopmentBranch(config);
+  if (inspection.status === 'configured') {
+    return { status: 'configured', branch: inspection.branch };
+  }
+  if (inspection.status === 'invalid') {
+    return { status: 'invalid', reason: inspection.reason };
+  }
+  if (liveDefaultBranch === null || liveDefaultBranch === '') {
+    return { status: 'unavailable' };
+  }
+  return { status: 'default', branch: liveDefaultBranch };
+}
+/** GitHub is the only functional provider until an adapter lands (#2265). */
+export const DEFAULT_PROVIDER = 'github';
+/**
+ * Inspect the top-level `provider` key on a raw policy document without
+ * applying any default (#2265). Mirrors {@link inspectDevelopmentBranch}'s
+ * absent/configured/invalid shape: absent means "no opinion, GitHub stays
+ * the effective provider"; invalid means "an unrecognized provider value
+ * was present and must fail closed rather than be treated as absent or
+ * silently coerced to the default".
+ */
+export function inspectProvider(config) {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return { status: 'absent' };
+  }
+  if (!Object.hasOwn(config, 'provider')) {
+    return { status: 'absent' };
+  }
+  const value = config.provider;
+  if (typeof value !== 'string' || !PROVIDER_IDS.includes(value)) {
+    return {
+      status: 'invalid',
+      reason: `provider must be one of ${PROVIDER_IDS.join(', ')}`,
+    };
+  }
+  return { status: 'configured', provider: value };
+}
+/**
+ * Resolve the effective provider selection (#2265): a configured
+ * `provider` policy value wins outright; an absent policy resolves to
+ * `DEFAULT_PROVIDER` (`'github'`), producing the same effective policy as
+ * the current, provider-unaware configuration; an invalid value fails
+ * closed rather than silently falling back to the default, since a
+ * present-but-broken policy must never be treated the same as no opinion
+ * at all.
+ *
+ * Pure -- performs no I/O and needs no live evidence, unlike
+ * {@link resolveEffectiveDevelopmentBranch}, because there is no
+ * provider-agnostic "live default" to fall back to.
+ */
+export function resolveEffectiveProvider(config) {
+  const inspection = inspectProvider(config);
+  if (inspection.status === 'configured') {
+    return { status: 'configured', provider: inspection.provider };
+  }
+  if (inspection.status === 'invalid') {
+    return { status: 'invalid', reason: inspection.reason };
+  }
+  return { status: 'default', provider: DEFAULT_PROVIDER };
+}
 const HELPER_RUNTIME_PROFILES = new Set([
   'package-manager',
   'vendored-node',
@@ -29,6 +161,12 @@ const EXTERNAL_CHECK_WAIVER_MODES = new Set([
   'maintainer-authorized',
 ]);
 const CHECK_SELECTOR_MATCH_MODES = new Set(['exact', 'glob']);
+const CRITIQUE_LOOP_DELEGATE_MODES = new Set([
+  'fallback',
+  'combined',
+  'on-success',
+  'never',
+]);
 const LEGACY_ADVISORY_CAP_ROUTE_ALIASES = new Map([
   ['phase-default', 'phase-specific'],
   ['strict-hold', 'hold'],
@@ -135,13 +273,23 @@ export const POLICY_DEFAULTS = Object.freeze({
     activeClaimPreScanBatchSize: 10,
     selectionDesync: 'off',
     legacyRoots: Object.freeze([]),
+    // Empty string is the off state: A4 Step 2's milestone preference is
+    // disabled and ranking is unchanged, matching an absent key.
+    milestoneScope: '',
   }),
   claim: Object.freeze({
     verifySettleDelay: 'PT5S',
   }),
+  // Cast (not a literal `delegate` field) so this shares one declared type
+  // with the resolver's `critiqueLoop` below -- without it, TypeScript
+  // infers a two-branch union across normalizePolicyConfig's early
+  // `clone(POLICY_DEFAULTS)` return and its main return, and rejects
+  // `.critiqueLoop.delegate` on every caller. The runtime object still has
+  // no `delegate` key at all -- see the clone() doc comment's invariant.
   critiqueLoop: Object.freeze({
     cPhaseLowSeveritySkipAfter: 3,
     e10NoProgressHoldAfter: 3,
+    deferAfterRounds: 15,
   }),
   reviewEscalation: Object.freeze({
     changesRequestedFirstEscalation: 'PT24H',
@@ -164,10 +312,37 @@ export const POLICY_DEFAULTS = Object.freeze({
     roadmapLabelName: 'roadmap',
     blockedByHumanLabelName: 'status:blocked-by-human',
     needsDecisionLabelName: 'status:needs-decision',
+    // Added in #2669: string array default, resolved like the three
+    // sibling label-name fields above but via parseNonEmptyStringArray
+    // (fail-closed to [] on a non-array, an empty array, or any entry
+    // that isn't a non-empty string) instead of parseNonEmptyString.
+    untrustedLabelerLogins: Object.freeze([]),
   }),
   // Added in #1521 (solo-CODEOWNER autonomous `--admin` merge fallback).
   mergeGate: Object.freeze({
     soloCodeownerAdminFallback: 'auto-admin-retry',
+  }),
+  // Added in #2320. `declarationTarget` cast the same way as
+  // `critiqueLoop.delegate` above -- see that field's comment; the runtime
+  // object carries no `declarationTarget` key at all until configured.
+  providerOutage: Object.freeze({
+    maxValidity: 'PT24H',
+    // Added in #2321. Once this many pull requests are parked, sessions
+    // stop claiming new issues rather than manufacturing more unmergeable
+    // pull requests during a sustained outage.
+    maxParkedChanges: 10,
+  }),
+  // Added in #2323. Deliberately shorter than providerOutage.maxValidity
+  // (PT24H): a local validation run only stays representative of the
+  // working tree for a bounded window, not the whole outage window.
+  localValidationEvidence: Object.freeze({
+    maxAge: 'PT4H',
+  }),
+  // Added in #2319. `minCorroboratingPrs: 2` means a single pull request's
+  // failure burst always caps at `degraded`, never `unavailable`.
+  providerHealth: Object.freeze({
+    minCorroboratingPrs: 2,
+    samplingWindow: 'PT24H',
   }),
 });
 export function parseProjectCommandRows(text) {
@@ -241,6 +416,12 @@ export function inspectHelperRuntimeConfig(config) {
 }
 export function normalizePolicyConfig(config) {
   if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    // Cast so this early-return branch structurally unifies with the main
+    // return below on the optional `developmentBranch` key -- otherwise
+    // the function's inferred return type is a union where one member
+    // lacks the key entirely, and every call site reading
+    // `.developmentBranch` fails to typecheck regardless of which branch
+    // its own arguments would actually take.
     return clone(POLICY_DEFAULTS);
   }
   const c = config;
@@ -263,7 +444,101 @@ export function normalizePolicyConfig(config) {
     c?.markerTrustAllowCollaboratorMarkers,
     c?.allowCollaboratorMarkers,
   );
+  const critiqueLoopDelegate = parseCritiqueLoopDelegate(
+    c?.critiqueLoop?.delegate,
+  );
+  // Explicitly typed so the optional `delegate` key is part of one stable
+  // object type rather than a conditional-spread union TypeScript can't
+  // narrow -- see the Own-property-omitted comment below for why the key
+  // itself is conditionally present.
+  const critiqueLoop = {
+    cPhaseLowSeveritySkipAfter: parsePositiveInteger(
+      c?.critiqueLoop?.cPhaseLowSeveritySkipAfter,
+      POLICY_DEFAULTS.critiqueLoop.cPhaseLowSeveritySkipAfter,
+    ),
+    e10NoProgressHoldAfter: parsePositiveInteger(
+      c?.critiqueLoop?.e10NoProgressHoldAfter,
+      POLICY_DEFAULTS.critiqueLoop.e10NoProgressHoldAfter,
+    ),
+    deferAfterRounds: parsePositiveInteger(
+      c?.critiqueLoop?.deferAfterRounds,
+      POLICY_DEFAULTS.critiqueLoop.deferAfterRounds,
+    ),
+  };
+  // Own-property omitted (not set to `undefined`) when no delegate is
+  // configured, matching POLICY_DEFAULTS -- see the clone() doc comment on
+  // why POLICY_DEFAULTS itself never carries an undefined-valued key.
+  if (critiqueLoopDelegate) {
+    critiqueLoop.delegate = critiqueLoopDelegate;
+  }
+  // #2320: `declarationTarget` is a positive integer issue number, or
+  // absent -- absence disables the outage-relief declaration path
+  // entirely rather than falling back to some issue number. Same
+  // own-property-omitted shape as `critiqueLoop.delegate` above.
+  const rawDeclarationTarget = c?.providerOutage?.declarationTarget;
+  const providerOutage = {
+    maxValidity: parsePositiveDuration(
+      c?.providerOutage?.maxValidity,
+      POLICY_DEFAULTS.providerOutage.maxValidity,
+    ),
+    // #2321: an invalid or absent value falls back to the documented
+    // default deterministically -- see parsePositiveInteger above.
+    maxParkedChanges: parsePositiveInteger(
+      c?.providerOutage?.maxParkedChanges,
+      POLICY_DEFAULTS.providerOutage.maxParkedChanges,
+    ),
+  };
+  if (
+    typeof rawDeclarationTarget === 'number' &&
+    Number.isInteger(rawDeclarationTarget) &&
+    rawDeclarationTarget >= 1
+  ) {
+    providerOutage.declarationTarget = rawDeclarationTarget;
+  }
+  const localValidationEvidence = {
+    maxAge: parsePositiveDuration(
+      c?.localValidationEvidence?.maxAge,
+      POLICY_DEFAULTS.localValidationEvidence.maxAge,
+    ),
+  };
+  // #2319: read-only classifier tuning, never a gate. `minCorroboratingPrs`
+  // floors at 2 unconditionally -- the issue's own invariant ("a single
+  // pull request's failure burst can never resolve stronger than degraded")
+  // must hold regardless of configuration, so a configured `1` (or any
+  // value `parsePositiveInteger` would otherwise accept) falls back to the
+  // default rather than silently disabling the corroboration requirement.
+  const rawMinCorroboratingPrs = parsePositiveInteger(
+    c?.providerHealth?.minCorroboratingPrs,
+    POLICY_DEFAULTS.providerHealth.minCorroboratingPrs,
+  );
+  const providerHealth = {
+    minCorroboratingPrs:
+      rawMinCorroboratingPrs >= 2
+        ? rawMinCorroboratingPrs
+        : POLICY_DEFAULTS.providerHealth.minCorroboratingPrs,
+    samplingWindow: parsePositiveDuration(
+      c?.providerHealth?.samplingWindow,
+      POLICY_DEFAULTS.providerHealth.samplingWindow,
+    ),
+  };
+  // #2271: own-property-omitted on both 'absent' and 'invalid' -- mirrors
+  // `providerOutage.declarationTarget` above. Normalization never throws;
+  // a caller that must distinguish "no opinion" from "operator configured
+  // an invalid value" (fail closed rather than silently inheriting the
+  // live default) uses inspectDevelopmentBranch() directly on the raw
+  // config instead of this collapsed result.
+  const developmentBranchInspection = inspectDevelopmentBranch(config);
+  // Explicitly typed for the same reason as the `critiqueLoop`/`delegate`
+  // comment above: a conditional spread's own literal-object branches
+  // don't narrow into one stable optional-key type, so a caller reading
+  // `.developmentBranch` off the inferred return type sees it as missing
+  // on the "absent" union member instead of merely optional.
+  const developmentBranchField =
+    developmentBranchInspection.status === 'configured'
+      ? { developmentBranch: developmentBranchInspection.branch }
+      : {};
   return {
+    ...developmentBranchField,
     issueScope: parseEnum(
       c?.issueScope,
       ISSUE_SCOPES,
@@ -401,6 +676,14 @@ export function normalizePolicyConfig(config) {
         c?.discover?.legacyRoots,
         POLICY_DEFAULTS.discover.legacyRoots,
       ),
+      // parseNonEmptyString collapses absent, wrong-type, and empty-string
+      // input to the same '' (off) fallback -- schema validation (`type:
+      // "string"`) is what rejects a non-string config value with a named
+      // reason; this resolver only needs to fail safe to neutral.
+      milestoneScope: parseNonEmptyString(
+        c?.discover?.milestoneScope,
+        POLICY_DEFAULTS.discover.milestoneScope,
+      ),
     },
     claim: {
       verifySettleDelay: parseDuration(
@@ -408,16 +691,7 @@ export function normalizePolicyConfig(config) {
         POLICY_DEFAULTS.claim.verifySettleDelay,
       ),
     },
-    critiqueLoop: {
-      cPhaseLowSeveritySkipAfter: parsePositiveInteger(
-        c?.critiqueLoop?.cPhaseLowSeveritySkipAfter,
-        POLICY_DEFAULTS.critiqueLoop.cPhaseLowSeveritySkipAfter,
-      ),
-      e10NoProgressHoldAfter: parsePositiveInteger(
-        c?.critiqueLoop?.e10NoProgressHoldAfter,
-        POLICY_DEFAULTS.critiqueLoop.e10NoProgressHoldAfter,
-      ),
-    },
+    critiqueLoop,
     reviewEscalation: {
       changesRequestedFirstEscalation: parseDuration(
         c?.reviewEscalation?.changesRequestedFirstEscalation,
@@ -470,6 +744,20 @@ export function normalizePolicyConfig(config) {
         c?.labels?.needsDecisionLabelName,
         POLICY_DEFAULTS.labels.needsDecisionLabelName,
       ),
+      // #2669 PR review (Codex): this resolves to [] (trust everyone) on
+      // any malformed entry, including a mix of valid + invalid logins --
+      // fail-open for this denylist field, unlike an allowlist field's
+      // fail-to-[] (fail-closed). Kept matching the sibling label-name
+      // fields' resolution pattern per #2669's own acceptance criteria;
+      // no consumer reads this list yet (see the schema description), so
+      // there is no live enforcement gap today. Reconsider the fail
+      // direction -- and whether schema validation alone is a sufficient
+      // guarantee for the consumer -- when #2671 designs the actual
+      // enforcement this list feeds.
+      untrustedLabelerLogins: parseNonEmptyStringArray(
+        c?.labels?.untrustedLabelerLogins,
+        POLICY_DEFAULTS.labels.untrustedLabelerLogins,
+      ),
     },
     mergeGate: {
       soloCodeownerAdminFallback: parseEnum(
@@ -478,6 +766,9 @@ export function normalizePolicyConfig(config) {
         POLICY_DEFAULTS.mergeGate.soloCodeownerAdminFallback,
       ),
     },
+    providerOutage,
+    localValidationEvidence,
+    providerHealth,
   };
 }
 export function resolveCollaboratorMarkerTrust(config, envValue = '') {
@@ -576,7 +867,7 @@ export function selectDesyncedIndex(token, bandSize) {
  *
  * Exported only so its equivalence can be unit-tested directly; every
  * production call site stays inside this file. `structuredClone` (global
- * since Node 17, well below this repo's `^22.22.2 || >=24` floor) replaces
+ * since Node 17, well below this repo's `^22.23.2 || ^24.2 || >=26` floor) replaces
  * the previous `JSON.parse(JSON.stringify(value))` round-trip.
  * `structuredClone` differs from a JSON round-trip on several axes —
  * non-exhaustively: it throws on functions; it preserves `Date`, `Map`,
@@ -585,11 +876,12 @@ export function selectDesyncedIndex(token, bandSize) {
  * normalization. This list is deliberately not treated as exhaustive —
  * what matters for this swap is not enumerating every divergence axis,
  * but that `POLICY_DEFAULTS` (below) never contains a value on *any* of
- * them. All 8 call sites in this file were enumerated before making this
- * swap: `normalizePolicyConfig`'s `clone(POLICY_DEFAULTS)`, plus 7 calls
- * across `parsePositiveIntegerArray` and `parseCheckSelectors`, which
- * only ever clone `POLICY_DEFAULTS` itself or one of its own frozen
- * sub-arrays (`discover.legacyRoots`, `ciGate.externalChecks.advisory`,
+ * them. All 10 call sites in this file were enumerated before making this
+ * swap: `normalizePolicyConfig`'s `clone(POLICY_DEFAULTS)`, plus 9 calls
+ * across `parsePositiveIntegerArray`, `parseNonEmptyStringArray`, and
+ * `parseCheckSelectors`, which only ever clone `POLICY_DEFAULTS` itself or
+ * one of its own frozen sub-arrays (`discover.legacyRoots`,
+ * `labels.untrustedLabelerLogins`, `ciGate.externalChecks.advisory`,
  * `.waivable` — all `[]`). `POLICY_DEFAULTS` is a plain, deeply-frozen
  * literal of strings, finite numbers, booleans, and empty arrays only —
  * no function, `Date`, `Map`, `BigInt`, `RegExp`, typed array, exotic
@@ -689,6 +981,49 @@ function parsePositiveIntegerArray(value, fallback) {
 function parseNonEmptyString(value, fallback) {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
 }
+/**
+ * Parse a config array of non-blank strings (e.g. GitHub logins), such as
+ * `labels.untrustedLabelerLogins`. Mirrors `parsePositiveIntegerArray`'s
+ * fail-closed shape: a non-array, empty array, or any entry that is empty
+ * or whitespace-only after trimming falls back to `fallback` as a whole
+ * rather than dropping just the bad entries, so a typo'd login cannot
+ * silently vanish from the set. A surviving entry is itself trimmed
+ * (matches `readWorktreeGuardBranchPatterns` in `idd-doctor.mts`): an
+ * entry with incidental surrounding whitespace otherwise passes but never
+ * matches a real login.
+ *
+ * Caution for a denylist-semantics caller (#2669 PR review, Codex): "fail
+ * closed to `fallback`" is directionally safe only when `fallback` is the
+ * maximally *restrictive* value for that field -- true for an allowlist
+ * (`fallback: []` denies everyone) but the opposite for a denylist
+ * (`fallback: []` trusts everyone). `labels.untrustedLabelerLogins` is a
+ * denylist, so one malformed entry alongside otherwise-valid logins
+ * silently drops every previously-declared untrusted login, not just the
+ * bad one. Schema validation (`minItems: 1`, non-empty `items`) is the
+ * actual enforcement boundary before this ever runs; this fallback is
+ * defense-in-depth for callers that bypass it. Partial-preserve filtering
+ * would not fully close this either -- a misspelled-but-non-empty login
+ * still passes this parser and simply matches nothing downstream. See the
+ * call site below for why this is deliberately left unchanged for now.
+ */
+function parseNonEmptyStringArray(value, fallback) {
+  if (!Array.isArray(value) || value.length === 0) {
+    return clone(fallback);
+  }
+  const normalized = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      return clone(fallback);
+    }
+    // Trim surviving entries: matches readWorktreeGuardBranchPatterns's
+    // same rationale (idd-doctor.mts) -- a configured entry with
+    // incidental surrounding whitespace (e.g. "triage-bot ") otherwise
+    // passes validation but never matches a real login, silently
+    // covering nothing.
+    normalized.push(entry.trim());
+  }
+  return normalized;
+}
 function parseCheckSelectors(value, fallback) {
   if (!Array.isArray(value) || value.length === 0) {
     return clone(fallback);
@@ -723,6 +1058,244 @@ function parseCheckSelectors(value, fallback) {
     });
   }
   return normalized;
+}
+/**
+ * Parse `critiqueLoop.delegate`. Unlike the other `critiqueLoop` fields,
+ * absence is not defaulted to a concrete value -- a non-object, an unknown
+ * nested key, or a missing/whitespace-only `command` all normalize to
+ * `undefined` (no delegate configured) so a direct `normalizePolicyConfig`
+ * caller can never accept a shape the schema's `additionalProperties: false`
+ * / `command` pattern would reject (#2207 review).
+ */
+function parseCritiqueLoopDelegate(value) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value;
+  const candidateKeys = Object.keys(candidate);
+  if (candidateKeys.some((key) => key !== 'command' && key !== 'mode')) {
+    return undefined;
+  }
+  // Object.keys() above already excludes inherited keys, but a plain
+  // property read (candidate.command) still walks the prototype chain --
+  // require command/mode to be own properties so a crafted object (e.g.
+  // Object.create({ command: '...' })) can't supply either through
+  // inheritance instead of being rejected as absent (#2207 review).
+  if (!Object.hasOwn(candidate, 'command')) {
+    return undefined;
+  }
+  const command = parseNonEmptyString(candidate.command, '');
+  if (!command || command.trim() === '') {
+    return undefined;
+  }
+  return {
+    command,
+    mode: Object.hasOwn(candidate, 'mode')
+      ? parseEnum(candidate.mode, CRITIQUE_LOOP_DELEGATE_MODES, 'fallback')
+      : 'fallback',
+  };
+}
+const INVALID_LOCAL_DELEGATE_REASON = 'invalid-repository-local-delegate';
+/**
+ * Inspect `critiqueLoop.delegate` on a raw policy document without applying
+ * `normalizePolicyConfig`'s fail-safe-to-undefined collapse. Distinguishes
+ * absence, the explicit JSON `null` disable sentinel, a configured object,
+ * and a present-but-malformed value.
+ */
+export function inspectCritiqueLoopDelegateLayer(config) {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return { status: 'absent' };
+  }
+  if (!Object.hasOwn(config, 'critiqueLoop')) {
+    return { status: 'absent' };
+  }
+  const critiqueLoop = config.critiqueLoop;
+  if (
+    typeof critiqueLoop !== 'object' ||
+    critiqueLoop === null ||
+    Array.isArray(critiqueLoop)
+  ) {
+    // A present non-object `critiqueLoop` is a local configuration error:
+    // fail closed rather than treating it as "no delegate" and inheriting
+    // a user-global object.
+    return { status: 'malformed', reason: INVALID_LOCAL_DELEGATE_REASON };
+  }
+  if (!Object.hasOwn(critiqueLoop, 'delegate')) {
+    return { status: 'absent' };
+  }
+  const value = critiqueLoop.delegate;
+  if (value === null) {
+    return { status: 'disabled' };
+  }
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const candidate = value;
+    if (Object.hasOwn(candidate, 'mode')) {
+      const mode = candidate.mode;
+      if (typeof mode !== 'string' || !CRITIQUE_LOOP_DELEGATE_MODES.has(mode)) {
+        return {
+          status: 'malformed',
+          reason: INVALID_LOCAL_DELEGATE_REASON,
+        };
+      }
+    }
+  }
+  const parsed = parseCritiqueLoopDelegate(value);
+  if (parsed) {
+    return { status: 'configured', delegate: parsed };
+  }
+  return { status: 'malformed', reason: INVALID_LOCAL_DELEGATE_REASON };
+}
+/**
+ * Resolve the effective C1 delegate from a repository-local document and an
+ * optional user-global document. Pure: callers supply already-loaded JSON
+ * (or `undefined` for an absent global file). Never reads the filesystem.
+ *
+ * Order: local object, local `null` disable, global object, then none.
+ * A malformed local delegate is fail-closed and does not inherit global.
+ * A malformed or disabled global fragment is treated as absent.
+ */
+export function resolveEffectiveCritiqueLoopDelegate(input) {
+  const local = inspectCritiqueLoopDelegateLayer(input.localConfig);
+  if (local.status === 'configured' && local.delegate) {
+    return {
+      status: 'local',
+      source: 'repository-local',
+      delegate: local.delegate,
+    };
+  }
+  if (local.status === 'disabled') {
+    return { status: 'disabled', source: 'repository-local' };
+  }
+  if (local.status === 'malformed') {
+    return {
+      status: 'local-malformed',
+      source: 'repository-local',
+      reason: local.reason ?? INVALID_LOCAL_DELEGATE_REASON,
+    };
+  }
+  if (input.globalConfig === undefined || input.globalConfig === null) {
+    return { status: 'none', source: 'none' };
+  }
+  const global = inspectCritiqueLoopDelegateLayer(input.globalConfig);
+  if (global.status === 'configured' && global.delegate) {
+    return {
+      status: 'global',
+      source: 'user-global',
+      delegate: global.delegate,
+    };
+  }
+  return { status: 'none', source: 'none' };
+}
+/**
+ * Parse `critiqueLoop.telemetryHook`. Mirrors {@link parseCritiqueLoopDelegate}
+ * but for the simpler `{ command }`-only shape (#2679): a non-object, an
+ * unknown nested key (anything beyond `command`), or a missing/whitespace-only
+ * `command` all normalize to `undefined` (no hook configured), matching the
+ * schema's `additionalProperties: false` / `command`-only shape.
+ */
+function parseCritiqueLoopTelemetryHook(value) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value;
+  const candidateKeys = Object.keys(candidate);
+  if (candidateKeys.some((key) => key !== 'command')) {
+    return undefined;
+  }
+  // Object.keys() above already excludes inherited keys, but a plain
+  // property read (candidate.command) still walks the prototype chain --
+  // require command to be an own property, mirroring
+  // parseCritiqueLoopDelegate's own-property guard (#2207 review).
+  if (!Object.hasOwn(candidate, 'command')) {
+    return undefined;
+  }
+  const command = parseNonEmptyString(candidate.command, '');
+  if (!command || command.trim() === '') {
+    return undefined;
+  }
+  return { command };
+}
+const INVALID_LOCAL_TELEMETRY_HOOK_REASON =
+  'invalid-repository-local-telemetry-hook';
+/**
+ * Inspect `critiqueLoop.telemetryHook` on a raw policy document without
+ * applying `normalizePolicyConfig`'s fail-safe collapse. Mirrors
+ * {@link inspectCritiqueLoopDelegateLayer}'s absent / disabled / configured /
+ * malformed shape.
+ */
+export function inspectCritiqueLoopTelemetryHookLayer(config) {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return { status: 'absent' };
+  }
+  if (!Object.hasOwn(config, 'critiqueLoop')) {
+    return { status: 'absent' };
+  }
+  const critiqueLoop = config.critiqueLoop;
+  if (
+    typeof critiqueLoop !== 'object' ||
+    critiqueLoop === null ||
+    Array.isArray(critiqueLoop)
+  ) {
+    // A present non-object `critiqueLoop` is a local configuration error:
+    // fail closed rather than treating it as "no hook" and inheriting a
+    // user-global object.
+    return { status: 'malformed', reason: INVALID_LOCAL_TELEMETRY_HOOK_REASON };
+  }
+  if (!Object.hasOwn(critiqueLoop, 'telemetryHook')) {
+    return { status: 'absent' };
+  }
+  const value = critiqueLoop.telemetryHook;
+  if (value === null) {
+    return { status: 'disabled' };
+  }
+  const parsed = parseCritiqueLoopTelemetryHook(value);
+  if (parsed) {
+    return { status: 'configured', hook: parsed };
+  }
+  return { status: 'malformed', reason: INVALID_LOCAL_TELEMETRY_HOOK_REASON };
+}
+/**
+ * Resolve the effective C-phase telemetry hook from a repository-local
+ * document and an optional user-global document. Pure: callers supply
+ * already-loaded JSON (or `undefined` for an absent global file). Never
+ * reads the filesystem.
+ *
+ * Order: local object, local `null` disable, global object, then none --
+ * identical to {@link resolveEffectiveCritiqueLoopDelegate}'s resolution
+ * order. A malformed local hook is fail-closed and does not inherit global.
+ * A malformed or disabled global fragment is treated as absent.
+ */
+export function resolveEffectiveCritiqueLoopTelemetryHook(input) {
+  const local = inspectCritiqueLoopTelemetryHookLayer(input.localConfig);
+  if (local.status === 'configured' && local.hook) {
+    return {
+      status: 'local',
+      source: 'repository-local',
+      hook: local.hook,
+    };
+  }
+  if (local.status === 'disabled') {
+    return { status: 'disabled', source: 'repository-local' };
+  }
+  if (local.status === 'malformed') {
+    return {
+      status: 'local-malformed',
+      source: 'repository-local',
+      reason: local.reason ?? INVALID_LOCAL_TELEMETRY_HOOK_REASON,
+    };
+  }
+  if (input.globalConfig === undefined || input.globalConfig === null) {
+    return { status: 'none', source: 'none' };
+  }
+  const global = inspectCritiqueLoopTelemetryHookLayer(input.globalConfig);
+  if (global.status === 'configured' && global.hook) {
+    return {
+      status: 'global',
+      source: 'user-global',
+      hook: global.hook,
+    };
+  }
+  return { status: 'none', source: 'none' };
 }
 function hasConfiguredCollaboratorMarkerTrust(config) {
   const c = config;

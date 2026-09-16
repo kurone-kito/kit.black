@@ -5,15 +5,12 @@
 // source named above by `pnpm run build`. Edit the .mts source, never the
 // generated .mjs. See docs/typescript-sources.md.
 import { parseCliArgs } from './cli-args.mjs';
-import {
-  DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-  GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-  ghText,
-} from './gh-exec.mjs';
-import { deriveGhHttpStatus } from './gh-http-status.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
 import { normalizePolicyConfig } from './policy-helpers.mjs';
-import { parsePaginatedGhNdjson } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 const APPROVAL_POLICIES = new Set([
   'owners-and-maintainers-only',
@@ -35,6 +32,7 @@ const CLAIM_APPROVAL_GATE_FLAG_SPEC = {
   '--owner': { type: 'string' },
   '--repo': { type: 'string' },
   '--policy': { type: 'string' },
+  '--gh-token': { type: 'string' },
   '--token': { type: 'string' },
   '--generated-plan-updated-at': { type: 'string' },
   '--verbose': { type: 'boolean', default: false },
@@ -47,6 +45,9 @@ export function evaluateClaimApprovalGate(input, options = {}) {
   const issue = normalizeIssue(input.issue);
   const comments = normalizeComments(input.comments);
   const timelineState = normalizeTimeline(input.timeline);
+  const userContentEditsState = normalizeUserContentEdits(
+    input.userContentEdits,
+  );
   const policyState = normalizePolicy(input.policy);
   const generatedPlanState = detectGeneratedPlanUpdateAt({
     comments,
@@ -91,11 +92,17 @@ export function evaluateClaimApprovalGate(input, options = {}) {
   const authorPermission = issueAuthor
     ? normalizePermissionResult(resolvePermission(issueAuthor))
     : { known: false, permission: '', error: 'issue author missing' };
-  const authorSelfAuthorized = isAuthorizedByPolicy(
-    authorPermission.permission,
+  const associationSelfAuthorized = authorAssociationSelfAuthorizes(
+    issue.authorAssociation,
     policyState.maintainerApprovalActorPolicy,
   );
-  if (!authorPermission.known) {
+  const authorSelfAuthorized =
+    isAuthorizedByPolicy(
+      authorPermission.permission,
+      policyState.maintainerApprovalActorPolicy,
+    ) ||
+    (!authorPermission.known && associationSelfAuthorized);
+  if (!authorPermission.known && !associationSelfAuthorized) {
     ambiguity.push('issue-author-permission-unavailable');
     permissionAmbiguity = true;
   }
@@ -104,12 +111,15 @@ export function evaluateClaimApprovalGate(input, options = {}) {
     name: 'Issue author self-authorized',
     result: authorSelfAuthorized ? 'pass' : 'fail',
     evidence: authorSelfAuthorized
-      ? `Issue author ${issueAuthor} satisfies policy ${policyState.maintainerApprovalActorPolicy}.`
+      ? authorPermission.known
+        ? `Issue author ${issueAuthor} satisfies policy ${policyState.maintainerApprovalActorPolicy}.`
+        : `Issue author ${issueAuthor} author_association ${issue.authorAssociation} satisfies policy ${policyState.maintainerApprovalActorPolicy} without a collaborators-permission read (#2148).`
       : `Issue author ${issueAuthor || '(missing)'} does not satisfy policy ${policyState.maintainerApprovalActorPolicy}.`,
   });
   const latestSubstantiveEditAt = resolveLatestSubstantiveEditAt(
     issue,
     timelineState,
+    userContentEditsState,
   );
   const freshnessAnchor = maxTimestamp(
     latestSubstantiveEditAt,
@@ -165,6 +175,9 @@ export function evaluateClaimApprovalGate(input, options = {}) {
   if (!timelineKnown) {
     ambiguity.push('issue-timeline-unavailable');
   }
+  if (!userContentEditsState.known) {
+    ambiguity.push('issue-user-content-edits-unavailable');
+  }
   if (!generatedPlanState.known) {
     ambiguity.push('generated-plan-freshness-unavailable');
   }
@@ -219,29 +232,51 @@ function runCli() {
   if (!Number.isInteger(args.issue) || (args.issue ?? 0) <= 0) {
     throw new Error('--issue is required and must be a positive integer');
   }
-  if (args.token) {
-    process.env.GH_TOKEN = args.token;
-    process.env.GITHUB_TOKEN = args.token;
+  if (args.ghToken) {
+    process.env.GH_TOKEN = args.ghToken;
+    process.env.GITHUB_TOKEN = args.ghToken;
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repoRef = `${owner}/${repo}`;
-  const issue = ghJson(['api', `repos/${repoRef}/issues/${args.issue}`]);
-  const comments = ghApiJson(
-    `repos/${repoRef}/issues/${args.issue}/comments`,
-    true,
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
+  const rawIssue = port.getWorkItem(args.issue ?? 0);
+  if (!rawIssue) {
+    throw new Error(`issue #${args.issue} not found`);
+  }
+  // Remapped back to the raw REST (snake_case) shape normalizeIssue() and
+  // the output block below both already expect -- ProviderWorkItem's
+  // camelCase fields (and getWorkItem's uppercased state) are a port-level
+  // convention, not this file's pre-migration contract.
+  const issue = {
+    number: rawIssue.number,
+    title: rawIssue.title,
+    state: rawIssue.state.toLowerCase(),
+    html_url: rawIssue.htmlUrl,
+    url: rawIssue.url,
+    user: rawIssue.user,
+    author_association: rawIssue.authorAssociation,
+    labels: rawIssue.labels,
+    created_at: rawIssue.createdAt,
+    updated_at: rawIssue.updatedAt,
+  };
+  const comments = port.listWorkItemComments(args.issue ?? 0).map((c) => ({
+    user: { login: c.authorLogin },
+    body: c.body,
+    created_at: c.createdAt,
+  }));
+  const timelineState = fetchIssueTimeline(port, args.issue ?? 0);
+  // #2762: the raw fetch result (string[] on success, or the `null`
+  // failure sentinel) is passed straight through as `userContentEdits`
+  // below -- never flattened to a bare array the way `timeline:
+  // timelineState.events` above discards its own `known` flag. Flattening
+  // this one the same way would silently collapse a failed GraphQL read
+  // back to "known-empty" and reintroduce the bug this issue fixes.
+  const userContentEditsState = fetchIssueUserContentEdits(
+    port,
+    args.issue ?? 0,
   );
-  const timelineState = fetchIssueTimeline(repoRef, args.issue ?? 0);
   const policy = loadPolicy(args.policy);
   const permissionCache = new Map();
   const resolvePermission = (login) =>
@@ -256,6 +291,9 @@ function runCli() {
       issue,
       comments,
       timeline: timelineState.events,
+      userContentEdits: userContentEditsState.known
+        ? userContentEditsState.timestamps
+        : null,
       policy: policy.config,
       generatedPlanUpdatedAt: args.generatedPlanUpdatedAt,
     },
@@ -283,12 +321,70 @@ function runCli() {
         })),
     timelineAvailable: timelineState.known,
     timelineParseError: timelineState.parseError,
+    userContentEditsAvailable: userContentEditsState.known,
   };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+}
+function warnDeprecatedFlag(deprecated, canonical) {
+  process.stderr.write(
+    `warning: ${deprecated} is deprecated; use ${canonical} instead.\n`,
+  );
+}
+/**
+ * Find `flag`'s last occurrence in `argv`, recognizing both the
+ * two-token form (`--flag value`) and the single-token `--flag=value`
+ * form `parseCliArgs` also accepts.
+ */
+function findLastFlagOccurrenceIndex(argv, flag) {
+  const equalsPrefix = `${flag}=`;
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    if (argv[index] === flag || argv[index].startsWith(equalsPrefix)) {
+      return index;
+    }
+  }
+  return -1;
+}
+/**
+ * Resolve a canonical/deprecated flag pair: whichever flag's LAST
+ * occurrence comes later in argv wins when both spellings are given
+ * together (matches `pre-merge-readiness.mts`'s `--claim-id` /
+ * `--expected-claim-id` precedent). `-1` (never given) sorts before any
+ * real index, so an absent flag never wins against one that was
+ * actually passed.
+ */
+function resolveLastGivenAlias(
+  argv,
+  canonicalFlag,
+  canonicalValue,
+  deprecatedFlag,
+  deprecatedValue,
+) {
+  if (canonicalValue === undefined) {
+    return deprecatedValue;
+  }
+  if (deprecatedValue === undefined) {
+    return canonicalValue;
+  }
+  const lastCanonicalIndex = findLastFlagOccurrenceIndex(argv, canonicalFlag);
+  const lastDeprecatedIndex = findLastFlagOccurrenceIndex(argv, deprecatedFlag);
+  return lastDeprecatedIndex > lastCanonicalIndex
+    ? deprecatedValue
+    : canonicalValue;
 }
 function parseArgs(argv) {
   const { values, help } = parseCliArgs(argv, CLAIM_APPROVAL_GATE_FLAG_SPEC);
   const issueToken = values.issue;
+  const ghToken = resolveLastGivenAlias(
+    argv,
+    '--gh-token',
+    values['gh-token'],
+    '--token',
+    values.token,
+  );
+  const deprecatedTokenValue = values.token;
+  if (deprecatedTokenValue !== undefined) {
+    warnDeprecatedFlag('--token', '--gh-token');
+  }
   return {
     // Kept as lenient Number.parseInt (not the canonical-integer helper),
     // matching the pre-migration contract exactly: this file's own
@@ -300,7 +396,7 @@ function parseArgs(argv) {
     owner: values.owner ?? '',
     repo: values.repo ?? '',
     policy: values.policy ?? '',
-    token: values.token ?? '',
+    ghToken: ghToken ?? '',
     generatedPlanUpdatedAt: values['generated-plan-updated-at'] ?? '',
     verbose: values.verbose,
     help,
@@ -308,7 +404,8 @@ function parseArgs(argv) {
 }
 function printHelp() {
   process.stdout.write(`Usage:
-  node scripts/claim-approval-gate.mjs --issue <number> [--token <token>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--generated-plan-updated-at <ISO8601>] [--verbose]
+  node scripts/claim-approval-gate.mjs --issue <number> [--gh-token <token>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--generated-plan-updated-at <ISO8601>] [--verbose]
+  Deprecated aliases (one release): --token -> --gh-token
 
 Output schema:
 {
@@ -319,14 +416,20 @@ Output schema:
   "gateEnabled": true,
   "policy": {"skipIssueAuthorApprovalGate": false, "maintainerApprovalActorPolicy": "owners-and-maintainers-only", "approvalSignals": {"readyLabelName": "idd:ready", "labelFreshnessMode": "presence-only"}, "source": ".github/idd/config.json"},
   "checks": [{"id":"gate_enabled","name":"Issue-author gate enabled","result":"pass|fail","evidence":"..."}],
-  "timelineAvailable": true
+  "timelineAvailable": true,
+  "userContentEditsAvailable": true
 }
+
+#2762: the freshness anchor behind "ready_label_present" / "ready_comment_fresh" now also recognizes a timeline "renamed" event (a title edit) and GraphQL "userContentEdits.editedAt" (a body edit) -- the only place GitHub records either kind of real edit. "userContentEditsAvailable" reports whether that second GraphQL read succeeded; a failed read degrades the anchor to unknown ("freshness-undetermined") rather than falling back to the issue's own created_at.
 `);
 }
 function normalizeIssue(issue) {
   const i = issue;
   return {
     authorLogin: String(i?.user?.login ?? '')
+      .trim()
+      .toLowerCase(),
+    authorAssociation: String(i?.author_association ?? '')
       .trim()
       .toLowerCase(),
     labels: normalizeLabels(i?.labels),
@@ -462,16 +565,56 @@ function detectGeneratedPlanUpdateAt({ comments, override }) {
     .filter(Boolean);
   return { known: true, updatedAt: maxTimestamp(...generatedPlanComments) };
 }
-function resolveLatestSubstantiveEditAt(issue, timelineState) {
-  if (!timelineState.known) {
+/**
+ * Duplicates `supersession-detection.mts`'s
+ * `resolveLatestSubstantiveIssueEditAt` by design (see this file's module
+ * header note near that function's #2243 usage) rather than importing it,
+ * so this file's dependency surface stays unchanged. #2762 extends both in
+ * lockstep: a `renamed` timeline event counts as a title edit with no
+ * `changes` payload required (the real shape GitHub emits for a rename),
+ * and `userContentEditsState.timestamps` (GraphQL body-edit timestamps)
+ * feed the same anchor. Returns `null` when either source is unknown --
+ * see {@link UserContentEditsState}'s doc comment for why an *omitted*
+ * `userContentEdits` input does not count as "unknown" here.
+ */
+function resolveLatestSubstantiveEditAt(
+  issue,
+  timelineState,
+  userContentEditsState,
+) {
+  if (!timelineState.known || !userContentEditsState.known) {
     return null;
   }
   const editedAt = timelineState.events
-    .filter((event) => String(event?.event ?? '') === 'edited')
-    .filter((event) => event?.changes?.title || event?.changes?.body)
+    .filter((event) => {
+      const eventType = String(event?.event ?? '');
+      return (
+        eventType === 'renamed' ||
+        (eventType === 'edited' &&
+          Boolean(event?.changes?.title || event?.changes?.body))
+      );
+    })
     .map((event) => normalizeIso(event?.created_at))
     .filter(Boolean);
-  return maxTimestamp(issue.createdAt, ...editedAt);
+  return maxTimestamp(
+    issue.createdAt,
+    ...editedAt,
+    ...userContentEditsState.timestamps,
+  );
+}
+function normalizeUserContentEdits(edits) {
+  if (edits === undefined) {
+    return { known: true, timestamps: [] };
+  }
+  if (!Array.isArray(edits)) {
+    return { known: false, timestamps: [] };
+  }
+  return {
+    known: true,
+    timestamps: edits
+      .map((value) => normalizeIso(value))
+      .filter((value) => value !== null),
+  };
 }
 function findLatestReadyLabelEvent(events, readyLabelName) {
   if (!Array.isArray(events)) {
@@ -582,6 +725,23 @@ function deriveReason(state) {
   }
   return 'gate-disabled';
 }
+/** #2148: live issue `author_association` is enough for self-authorization
+ * when the collaborators-permission endpoint is unavailable. OWNER is
+ * always sufficient; MEMBER is accepted under the default
+ * owners-and-maintainers-only policy (the observed payload for an org
+ * owner when REST /permission 503s). */
+function authorAssociationSelfAuthorizes(association, policy) {
+  if (association === 'owner') {
+    return true;
+  }
+  if (association === 'member') {
+    return (
+      policy === 'owners-and-maintainers-only' ||
+      policy === 'all-write-permission-actors'
+    );
+  }
+  return false;
+}
 function isAuthorizedByPolicy(permission, policy) {
   if (policy === 'all-write-permission-actors') {
     return (
@@ -635,13 +795,9 @@ function maxTimestamp(...values) {
   normalized.sort(compareIso);
   return normalized[normalized.length - 1];
 }
-function fetchIssueTimeline(repoRef, issueNumber) {
+function fetchIssueTimeline(port, issueNumber) {
   try {
-    const events = ghApiJson(
-      `repos/${repoRef}/issues/${issueNumber}/timeline`,
-      true,
-      ['-H', 'Accept: application/vnd.github+json'],
-    );
+    const events = port.getWorkItemTimeline(issueNumber);
     return { known: true, events, parseError: '' };
   } catch (error) {
     // #1692: a `SyntaxError` means the gh call itself succeeded but its
@@ -656,6 +812,22 @@ function fetchIssueTimeline(repoRef, issueNumber) {
     return { known: false, events: [], parseError };
   }
 }
+/** #2762: mirrors {@link fetchIssueTimeline}'s try/catch shape. The CLI
+ * call site below reads `known` before forwarding `timestamps` to
+ * `evaluateClaimApprovalGate` -- unlike `timeline: timelineState.events`
+ * above, which forwards `events` unconditionally and silently loses its
+ * own `known: false` on failure -- so a genuine fetch failure here reaches
+ * the evaluator as the `null` sentinel, never a flattened empty array. */
+function fetchIssueUserContentEdits(port, issueNumber) {
+  try {
+    return {
+      known: true,
+      timestamps: port.getWorkItemUserContentEditTimestamps(issueNumber),
+    };
+  } catch {
+    return { known: false, timestamps: [] };
+  }
+}
 function resolveCollaboratorPermission({ owner, repo, login, cache }) {
   const normalized = String(login ?? '')
     .trim()
@@ -667,10 +839,11 @@ function resolveCollaboratorPermission({ owner, repo, login, cache }) {
   if (cached !== undefined) {
     return cached;
   }
-  const result = ghApiJsonWithStatus(
-    `repos/${owner}/${repo}/collaborators/${encodeURIComponent(normalized)}/permission`,
-  );
-  if (result.status === 404) {
+  const outcome = createGithubProviderAdapter(
+    owner,
+    repo,
+  ).getCollaboratorPermission(normalized);
+  if (outcome.outcome === 'not-collaborator') {
     const notCollaborator = {
       known: true,
       permission: 'none',
@@ -679,22 +852,23 @@ function resolveCollaboratorPermission({ owner, repo, login, cache }) {
     cache.set(normalized, notCollaborator);
     return notCollaborator;
   }
-  if (result.status !== 200) {
+  if (outcome.outcome === 'error') {
+    // Reconstructed (not outcome.error.message) to keep this file's
+    // pre-migration wording byte-exact -- see ProviderCollaboratorPermissionResult's
+    // `httpStatus` doc comment. `?? 0` matches the pre-migration
+    // ghApiJsonWithStatus's own "status could not be determined" sentinel.
     const unknownResult = {
       known: false,
       permission: '',
-      error: `permission lookup failed: ${result.status}`,
+      error: `permission lookup failed: ${outcome.httpStatus ?? 0}`,
     };
     cache.set(normalized, unknownResult);
     return unknownResult;
   }
-  const permission = String(result.body?.permission ?? '')
-    .trim()
-    .toLowerCase();
-  const known = permission.length > 0;
+  const known = outcome.permission.length > 0;
   const resolved = {
     known,
-    permission,
+    permission: outcome.permission,
     error: known ? '' : 'permission missing in response',
   };
   cache.set(normalized, resolved);
@@ -716,79 +890,4 @@ function loadPolicy(policyPath) {
       source,
     },
   };
-}
-function ghApiJson(path, paginate = false, extraArgs = []) {
-  const args = ['api', path, ...extraArgs];
-  // #1692: `--jq '.[]'` (not a bare `--paginate`) makes gh emit one JSON
-  // value per line, guaranteed newline-separated, for every element across
-  // every page. Without it, a whole-stdout `JSON.parse` (the prior
-  // behavior here) broke on any multi-page response -- `--paginate` alone
-  // concatenates each page's whole-array response, with no separator
-  // guaranteed on gh 2.45.0 (this repo's documented compatibility floor).
-  // Matches the NDJSON convention `gh-exec.mts`'s shared `ghApiJson` uses.
-  if (paginate) {
-    args.push('--paginate', '--jq', '.[]');
-  }
-  const raw = runGh(args, paginate).trim();
-  if (paginate) {
-    return parsePaginatedGhNdjson(raw);
-  }
-  return JSON.parse(raw || '[]');
-}
-function ghApiJsonWithStatus(path) {
-  try {
-    const body = JSON.parse(runGh(['api', path]).trim() || '{}');
-    return { status: 200, body };
-  } catch (error) {
-    // #1693: derive the real HTTP status via the shared gh-http-status.mts
-    // helper instead of grepping stderr only with a bespoke `/HTTP\s+(\d+)/`
-    // pattern -- that missed the JSON-error-body-in-stdout fallback
-    // deriveGhHttpStatus already applies (stdout now survives runGh's error
-    // wrapping too; see wrapGhError below). `0` preserves this function's
-    // existing "status could not be determined" sentinel (unchanged
-    // downstream contract: callers already treat any non-200/404 status,
-    // including 0, as "permission lookup failed").
-    const status = deriveGhHttpStatus(error);
-    return { status: status ?? 0, body: null };
-  }
-}
-function ghJson(args) {
-  return JSON.parse(runGh(args).trim() || '{}');
-}
-/**
- * Pure wrap step for {@link runGh}'s catch branch, exported so tests can
- * inject a raw execFileSync-shaped error directly instead of shelling out
- * to a real `gh` invocation (matching the mock-free-subprocess convention
- * documented in `tests/collaborator-permission.test.mts`).
- *
- * When stderr is present, wraps it into a fresh Error carrying both
- * `.stderr` and `.stdout`. #1693: the previous wrap carried `.stderr` only,
- * which silently dropped `.stdout` and defeated `deriveGhHttpStatus`'s
- * JSON-error-body-in-stdout fallback for every caller downstream of
- * `runGh` (this file's `ghApiJsonWithStatus`) -- `gh api` can print a JSON
- * error body to stdout even as it writes its human-readable diagnostic to
- * stderr. When stderr is empty, returns the original error unchanged: the
- * raw execFileSync error already carries `.stdout`/`.stderr`/`.status`
- * natively, so wrapping would only lose information.
- */
-export function wrapGhError(error) {
-  const stderr = String(error?.stderr ?? '').trim();
-  if (!stderr) {
-    return error;
-  }
-  const stdout = String(error?.stdout ?? '').trim();
-  const wrapped = new Error(`gh command failed: ${stderr}`);
-  wrapped.stderr = stderr;
-  wrapped.stdout = stdout;
-  return wrapped;
-}
-function runGh(args, paginate = false) {
-  try {
-    return ghText(args, {
-      ...GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-      ...(paginate ? { timeout: DEFAULT_GH_PAGINATED_TIMEOUT_MS } : {}),
-    });
-  } catch (error) {
-    throw wrapGhError(error);
-  }
 }

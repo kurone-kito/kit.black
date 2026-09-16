@@ -4,41 +4,47 @@
 // The scripts/pre-merge-readiness.mjs copy is generated from the .mts
 // source named above by `pnpm run build`. Edit the .mts source, never the
 // generated .mjs. See docs/typescript-sources.md.
-import { readFileSync } from 'node:fs';
 import {
-  readAdvisoryPrimaryBotLogin,
-  readAdvisoryRecoveryCycleCap,
-  readAdvisoryTerminalWindowMinutes,
-  readAdvisoryWaitPolicy,
+  ADVISORY_CONVERGENCE_WORKFLOW_PATH,
+  resolveSelfReferentialTriggerFiles,
+  verifySelfReferentialBootstrapWaiverRun,
+} from './advisory-convergence.mjs';
+import {
+  advisoryWaitSectionIsValid,
+  DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+  resolveAdvisoryConvergenceDeadlineMinutes,
+  resolveAdvisoryPrimaryBotLogin,
+  resolveAdvisoryRecoveryCycleCap,
+  resolveAdvisorySecondaryBotLogin,
+  resolveAdvisorySecondaryQuietWindowMinutes,
+  resolveAdvisoryWaitPolicy,
+  resolveEffectiveAdvisoryTerminalWindowMinutes,
+  resolveProviderOutageTerminalWindowMinutes,
+  SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON,
 } from './advisory-wait-policy.mjs';
 import { buildCopilotRecoverySummary } from './advisory-wait-state.mjs';
-import { parseCliArgs } from './cli-args.mjs';
+import { parseCanonicalIntegerOrNull, parseCliArgs } from './cli-args.mjs';
+import { isAuthorizedForcedHandoffActor } from './collaborator-permission.mjs';
 import {
-  isAuthorizedForcedHandoffActor,
-  readForcedHandoffAuthorityPolicy,
-  readForcedHandoffMode,
-} from './collaborator-permission.mjs';
-import {
-  DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-  GH_TEXT_LOOP_OPTIONS,
-  ghText,
-  safeGhText,
-} from './gh-exec.mjs';
+  normalizeAuthorityEvidence,
+  resolveCollaboratorAuthority,
+} from './external-check-waiver.mjs';
 import { deriveGhHttpStatus } from './gh-http-status.mjs';
-import { loadIddConfig } from './idd-config.mjs';
+import { loadTrustedIddConfig } from './idd-config.mjs';
 import {
+  inspectDevelopmentBranch,
   normalizePolicyConfig,
   parseIsoDurationToMs,
   resolveCollaboratorMarkerTrust,
+  resolveEffectiveDevelopmentBranch,
 } from './policy-helpers.mjs';
 import {
   buildPreMergeReadinessSummary,
   DEFAULT_STALE_AGE_MS,
   deriveIddAgentLogins,
-  findLastCopilotReviewCommit,
   normalizeTrustedMarkerLogins,
   operationalMarkerPrefix,
-  parsePaginatedGhNdjson,
+  parseExternalCheckWaiverComment,
   resolveAdvisoryBotLogins,
   resolveCodeownersForFiles,
   resolvePrFirstCommitAt,
@@ -46,6 +52,27 @@ import {
   resolveTrustedMarkerActors,
   selectCodeownersText,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
+import {
+  evaluateProviderOutageRelief,
+  resolveProviderOutageDeclaration,
+} from './provider-outage-declaration.mjs';
+// #2919: reused (not a new regex) to extract a live check-run's owning
+// workflow-run id from its `detailsUrl` for the bounded `workflowPath`
+// enrichment below -- no import cycle (this file already isn't imported
+// by `rerun-advisory-convergence.mts`). kurone-kito/idd-skill#2926: stays
+// the enrichment's EVIDENCE gate (is there a parseable citation at all,
+// is it consistent, is the distinct-citation count in budget) -- the
+// resolved PATH itself no longer comes from this parsed id (see
+// `listCheckRunWorkflowPaths`'s own doc comment in provider-port.mts).
+import { parseRunIdFromUrl } from './rerun-advisory-convergence.mjs';
+import {
+  fetchReviewsAndHeadCommit,
+  resolveLatestCopilotReviewClause,
+} from './review-clause.mjs';
 
 // GitHub's GraphQL `DateTime` scalar can't be null, so a `CheckRun` that
 // has not completed yet (and a `StatusContext`, which has no completedAt
@@ -108,6 +135,10 @@ export function normalizeStatusCheckRollupEntry(entry) {
       name: String(entry?.context ?? '').trim(),
       state: STATUS_CONTEXT_STATE_ALIASES[rawState] ?? rawState,
       completedAt: String(entry?.completedAt ?? ZERO_SENTINEL_TIMESTAMP),
+      // A legacy commit status has no separate start/complete lifecycle --
+      // it is reported as a single instant -- so `startedAt` reuses the
+      // same `completedAt` value rather than exposing a fabricated one.
+      startedAt: String(entry?.completedAt ?? ZERO_SENTINEL_TIMESTAMP),
       type: 'status-context',
       workflowName: '',
     };
@@ -123,6 +154,7 @@ export function normalizeStatusCheckRollupEntry(entry) {
     state:
       status === 'COMPLETED' ? conclusion || 'UNKNOWN' : status || 'UNKNOWN',
     completedAt: String(entry?.completedAt ?? ZERO_SENTINEL_TIMESTAMP),
+    startedAt: String(entry?.startedAt ?? ZERO_SENTINEL_TIMESTAMP),
     type: 'check-run',
     workflowName: String(entry?.workflowName ?? '').trim(),
   };
@@ -149,6 +181,7 @@ const PRE_MERGE_READINESS_FLAG_SPEC = {
   '--expected-agent-id': { type: 'string' },
   '--nonce': { type: 'string' },
   '--now': { type: 'string' },
+  '--claimless': { type: 'boolean', default: false },
   '--help': { type: 'boolean', short: 'h' },
 };
 /**
@@ -157,7 +190,20 @@ const PRE_MERGE_READINESS_FLAG_SPEC = {
  * `idd-merge-execute` helper so the F2/F3 gate logic is collected from
  * exactly one place (no duplicated gh plumbing or gate evaluation).
  */
-export function collectPreMergeReadiness(argv) {
+/**
+ * `createPort` is injectable (defaults to the real GitHub adapter) so a test
+ * can drive this collection entry end to end against
+ * `createFakeProviderAdapter` fixtures instead of a live `gh` process
+ * (#2267 AC4's "unit tests exercise the PR-facing state machine with a fake
+ * provider" -- see `pre-merge-readiness-collection-smoke.test.mts`). Neither
+ * production caller (this file's own CLI entry, `idd-merge-execute.mts`)
+ * passes a second argument, so both keep using the real adapter unchanged.
+ */
+export function collectPreMergeReadiness(
+  argv,
+  createPort = createGithubProviderAdapter,
+  loadTrustedConfig = loadTrustedIddConfig,
+) {
   const args = parseArgs(argv);
   // --help used to exit from inside the parseArgs token loop; relocated
   // here (the wrapper's help path) per #1451. Same external contract: the
@@ -170,31 +216,71 @@ export function collectPreMergeReadiness(argv) {
   if (!args.prNumber) {
     throw new Error('missing required --pr <number> argument');
   }
-  if (!args.claimIssueNumber) {
+  if (!args.claimless && !args.claimIssueNumber) {
     throw new Error('missing required --claim-issue <number> argument');
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_OPTIONS,
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createPort(owner, repo);
+  const viewerLogin = port.resolveViewerLoginSafe().viewerLogin;
+  const viewerAppSlug = port.resolveViewerAppSlugSafe().appSlug.toLowerCase();
+  // #1513: `mergeable`/`mergeStateStatus` are part of this same richest
+  // single `pr view` call (no extra network round-trip) so the branch-
+  // currency gate below can pair a live `BEHIND` state with the up-to-date-
+  // head requirement resolved from `branchRules`/`branchProtection`.
+  const snapshot = port.getChangeRequestReadinessSnapshot(args.prNumber);
+  const prHeadSha = snapshot.headSha;
+  const baseRefName = snapshot.baseRefName;
+  const prUrl = snapshot.url;
+  const prAuthorLogin = snapshot.authorLogin.toLowerCase();
+  const reviewDecision = snapshot.reviewDecision ?? '';
+  const mergeable = snapshot.mergeable;
+  const mergeStateStatus = snapshot.mergeStateStatus;
+  if (args.claimless) {
+    const closingRefs = Array.isArray(snapshot.closingIssuesReferences)
+      ? snapshot.closingIssuesReferences
+      : [];
+    if (closingRefs.length > 0) {
+      throw new Error(
+        '--claimless requires a PR with no closingIssuesReferences; pass --claim-issue instead',
+      );
+    }
+  }
+  // #2373: EVERY config-driven gate below resolves `.github/idd/config.json`
+  // from this ONE trusted-ref read, never a local worktree read -- the F3
+  // merge-gate helper normally runs from the claimed PR's own worktree
+  // (B1 creates it from the PR's branch), so a local read would return the
+  // PR branch's own possibly-edited copy of its policy file, letting a PR
+  // widen its own trustedMarkerActors, loosen a ciGate setting, or disguise
+  // its developmentBranchTarget check against itself. `baseRefName` -- the
+  // PR's base branch -- is the trust boundary; when a PR context cannot
+  // supply one (defensive only, `--pr` is required so this is normally
+  // non-empty), this falls back to the repository's live default branch,
+  // matching `developmentBranchTarget`'s own `liveDefaultBranch` fallback
+  // below. `--pr <number>` is a required argument on every path, including
+  // `--claimless` (checked above) -- confirmed no call site of this file
+  // (nor `idd-doctor.mts`, whose own `readTrustEmptyProtectionReads` is a
+  // distinct, root-scoped local reader unrelated to this one) invokes
+  // `collectPreMergeReadiness` without `--pr`, so this fallback is
+  // defensive-only, not a documented "no PR at all" entry point.
+  const trustedConfigRef =
+    baseRefName || port.getRepositoryDefaultBranch(owner, repo);
+  if (!trustedConfigRef) {
+    throw new Error(
+      `cannot resolve a trusted ref for .github/idd/config.json: PR #${args.prNumber} has no baseRefName and the repository's live default branch could not be determined`,
     );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
-  const repoRef = `${owner}/${repo}`;
-  const viewerLogin = safeGhText(
-    ['api', 'user', '--jq', '.login'],
-    GH_TEXT_LOOP_OPTIONS,
-  ).toLowerCase();
-  const viewerAppSlug = safeGhText(
-    ['api', 'app', '--jq', '.slug // .app_slug // empty'],
-    GH_TEXT_LOOP_OPTIONS,
-  ).toLowerCase();
-  const iddConfig = loadIddConfig();
+  }
+  const iddConfig = loadTrustedConfig(owner, repo, trustedConfigRef);
+  // Schema-validated once here, matching every `advisoryWait.*` resolver's
+  // own individual `read*` wrapper (advisory-wait-policy.mts) validating
+  // before it resolves -- an invalid `advisoryWait` section falls back to
+  // schema defaults for the WHOLE section rather than leaving a malformed
+  // field to whichever resolver reads it next.
+  const advisoryWaitConfig = advisoryWaitSectionIsValid(iddConfig)
+    ? iddConfig
+    : {};
   const { actors: configuredTrustedActors, source: trustedMarkerActorsSource } =
     resolveTrustedMarkerActors({
       flagValue: args.trustedMarkerLogins,
@@ -207,30 +293,26 @@ export function collectPreMergeReadiness(argv) {
       envValue: process.env.IDD_ADVISORY_BOT_LOGINS,
       config: iddConfig,
     });
-  const pr = ghJson([
-    'pr',
-    'view',
-    String(args.prNumber),
-    '-R',
-    repoRef,
-    '--json',
-    // #1513: `mergeable,mergeStateStatus` added to this existing call (no
-    // new network round-trip) so the branch-currency gate below can pair a
-    // live `BEHIND` state with the up-to-date-head requirement resolved
-    // from `branchRules`/`branchProtection`.
-    'headRefOid,baseRefName,url,author,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus',
-    '--jq',
-    '.',
-  ]);
-  const prHeadSha = String(pr.headRefOid ?? '');
-  const baseRefName = String(pr.baseRefName ?? '');
-  const prUrl = String(pr.url ?? '');
-  const prAuthorLogin = String(pr.author?.login ?? '').toLowerCase();
-  const reviewDecision = String(pr.reviewDecision ?? '');
-  const mergeable = String(pr.mergeable ?? '');
-  const mergeStateStatus = String(pr.mergeStateStatus ?? '');
+  // #2272: fail-closed development-branch invariant. Only reads the live
+  // repository default branch when the policy is silent (`'absent'`) --
+  // a configured or malformed value never needs it, so a repo with an
+  // explicit `developmentBranch` never pays this extra `gh api` call. Kept
+  // as its own lazy `getRepositoryDefaultBranch` call rather than reusing
+  // `trustedConfigRef` above: that value is eagerly resolved for every PR
+  // (`baseRefName` is normally non-empty), so merging the two would pay
+  // this call unconditionally instead of only on the rare-in-practice
+  // policy-silent path.
+  const developmentBranchInspection = inspectDevelopmentBranch(iddConfig);
+  const liveDefaultBranch =
+    developmentBranchInspection.status === 'absent'
+      ? port.getRepositoryDefaultBranch(owner, repo)
+      : null;
+  const developmentBranchTarget = {
+    ...resolveEffectiveDevelopmentBranch(iddConfig, liveDefaultBranch),
+    baseRefName,
+  };
   const encodedBaseRefName = encodeURIComponent(baseRefName);
-  // #1483: sourced from the same `gh pr view` call above (the
+  // #1483: sourced from the same `pr view` snapshot above (the
   // `statusCheckRollup` field), not a separate `gh pr checks` call --
   // `statusCheckRollup`'s GraphQL union already tags each entry with a
   // real producer identity (`__typename`: `CheckRun` vs. `StatusContext`,
@@ -240,15 +322,234 @@ export function collectPreMergeReadiness(argv) {
   // successive calls a few seconds apart returned different check-run
   // counts for the same PR), so this is the single source of truth for
   // both the check identity and its dedup discriminator.
-  const checks = (pr.statusCheckRollup ?? []).map(
-    normalizeStatusCheckRollupEntry,
-  );
-  const trustEmptyProtectionReads = readTrustEmptyProtectionReads();
+  const rawStatusCheckRollup = snapshot.statusCheckRollup ?? [];
+  // kurone-kito/idd-skill#2919: `checks` stays index-aligned 1:1 with
+  // `rawStatusCheckRollup` (a bare `.map`, never filtered) so the
+  // workflow-path enrichment immediately below can zip back into
+  // `rawStatusCheckRollup[index].detailsUrl` by plain array index --
+  // inserting a `.filter()`/`.slice()` between this line and that
+  // enrichment would silently break that invariant. `let`, not `const`:
+  // the enrichment step below reassigns it.
+  let checks = rawStatusCheckRollup.map(normalizeStatusCheckRollupEntry);
+  // kurone-kito/idd-skill#2919: resolve each LIVE `idd-advisory-convergence`
+  // check-run instance's own owning workflow FILE path -- distinct from its
+  // display name, which a different workflow file can share (see
+  // `CheckPayload.workflowPath`'s own doc comment and this issue's
+  // Background). Scoped to this ONE check name deliberately: it is the
+  // only one with a documented same-display-name-different-file collision
+  // scenario in this repository today (the concurrent `pull_request`/
+  // `pull_request_target` transition window `.github/workflows/
+  // idd-advisory-convergence.yml` itself documents). The producer-identity
+  // KEY widens for every `groupChecksByProducer` consumer regardless (see
+  // `protocol-helpers.mts`); only the SOURCING of real `workflowPath` data
+  // stays this narrow, so any other check name still benefits the moment a
+  // future caller populates its own `workflowPath` -- Residual (documented,
+  // not fixed here): this collector does not resolve `workflowPath` for
+  // any check name other than `idd-advisory-convergence`.
+  //
+  // Deliberately UNCONDITIONAL (not gated on `touchesSelfReferentialAllowlist`
+  // like the marker-run-verification block further below): that gate exists
+  // there because the stale-waiver computation it feeds is ITSELF gated on
+  // the same flag, so an unconditional lookup would be pure waste. This
+  // enrichment instead feeds `summarizeRequiredChecks`/`classifyCiChecks` --
+  // the PRIMARY required-check gate, which runs on every PR regardless. Cost
+  // stays small on its own: this repository's own live PR rollups show
+  // exactly one `idd-advisory-convergence` check-run entry per PR in the
+  // ordinary case (the `-self-waiver` check is a different name, not
+  // matched here), two-to-three during the documented transition window --
+  // never the up-to-20 budget the marker-verification block below spends.
+  //
+  // kurone-kito/idd-skill#2919 (round 2 -- Codex + Copilot review on PR
+  // #2921, six new findings against a prior cap+excess-sentinel design):
+  // that design let a check name's own EARLIER, budget-excess instance
+  // become its own permanent, unmergeable producer group even when
+  // later, in-budget reruns of the SAME real workflow file superseded
+  // it -- a self-inflicted stuck-PR risk under this repo's own
+  // `fully_autonomous_merge` + `rerun-advisory-convergence.mjs`
+  // automation (E10 critique finding, confirmed by that design's own
+  // regression test asserting the stuck outcome as "working correctly").
+  // Separately, an in-budget resolution failure still left `workflowPath`
+  // ABSENT (permissive) for that check name, which can still let a
+  // genuinely different decoy workflow file's SUCCESS merge with the
+  // real workflow's FAILURE at the PRIMARY required-check gate under
+  // exactly that failure (Codex finding); and a real checker instance
+  // that itself landed in the excess bucket silently dropped out of
+  // stale-waiver candidacy (a second Codex finding). All four traced to
+  // the same root cause: PARTIAL resolution (mixing resolved-real-path,
+  // unresolved-permissive, and sentinel-excluded instances within one
+  // check name) is unsafe in every direction at once -- a uniform
+  // PERMISSIVE fallback re-admits a decoy (the original #2921 P1), and a
+  // uniform FAIL-CLOSED-BUT-PARTIAL fallback can permanently split a
+  // legitimate group (the round-2 findings).
+  //
+  // Replaced the cap/excess/sentinel machinery with the only design safe
+  // under both constraints at once: resolve EVERY unique run id this
+  // check name's live instances cite (no excess bucket, so a genuinely-
+  // superseded same-file failure always gets the chance to dedupe with
+  // its own later reruns), and treat anything short of full, clean
+  // resolution -- a parse failure on some (but not all) instances, a
+  // thrown/erroring `listCheckRunWorkflowPaths` call (kurone-kito/idd-skill#2926;
+  // formerly `getWorkflowRun`), an empty resolved `path`, a `detailsUrl`
+  // that repeats (#2926 -- unresolvable to one instance either way), or
+  // the run-id count exceeding the (now generous, DoS-only) ceiling below
+  // -- as ONE uniform, whole-check-name "identity unresolved" outcome:
+  // `workflowPath` stays absent on every instance (matching this check
+  // name's own pre-#2919 behavior, so `groupChecksByProducer` still
+  // dedupes them together exactly as before), and
+  // `advisoryConvergenceIdentityUnresolved` is reported to
+  // `buildPreMergeReadinessSummary`, which downgrades the PRIMARY
+  // required-check gate's `status` to `'unknown'` for this check name
+  // specifically (mirroring the existing `sourcePinnedRequiredCheckNames`
+  // downgrade convention in `summarizeRequiredChecks`) whenever it would
+  // otherwise report `'success'`. This can never merge a decoy (an
+  // unresolved identity is never reported passing), and can never
+  // permanently strand a legitimate same-file rerun sequence (every run
+  // id is always attempted, every attempt shares the SAME verdict for
+  // the whole check name, and a transient failure degrades to a
+  // blocked-but-recoverable "unknown" -- the same shape every other wait
+  // in this gate already has -- rather than a silent false pass OR an
+  // unrecoverable false block).
+  //
+  // A ZERO-parseable-run-id check name (every live instance's own
+  // `detailsUrl` is missing/malformed) stays fully permissive/unchanged
+  // rather than "identity unresolved": it never had resolvable evidence
+  // to begin with, matching the pre-#1483 absent-discriminator
+  // convention every other `type`/`workflowName`-absent check already
+  // gets. A MIXED check name (some instances parseable, some not) is NOT
+  // given this same pass -- the parseable instances DO have resolvable
+  // identity evidence, so treating the whole name as "no evidence" could
+  // mask a genuine decoy hiding behind one malformed `detailsUrl`
+  // (Copilot finding, round 2); it is instead folded into "identity
+  // unresolved" like any other partial-resolution case.
+  const MAX_ADVISORY_CONVERGENCE_WORKFLOW_PATH_LOOKUPS = 50;
+  const advisoryConvergenceCheckEntries = checks
+    .map((check, index) => ({ check, index }))
+    .filter(
+      ({ check }) =>
+        check.type === 'check-run' &&
+        check.name === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+    );
+  // kurone-kito/idd-skill#2919: reported to `buildPreMergeReadinessSummary`
+  // (`advisoryConvergenceIdentityUnresolved` option) so it can downgrade
+  // the primary required-check gate -- see the doc comment above.
+  let advisoryConvergenceIdentityUnresolved = false;
+  if (advisoryConvergenceCheckEntries.length > 0) {
+    const runIdsByIndex = new Map();
+    for (const { index } of advisoryConvergenceCheckEntries) {
+      const runId = parseRunIdFromUrl(
+        rawStatusCheckRollup[index]?.detailsUrl ?? '',
+      );
+      if (runId) runIdsByIndex.set(index, runId);
+    }
+    if (runIdsByIndex.size > 0) {
+      if (runIdsByIndex.size < advisoryConvergenceCheckEntries.length) {
+        // Mixed: at least one live instance has no parseable run id at
+        // all while at least one other does -- see the doc comment above.
+        advisoryConvergenceIdentityUnresolved = true;
+      } else {
+        const uniqueRunIds = [...new Set(runIdsByIndex.values())];
+        if (
+          uniqueRunIds.length > MAX_ADVISORY_CONVERGENCE_WORKFLOW_PATH_LOOKUPS
+        ) {
+          advisoryConvergenceIdentityUnresolved = true;
+        } else {
+          // kurone-kito/idd-skill#2926: `uniqueRunIds`/`runIdsByIndex` above
+          // stay exactly as #2919 left them -- `parseRunIdFromUrl` is still
+          // the EVIDENCE gate (is there a parseable citation at all? is it
+          // the same one for every live instance? is the DISTINCT-citation
+          // count within the DoS budget?), never a path SOURCE. The path
+          // itself now comes from ONE `listCheckRunWorkflowPaths` call,
+          // which resolves each live check-run's workflow FILE from its own
+          // `checkSuite.workflowRun` (GitHub-assigned) instead of trusting
+          // `getWorkflowRun` on a run id parsed from that check-run's own
+          // creator-settable `detailsUrl` -- see that port method's own doc
+          // comment for the full rationale and its documented residual.
+          //
+          // Correlation back to `rawStatusCheckRollup` still has to go
+          // through `detailsUrl` (the fixed `gh pr view --json
+          // statusCheckRollup` shape carries no check-run database id to
+          // join on instead), so this is not yet a full escape from
+          // `detailsUrl` -- but unlike the pre-#2926 code, `detailsUrl` is
+          // now used ONLY as an opaque join key between two independently-
+          // sourced records of the SAME check-run, never to derive the run
+          // id a resolved PATH comes from. A `detailsUrl` that repeats --
+          // whether among the resolved associations or among the rollup's
+          // own live instances -- can never be joined to a single instance
+          // safely (this is exactly what an attacker copying a genuine
+          // check-run's own `detailsUrl` verbatim produces), so any
+          // repetition fails the whole check name closed, same as every
+          // other resolution failure in this block.
+          let associations = [];
+          try {
+            associations = port.listCheckRunWorkflowPaths(
+              owner,
+              repo,
+              prHeadSha,
+              DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+            );
+          } catch {
+            advisoryConvergenceIdentityUnresolved = true;
+          }
+          if (!advisoryConvergenceIdentityUnresolved) {
+            const pathByDetailsUrl = new Map();
+            const duplicateDetailsUrls = new Set();
+            for (const association of associations) {
+              if (pathByDetailsUrl.has(association.detailsUrl)) {
+                duplicateDetailsUrls.add(association.detailsUrl);
+              } else {
+                pathByDetailsUrl.set(
+                  association.detailsUrl,
+                  association.workflowPath,
+                );
+              }
+            }
+            const rollupDetailsUrlCounts = new Map();
+            for (const { index } of advisoryConvergenceCheckEntries) {
+              const detailsUrl = String(
+                rawStatusCheckRollup[index]?.detailsUrl ?? '',
+              );
+              rollupDetailsUrlCounts.set(
+                detailsUrl,
+                (rollupDetailsUrlCounts.get(detailsUrl) ?? 0) + 1,
+              );
+            }
+            const pathsByIndex = new Map();
+            for (const { index } of advisoryConvergenceCheckEntries) {
+              const detailsUrl = String(
+                rawStatusCheckRollup[index]?.detailsUrl ?? '',
+              );
+              const path = pathByDetailsUrl.get(detailsUrl);
+              if (
+                duplicateDetailsUrls.has(detailsUrl) ||
+                (rollupDetailsUrlCounts.get(detailsUrl) ?? 0) > 1 ||
+                !path
+              ) {
+                advisoryConvergenceIdentityUnresolved = true;
+                break;
+              }
+              pathsByIndex.set(index, path);
+            }
+            if (!advisoryConvergenceIdentityUnresolved) {
+              checks = checks.map((check, index) => {
+                const path = pathsByIndex.get(index);
+                return path === undefined
+                  ? check
+                  : { ...check, workflowPath: path };
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  const trustEmptyProtectionReads = readTrustEmptyProtectionReads(iddConfig);
   const branchRulesRead = fetchGovernanceJson(
     `repos/${owner}/${repo}/rules/branches/${encodedBaseRefName}`,
     true,
     trustEmptyProtectionReads,
     [],
+    () =>
+      unwrapGovernanceOutcome(port.listBranchRules(owner, repo, baseRefName)),
   );
   const branchRules = branchRulesRead.value;
   const branchRulesetsRead = fetchBranchRulesets(
@@ -256,6 +557,7 @@ export function collectPreMergeReadiness(argv) {
     repo,
     branchRules,
     trustEmptyProtectionReads,
+    (path) => unwrapGovernanceOutcome(port.getRepositoryRulesetDetail(path)),
   );
   const branchRulesets = branchRulesetsRead.value;
   const branchProtectionRead = fetchGovernanceJson(
@@ -263,6 +565,10 @@ export function collectPreMergeReadiness(argv) {
     false,
     trustEmptyProtectionReads,
     {},
+    () =>
+      unwrapGovernanceOutcome(
+        port.getBranchProtection(owner, repo, baseRefName),
+      ),
   );
   const branchProtection = branchProtectionRead.value;
   // #1377: a masked-403-as-404 on either read means the required-check set
@@ -279,35 +585,28 @@ export function collectPreMergeReadiness(argv) {
   // `branchProtection`) -- so it is threaded separately rather than folded
   // into `protectionReadsUnreadable`.
   const branchRulesetsUnreadable = branchRulesetsRead.unreadable;
-  const reviews = ghApiJson(
-    `repos/${owner}/${repo}/pulls/${args.prNumber}/reviews`,
-    true,
+  const reviews = port.listReviews(args.prNumber);
+  const requestedReviewerLogins = port.getChangeRequestRequestedReviewerLogins(
+    args.prNumber,
   );
-  const requestedReviewers = ghApiJson(
-    `repos/${owner}/${repo}/pulls/${args.prNumber}/requested_reviewers`,
-    false,
+  const timelineEvents = port.getWorkItemTimeline(args.prNumber);
+  const comments = port
+    .listWorkItemComments(args.prNumber)
+    .map(toIssueCommentPayload);
+  const claimComments = args.claimless
+    ? []
+    : port
+        // Non-null: the earlier `!args.claimless && !args.claimIssueNumber`
+        // guard already rejected this branch with a missing claim issue.
+        .listWorkItemComments(args.claimIssueNumber)
+        .map(toIssueCommentPayload);
+  const threads = port.listChangeRequestReviewThreadsWithComments(
+    args.prNumber,
   );
-  const timelineEvents = ghApiJson(
-    `repos/${owner}/${repo}/issues/${args.prNumber}/timeline`,
-    true,
-    ['-H', 'Accept: application/vnd.github+json'],
-  );
-  const comments = ghApiJson(
-    `repos/${owner}/${repo}/issues/${args.prNumber}/comments`,
-    true,
-  );
-  const claimComments = ghApiJson(
-    `repos/${owner}/${repo}/issues/${args.claimIssueNumber}/comments`,
-    true,
-  );
-  const threads = fetchReviewThreads(owner, repo, args.prNumber);
-  const changedFiles = ghApiJson(
-    `repos/${owner}/${repo}/pulls/${args.prNumber}/files`,
-    true,
-  )
-    .map((file) => String(file.filename ?? ''))
+  const changedFiles = port
+    .listChangeRequestChangedFiles(args.prNumber)
     .filter(Boolean);
-  const codeownersText = fetchCodeownersText(owner, repo, baseRefName);
+  const codeownersText = fetchCodeownersText(port, owner, repo, baseRefName);
   const {
     eligible: eligibleCodeownerUserLogins,
     unreadable: eligibleCodeownerUserLoginsUnreadable,
@@ -315,18 +614,33 @@ export function collectPreMergeReadiness(argv) {
     owner,
     repo,
     resolveCodeownersForFiles(codeownersText, changedFiles).codeownerUserLogins,
+    // Reuses the collector's own injected port instead of the default's
+    // fresh createGithubProviderAdapter(owner, repo) -- otherwise a
+    // fake/non-GitHub-provider caller with a matching CODEOWNER user
+    // unexpectedly spawns a live gh process (Codex review, PR #2429).
+    (login) => {
+      const result = port.getCollaboratorPermission(login);
+      if (result.outcome === 'not-collaborator') {
+        throwSyntheticGhNotFound();
+      }
+      if (result.outcome === 'error') {
+        throw new Error(result.error.message);
+      }
+      return result.permission;
+    },
   );
   const viewerTeamSlugs = resolveViewerClassicBypassTeamSlugs(
+    port,
     owner,
     viewerLogin,
     branchProtection,
   );
-  const collaboratorTrustEnabled = readCollaboratorTrustEnabled();
+  const collaboratorTrustEnabled = readCollaboratorTrustEnabled(iddConfig);
   const trustedMarkerLogins = normalizeTrustedMarkerLogins([
     viewerLogin,
     ...configuredTrustedActors,
     ...(collaboratorTrustEnabled
-      ? resolveTrustedCollaboratorMarkerLogins(owner, repo, [
+      ? resolveTrustedCollaboratorMarkerLogins(port, [
           ...comments,
           ...claimComments,
         ])
@@ -338,10 +652,11 @@ export function collectPreMergeReadiness(argv) {
     trustedMarkerLogins,
     operationalComments: [...comments, ...claimComments],
   });
-  const advisoryWaitPolicy = readAdvisoryWaitPolicy();
-  const primaryBotLogin = readAdvisoryPrimaryBotLogin();
-  const forcedHandoffAuthorityPolicy = readForcedHandoffAuthorityPolicy();
-  const forcedHandoffEnabled = readForcedHandoffMode() === 'human-gated';
+  const advisoryWaitPolicy = resolveAdvisoryWaitPolicy(advisoryWaitConfig);
+  const primaryBotLogin = resolveAdvisoryPrimaryBotLogin(advisoryWaitConfig);
+  const forcedHandoffPolicy = normalizePolicyConfig(iddConfig).forcedHandoff;
+  const forcedHandoffAuthorityPolicy = forcedHandoffPolicy.authorityPolicy;
+  const forcedHandoffEnabled = forcedHandoffPolicy.mode === 'human-gated';
   // The PR's first-commit time backs the Part B forced-handoff rule (#1058):
   // a legitimate issue-only handoff that predates the PR is honored even
   // against a PR-backed claim. This allowance is applied on the merge side
@@ -355,23 +670,45 @@ export function collectPreMergeReadiness(argv) {
   let prFirstCommitAt = null;
   if (forcedHandoffEnabled) {
     try {
-      const prCommits = ghApiJson(
-        `repos/${owner}/${repo}/pulls/${args.prNumber}/commits`,
-        true,
-      );
+      const prCommits = port.listChangeRequestCommits(args.prNumber);
       prFirstCommitAt = resolvePrFirstCommitAt(prCommits);
     } catch {
       prFirstCommitAt = null;
     }
   }
   const forcedHandoffPermissionCache = new Map();
-  const waivableCheckSelectors = readWaivableCheckSelectors();
-  const externalCheckWaiverMaxValidity = readExternalCheckWaiverMaxValidity();
-  const trustSourcePinnedRequiredChecks = readTrustSourcePinnedRequiredChecks();
-  const staleAgeMs = readClaimStaleAgeMs();
+  const waivableCheckSelectors = readWaivableCheckSelectors(iddConfig);
+  const externalCheckWaiverMaxValidity =
+    readExternalCheckWaiverMaxValidity(iddConfig);
+  const externalCheckWaiverMode = readExternalCheckWaiverMode(iddConfig);
+  const trustSourcePinnedRequiredChecks =
+    readTrustSourcePinnedRequiredChecks(iddConfig);
+  const staleAgeMs = readClaimStaleAgeMs(iddConfig);
   const now = args.now || new Date().toISOString().replace('.000Z', 'Z');
   const normalizedComments = comments.map(normalizeComment);
   const normalizedReviews = reviews.map(normalizeReview);
+  // #2021: fetch the current HEAD commit's own `committedDate`, plus every
+  // PR review, via the SAME GraphQL query `advisory-convergence.mts`'s own
+  // deadline clock and Clause-1 review evidence both read
+  // (`fetchReviewsAndHeadCommit`, extracted to `review-clause.mts` precisely
+  // so a second, independent caller can reuse this exact evidence instead of
+  // a second ad-hoc GraphQL path that could drift out of sync with it -- see
+  // that module's header). Deliberately uncaught, same rationale as
+  // `copilotUnavailable` below: a lookup failure must crash this evidence
+  // collector rather than silently resolve to an empty `headCommittedAt`,
+  // which would make `advisoryConvergenceDeadlinePassed` fail closed to
+  // `false` for the wrong reason (masking a genuinely-open deadline as
+  // unreadable evidence instead of surfacing the fetch failure).
+  const {
+    reviews: advisoryConvergenceReviews,
+    headCommittedAt: advisoryConvergenceHeadCommittedAt,
+  } = fetchReviewsAndHeadCommit(owner, repo, args.prNumber, port);
+  const advisoryConvergenceDeadlineMinutes =
+    resolveAdvisoryConvergenceDeadlineMinutes(advisoryWaitConfig);
+  const secondaryQuietWindowMinutes =
+    resolveAdvisorySecondaryQuietWindowMinutes(advisoryWaitConfig);
+  const secondaryBotLogin =
+    resolveAdvisorySecondaryBotLogin(advisoryWaitConfig);
   // #1570: precompute the `#1572` terminal Copilot-unavailability verdict
   // here (the CLI/orchestration layer) rather than inside
   // `buildPreMergeReadinessSummary` (protocol-helpers.mts), which cannot
@@ -390,10 +727,62 @@ export function collectPreMergeReadiness(argv) {
   // collectors only"): a crash here is evidence collection failing
   // loudly, and callers already know to fall back to the portable
   // gh/jq/API procedure rather than trust a helper that could not run.
-  const lastCopilotCommit = findLastCopilotReviewCommit(
-    normalizedReviews,
+  //
+  // #2042: `lastCopilotCommit` now resolves via
+  // `resolveLatestCopilotReviewClause` against the SAME GraphQL review
+  // evidence (`advisoryConvergenceReviews`, absolute-latest by fetch order)
+  // `advisory-convergence.mts`'s own required check uses for its identical
+  // `review.commitId` input (advisory-convergence.mts ~line 1087) -- not
+  // the separate REST/`submittedAt`-sorted `findLastCopilotReviewCommit`
+  // path this caller used before. That prior REST path is a second,
+  // independently-timed fetch that can disagree with the GraphQL evidence
+  // under a force-push/revert reordering (advisory-convergence.mts's own
+  // comment on this exact gap, ~line 1070); `copilotUnavailable` computed
+  // here is the sole evidence source for BOTH the `idd-advisory-convergence`
+  // waiver precondition below AND the dedicated `copilot-terminal-unavailable`
+  // blocker (`buildPreMergeReadinessSummary`'s `options.copilotUnavailable`,
+  // reported back as `advisoryWait.copilotUnavailable` -- there is no
+  // separate source to preserve for that second consumer; both already
+  // shared this single value before this fix, so unifying the evidence
+  // source here fixes both at once).
+  const lastCopilotCommit = resolveLatestCopilotReviewClause(
+    advisoryConvergenceReviews,
+    prHeadSha,
     primaryBotLogin,
-  );
+  ).commitId;
+  // #2554: shortens the terminal-unavailability window below to
+  // `advisoryWait.providerOutage.terminalWindow` only while an active
+  // repository-scoped outage declaration covers the SAME
+  // `idd-advisory-convergence` selector that
+  // `resolveAdvisoryConvergenceOutageRelief` (further below) independently
+  // re-resolves for its own waiver-relief purpose. A second, independent
+  // fetch here -- rather than sharing that function's result -- matches
+  // this file's own established tolerance for independent per-consumer
+  // evidence collection (see `lastCopilotCommit`'s doc comment above:
+  // "tolerable by construction ... any disagreement fails closed"). Fails
+  // closed to `false` on ANY error, exactly like
+  // `resolveAdvisoryConvergenceOutageRelief`: a transient fetch failure
+  // must never shorten the terminal-unavailability window this gates.
+  //
+  // Skipped entirely when no override is configured (Copilot review, PR
+  // #2564 round 3): `resolveEffectiveAdvisoryTerminalWindowMinutes` returns
+  // the base window regardless of `declarationActive` when
+  // `advisoryWait.providerOutage.terminalWindow` is unset, so the live
+  // fetch would be pure overhead -- and an avoidable failure/rate-limit
+  // surface -- on every readiness run for a repository that never
+  // configured this feature.
+  const providerOutageTerminalWindowOverrideMinutes =
+    resolveProviderOutageTerminalWindowMinutes(advisoryWaitConfig);
+  const outageDeclarationActiveForTerminalWindow =
+    providerOutageTerminalWindowOverrideMinutes !== null
+      ? resolveOutageDeclarationActiveForConvergenceSelector({
+          port,
+          owner,
+          repo,
+          iddConfig,
+          now,
+        })
+      : false;
   const copilotRecovery = buildCopilotRecoverySummary(
     { comments: normalizedComments, prHeadSha, lastCopilotCommit },
     {
@@ -401,11 +790,230 @@ export function collectPreMergeReadiness(argv) {
       trustedMarkerLogins,
       claimId: args.expectedClaimId,
       agentId: args.expectedAgentId,
-      recoveryCycleCap: readAdvisoryRecoveryCycleCap(),
-      terminalWindowMinutes: readAdvisoryTerminalWindowMinutes(),
+      recoveryCycleCap: resolveAdvisoryRecoveryCycleCap(advisoryWaitConfig),
+      terminalWindowMinutes: resolveEffectiveAdvisoryTerminalWindowMinutes({
+        config: advisoryWaitConfig,
+        declarationActive: outageDeclarationActiveForTerminalWindow,
+      }),
     },
   );
   const copilotUnavailable = copilotRecovery.state === 'COPILOT_UNAVAILABLE';
+  const advisoryConvergenceOutageRelief =
+    resolveAdvisoryConvergenceOutageRelief({
+      port,
+      owner,
+      repo,
+      iddConfig,
+      copilotUnavailable,
+      waivableCheckSelectors,
+      now,
+    });
+  // kurone-kito/idd-skill#2911: independent evidence for
+  // `buildPreMergeReadinessSummary`'s `staleSelfWaiver` blocker
+  // (protocol-helpers.mts) -- see that computation's own doc comment for
+  // the full rationale. Performed here (the I/O collector), not inside
+  // that pure function, mirroring this file's own established precedent
+  // for `copilotUnavailable` above ("precompute here rather than inside
+  // `buildPreMergeReadinessSummary`, which cannot import X without an
+  // import cycle" -- `advisory-convergence.mts` already imports FROM
+  // `protocol-helpers.mts`, so the reverse would cycle).
+  //
+  // A local, independently-valued bound rather than importing
+  // `advisory-convergence.mts`'s own `MAX_AUTO_WAIVER_RUN_LOOKUPS`: that
+  // constant is declared inside `collectFromGitHub`'s own function body --
+  // exactly the area kurone-kito/idd-skill#2912 (open now, claimed by a
+  // different session) is expected to rewrite for the same-repository
+  // bearer-evidence provenance gap. Keeping this bound independent avoids
+  // a rebase collision there; the two files must already agree on the
+  // same value by convention, not by import.
+  const MAX_PRE_MERGE_AUTO_WAIVER_RUN_LOOKUPS = 20;
+  // #2657/#2911: the same raw `helperRuntime.profile` config field
+  // `advisory-convergence.mts`'s own `collectFromGitHub` reads directly --
+  // `normalizePolicyConfig` does not carry `helperRuntime` through its
+  // normalized shape (that section is validated, not defaulted,
+  // elsewhere), and `IddConfig`'s index signature already types this
+  // access as `unknown` with no cast needed.
+  const rawHelperRuntime = iddConfig?.helperRuntime;
+  const helperRuntimeProfile =
+    rawHelperRuntime &&
+    typeof rawHelperRuntime === 'object' &&
+    typeof rawHelperRuntime.profile === 'string'
+      ? rawHelperRuntime.profile
+      : undefined;
+  const repositoryFullName = owner && repo ? `${owner}/${repo}` : '';
+  // The load-bearing security boundary (kurone-kito/idd-skill#2911's
+  // decisive finding): fetched independently from THIS PR's own live
+  // diff, never from any comment body, so a forged marker can only ever
+  // affect a PR that already, genuinely touches the checker allowlist --
+  // same mitigation `autoWaiverValid` (advisory-convergence.mts) already
+  // relies on for the identical bearer-evidence gap. Reuses the
+  // ALREADY-FETCHED `changedFiles` above (no extra round-trip) plus a
+  // renamed-from-paths fetch, mirroring `collectFromGitHub`'s own merge
+  // of both sources exactly (a rename-shaped checker repair away from an
+  // allowlisted path must still be recognized).
+  const selfReferentialTriggerFiles = resolveSelfReferentialTriggerFiles(
+    helperRuntimeProfile,
+    repositoryFullName,
+  );
+  const changedFilesTouchSelfReferentialAllowlist = changedFiles.some((path) =>
+    selfReferentialTriggerFiles.includes(String(path)),
+  );
+  // kurone-kito/idd-skill#2911 (Codex + CodeRabbit review, PR #2915): the
+  // renamed-from-paths lookup is a separate paginated `pulls/.../files`
+  // request that duplicates the `changedFiles` fetch above, and its
+  // result can only ever matter for a PR that (a) doesn't already prove
+  // the allowlist touch via `changedFiles` alone AND (b) carries at
+  // least one self-referential-bootstrap-auto marker candidate -- if
+  // neither the ordinary case (no marker at all) nor this case applies,
+  // `touchesSelfReferentialAllowlist`'s value can never affect the
+  // report either way, so skip the extra round-trip entirely. Cheap: the
+  // candidate scan below only re-uses `normalizedComments`, already
+  // fetched, no extra call. Wrapped in try/catch -- unlike every OTHER
+  // unguarded port call earlier in this collector, this one specifically
+  // sits behind an opt-in security gate that most PRs never need at all,
+  // so a transient failure here must not abort report generation for
+  // PRs the gate was never going to affect; fails to `[]` (never widens
+  // trust, matches `getWorkflowRun`'s own fail-closed-to-untrusted
+  // direction below).
+  const hasAnySelfReferentialMarkerCandidate = normalizedComments.some(
+    (comment) =>
+      /^<!--\s*idd-external-check-waiver:/i.test(comment.body) &&
+      comment.author.login.trim().toLowerCase() === 'github-actions[bot]',
+  );
+  let selfReferentialRenamedFromPaths = [];
+  if (
+    !changedFilesTouchSelfReferentialAllowlist &&
+    hasAnySelfReferentialMarkerCandidate
+  ) {
+    try {
+      selfReferentialRenamedFromPaths = port
+        .listChangeRequestRenamedFromPaths(args.prNumber)
+        .filter(Boolean);
+    } catch {
+      selfReferentialRenamedFromPaths = [];
+    }
+  }
+  const touchesSelfReferentialAllowlist =
+    changedFilesTouchSelfReferentialAllowlist ||
+    selfReferentialRenamedFromPaths.some((path) =>
+      selfReferentialTriggerFiles.includes(String(path)),
+    );
+  // Bounded scan for self-referential-bootstrap-auto candidate markers
+  // bound to this PR's own HEAD, mirroring `collectFromGitHub`'s own
+  // anti-flood budget (20, capped) but NOT its earliest-first tie-break:
+  // no selection order fully closes the flood problem, and
+  // `verifySelfReferentialBootstrapWaiverRun` below still requires
+  // independent Actions-run verification regardless of what this
+  // prefilter selects, but the two call sites correlate against
+  // different moments in time, so the same tie-break direction is wrong
+  // for this one. `collectFromGitHub` evaluates the marker for the
+  // checker's OWN in-flight run (implicitly "now"); this call site
+  // instead correlates against `passingCompletedAtMs` -- the ALREADY-
+  // SELECTED newest required-check instance's own `completedAt`, itself
+  // already the most recent of however many reruns exist for this HEAD
+  // (kurone-kito/idd-skill#2911, Codex review on PR #2915, P1): on a
+  // checker-touching PR that sits on one HEAD long enough to accumulate
+  // more than this 20-candidate budget's worth of bootstrap-auto
+  // markers, an earliest-first cap would keep only the OLDEST
+  // candidates -- exactly the ones LEAST likely to correlate with the
+  // most-recent-required-check-instance's `completedAt` -- starving
+  // `autoWaiverRunVerified` of the one marker that actually needs
+  // checking and letting the report incorrectly stay `ready`. Newest-
+  // first keeps the candidates most likely to cover that recent
+  // instance instead.
+  const autoWaiverRunVerified = {};
+  // kurone-kito/idd-skill#2911 (Copilot review, PR #2915): the scan below
+  // and its up-to-20 `getWorkflowRun` lookups are pure overhead whenever
+  // `touchesSelfReferentialAllowlist` is false -- `buildPreMergeReadinessSummary`
+  // never even reaches this evidence in that case (its own `staleSelfWaiver`
+  // computation is unconditionally gated on the identical flag). Skipping
+  // the whole block here means an ordinary PR (the overwhelming majority,
+  // which never touches the checker allowlist at all) can never have a
+  // flood of bot-authored comments force wasted provider round-trips no
+  // matter how many it posts. This does not also gate on the mode-open/
+  // selector-waivable preconditions `buildPreMergeReadinessSummary` checks
+  // (those live behind private matching helpers in `protocol-helpers.mts`
+  // this file deliberately avoids importing, to keep this file's footprint
+  // minimal where kurone-kito/idd-skill#2912 is concurrently working) --
+  // the residual is bounded and harmless: at most 20 avoidable
+  // `getWorkflowRun` calls, only on the narrower set of PRs that already,
+  // genuinely touch the allowlist.
+  if (touchesSelfReferentialAllowlist) {
+    // kurone-kito/idd-skill#2911 (Copilot review, PR #2915): keyed by
+    // `runId` (a Map, not an array + Set) so a SECOND comment citing an
+    // already-seen run id UPDATES that candidate's `createdAt` to the
+    // newer value instead of being silently dropped -- the same run can
+    // legitimately post more than one marker comment over its own
+    // lifetime (e.g. a retry within the run), and comments are typically
+    // returned oldest-first, so keeping only the first occurrence would
+    // anchor that candidate to a stale timestamp and could wrongly push
+    // it out of the newest-first bounded window under a flood.
+    const autoWaiverRunIdCandidates = new Map();
+    const prHeadShaLower = prHeadSha.toLowerCase();
+    for (const comment of normalizedComments) {
+      const body = comment.body;
+      if (!/^<!--\s*idd-external-check-waiver:/i.test(body)) continue;
+      const authorLogin = comment.author.login.trim().toLowerCase();
+      if (authorLogin !== 'github-actions[bot]') continue;
+      const parsed = parseExternalCheckWaiverComment(body, comment.createdAt);
+      // kurone-kito/idd-skill#2911: mirrors `collectFromGitHub`'s own
+      // prefilter conditions verbatim -- a canonical positive-integer
+      // run-id (never percent-decoded/sanitized attacker text reaching
+      // `getWorkflowRun`'s REST path unvalidated), an EXACT (never glob)
+      // checkSelector match, and this PR's own current HEAD -- before a
+      // candidate is ever eligible to spend part of the bounded lookup
+      // budget.
+      if (
+        parsed &&
+        parsed.reason === SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON &&
+        parsed.checkSelector === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR &&
+        parsed.runId &&
+        parseCanonicalIntegerOrNull(parsed.runId) !== null &&
+        String(parsed.headSha ?? '')
+          .trim()
+          .toLowerCase() === prHeadShaLower
+      ) {
+        const existingCreatedAt = autoWaiverRunIdCandidates.get(parsed.runId);
+        if (
+          existingCreatedAt === undefined ||
+          comment.createdAt.localeCompare(existingCreatedAt) > 0
+        ) {
+          autoWaiverRunIdCandidates.set(parsed.runId, comment.createdAt);
+        }
+      }
+    }
+    const boundedAutoWaiverRunIds = [...autoWaiverRunIdCandidates]
+      .map(([runId, createdAt]) => ({ runId, createdAt }))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, MAX_PRE_MERGE_AUTO_WAIVER_RUN_LOOKUPS)
+      .map((candidate) => candidate.runId);
+    for (const runId of boundedAutoWaiverRunIds) {
+      try {
+        const raw = port.getWorkflowRun(owner, repo, runId);
+        autoWaiverRunVerified[runId] = verifySelfReferentialBootstrapWaiverRun(
+          {
+            path: raw?.path ?? null,
+            headSha: raw?.head_sha ?? null,
+            repositoryFullName: raw?.head_repository?.full_name ?? null,
+            event: raw?.event ?? null,
+          },
+          {
+            path: ADVISORY_CONVERGENCE_WORKFLOW_PATH,
+            headSha: prHeadSha,
+            repositoryFullName,
+          },
+        );
+      } catch {
+        // Fail closed per run id -- untrusted: a lookup failure (unknown
+        // run, transient API error) must never widen trust, and must
+        // never crash this whole evidence collector either. This is the
+        // deliberate fail-open-for-staleness direction documented on
+        // `buildPreMergeReadinessSummary`'s `staleSelfWaiver` computation:
+        // an unverified run suppresses the blocker rather than firing it.
+        autoWaiverRunVerified[runId] = false;
+      }
+    }
+  }
   const summary = buildPreMergeReadinessSummary(
     {
       prHeadSha,
@@ -418,7 +1026,7 @@ export function collectPreMergeReadiness(argv) {
       branchProtection,
       protectionReadsUnreadable,
       branchRulesetsUnreadable,
-      requestedReviewers: requestedReviewers.users ?? [],
+      requestedReviewers: requestedReviewerLogins,
       timelineEvents,
       claimEvents: claimComments.map(normalizeClaimComment),
       changedFiles,
@@ -448,6 +1056,7 @@ export function collectPreMergeReadiness(argv) {
       expectedClaimId: args.expectedClaimId,
       expectedAgentId: args.expectedAgentId,
       expectedNonce: args.nonce,
+      claimless: args.claimless,
       includeDispositionEvidence: true,
       requestCap: advisoryWaitPolicy.requestCap,
       pendingWindowMinutes: advisoryWaitPolicy.pendingWindowMinutes,
@@ -455,9 +1064,22 @@ export function collectPreMergeReadiness(argv) {
       pollIntervalMinutes: advisoryWaitPolicy.pollIntervalMinutes,
       capExhaustedRoute: advisoryWaitPolicy.capExhaustedRoute,
       primaryBotLogin,
+      developmentBranchTarget,
       copilotUnavailable,
+      // kurone-kito/idd-skill#2919: caller-precomputed by the enrichment
+      // block above -- see its doc comment for the full rationale.
+      advisoryConvergenceIdentityUnresolved,
+      advisoryConvergenceOutageRelieved:
+        advisoryConvergenceOutageRelief.relieved,
+      advisoryConvergenceOutageRelievedSince:
+        advisoryConvergenceOutageRelief.since,
+      advisoryConvergenceHeadCommittedAt,
+      advisoryConvergenceDeadlineMinutes,
+      secondaryQuietWindowMinutes,
+      secondaryBotLogin,
       waivableCheckSelectors,
       externalCheckWaiverMaxValidity,
+      externalCheckWaiverMode,
       trustSourcePinnedRequiredChecks,
       staleAgeMs,
       forcedHandoffEnabled,
@@ -476,6 +1098,8 @@ export function collectPreMergeReadiness(argv) {
       viewerAppSlug,
       configuredTrustedActors,
       collaboratorTrustEnabled,
+      touchesSelfReferentialAllowlist,
+      autoWaiverRunVerified,
     },
   );
   return {
@@ -484,11 +1108,39 @@ export function collectPreMergeReadiness(argv) {
     trustedMarkerActorsSource,
   };
 }
+// #2707: a caller that repeats this invocation until F2 is ready (directly,
+// or via a delegated worker's polling loop) must be able to distinguish a
+// call-time argument/usage error from an ordinary "not ready yet" readiness
+// report -- both used to be indistinguishable-by-default (an uncaught
+// exception left an unhandled stack trace on stderr and a non-JSON stdout,
+// easy to conflate with a transient not-ready state if the caller only
+// checks the exit code). `hint` is populated only for the specific error
+// this arose from (the missing --claim-issue/--claimless case); other
+// thrown errors surface with `error` alone.
+export function renderCliUsageError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('missing required --claim-issue')) {
+    return {
+      error: message,
+      hint:
+        'pass --claim-issue <issue-number> (with --claim-id), or --claimless ' +
+        'for a PR with no closingIssuesReferences',
+    };
+  }
+  return { error: message };
+}
 // CLI: emit the readiness report as JSON when invoked directly.
 if (import.meta.main) {
-  process.stdout.write(
-    `${JSON.stringify(collectPreMergeReadiness(process.argv.slice(2)), null, 2)}\n`,
-  );
+  try {
+    process.stdout.write(
+      `${JSON.stringify(collectPreMergeReadiness(process.argv.slice(2)), null, 2)}\n`,
+    );
+  } catch (error) {
+    process.stdout.write(
+      `${JSON.stringify(renderCliUsageError(error), null, 2)}\n`,
+    );
+    process.exitCode = 1;
+  }
 }
 function warnDeprecatedFlag(deprecated, canonical) {
   process.stderr.write(
@@ -590,6 +1242,13 @@ export function parseArgs(argv) {
   if (expectedAgentIdToken !== undefined) {
     warnDeprecatedFlag('--expected-agent-id', '--agent-id');
   }
+  const claimless = Boolean(values.claimless);
+  if (claimless && values['claim-issue'] !== undefined) {
+    throw new Error('--claimless cannot be combined with --claim-issue');
+  }
+  if (claimless && claimId) {
+    throw new Error('--claimless cannot be combined with --claim-id');
+  }
   return {
     prNumber: requirePositiveInteger(values.pr, '--pr'),
     claimIssueNumber: requirePositiveInteger(
@@ -606,11 +1265,13 @@ export function parseArgs(argv) {
     nonce: values.nonce ?? '',
     now: values.now ?? '',
     help,
+    claimless: Boolean(values.claimless),
   };
 }
 function printHelp() {
   process.stdout.write(`Usage:
   node scripts/pre-merge-readiness.mjs --pr <number> --claim-issue <number> [--owner <owner>] [--repo <repo>] [--trusted-marker-logins <login1,login2>] [--idd-agent-logins <login1,login2>] [--advisory-bot-logins <login1,login2>] [--claim-id <claim-id>] [--agent-id <agent-id>] [--nonce <token>] [--now <ISO8601>]
+  node scripts/pre-merge-readiness.mjs --pr <number> --claimless [--owner <owner>] [--repo <repo>] [--trusted-marker-logins <login1,login2>] [--idd-agent-logins <login1,login2>] [--advisory-bot-logins <login1,login2>] [--now <ISO8601>]
   Deprecated aliases (one release): --expected-claim-id -> --claim-id, --expected-agent-id -> --agent-id
 
   --nonce <token>  this session's own recorded activation-nonce (#1522): when
@@ -620,6 +1281,10 @@ function printHelp() {
                     catching a second, independent activation of the same
                     claim-id as a collision. Omit --nonce, or leave it empty,
                     to skip this comparison entirely (backward compatible).
+  --claimless      skip claim fetch/revalidation (#2017). Only for a PR
+                    whose closingIssuesReferences is empty; cannot combine
+                    with --claim-issue or --claim-id. Claim-ownership in
+                    the report is the not-applicable / unclaimed shape.
 `);
 }
 /**
@@ -630,6 +1295,25 @@ function printHelp() {
  * field-mapping drift (e.g. `user.login` -> `author.login`) would surface
  * only in production.
  */
+/**
+ * Map a `ProviderPort.listWorkItemComments` result back onto the REST
+ * `issues/{n}/comments` shape this file's `normalizeComment`/
+ * `normalizeClaimComment`/`resolveTrustedCollaboratorMarkerLogins`/
+ * `deriveIddAgentLogins` call already expect -- keeps every one of those
+ * unchanged rather than reshaping them for the port's flat `authorLogin`
+ * field, which `provider-outage-declaration.mts`'s own `CommentLike` (fed
+ * the same shim output for `resolveAdvisoryConvergenceOutageRelief`'s
+ * declaration comments) does not recognize either.
+ */
+function toIssueCommentPayload(comment) {
+  return {
+    id: comment.id,
+    body: comment.body,
+    created_at: comment.createdAt,
+    updated_at: comment.updatedAt,
+    user: { login: comment.authorLogin },
+  };
+}
 export function normalizeComment(comment) {
   return {
     id: String(comment.id ?? ''),
@@ -669,34 +1353,34 @@ export function normalizeReview(review) {
   };
 }
 /**
- * Normalize a raw GraphQL `reviewThreads` node into the summarizer-shape
- * `ThreadLike`. Exported for direct unit testing (#1708), see
- * {@link normalizeComment}'s doc comment.
+ * Normalize a `ProviderPort.listChangeRequestReviewThreadsWithComments`
+ * node into the summarizer-shape `ThreadLike`. Exported for direct unit
+ * testing (#1708), see {@link normalizeComment}'s doc comment.
+ * `reviewerReopenedAt` is omitted (`ThreadLike`'s field is optional): the
+ * pre-migration GraphQL query never selected it at all
+ * (`inferReviewerReopenedAt` always returned `''`). `id` (#2696) is
+ * threaded through -- it feeds `dispositionEvidence.missingThreads[].id`,
+ * which a caller reads to identify which live thread to reply to; dropping
+ * it forced a separate positional lookup to recover the real thread.
  */
 export function normalizeThread(thread) {
   return {
     id: thread.id,
     isResolved: Boolean(thread.isResolved),
     updatedAt: '',
-    reviewerReopenedAt: inferReviewerReopenedAt(thread),
     comments: {
-      pageInfo: {
-        hasNextPage: Boolean(thread.comments?.pageInfo?.hasNextPage),
-      },
-      nodes: (thread.comments?.nodes ?? []).map((comment) => ({
-        author: { login: comment.author?.login ?? '' },
-        body: comment.body ?? '',
-        createdAt: comment.createdAt ?? '',
-        updatedAt: comment.updatedAt ?? comment.createdAt ?? '',
-        pullRequestReview: { id: comment.pullRequestReview?.id ?? null },
+      pageInfo: { hasNextPage: false },
+      nodes: thread.comments.map((comment) => ({
+        author: { login: comment.authorLogin },
+        body: comment.body,
+        createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt || comment.createdAt,
+        pullRequestReview: { id: comment.pullRequestReviewId ?? null },
       })),
     },
   };
 }
-function inferReviewerReopenedAt(thread) {
-  return thread.reviewerReopenedAt ?? '';
-}
-function resolveTrustedCollaboratorMarkerLogins(owner, repo, comments) {
+function resolveTrustedCollaboratorMarkerLogins(port, comments) {
   const markerAuthors = [
     ...new Set(
       comments
@@ -708,15 +1392,8 @@ function resolveTrustedCollaboratorMarkerLogins(owner, repo, comments) {
     ),
   ];
   return markerAuthors.filter((login) => {
-    const permission = safeGhText(
-      [
-        'api',
-        `repos/${owner}/${repo}/collaborators/${encodeURIComponent(login)}/permission`,
-        '--jq',
-        '.permission',
-      ],
-      GH_TEXT_LOOP_OPTIONS,
-    ).toLowerCase();
+    const result = port.getCollaboratorPermission(login);
+    const permission = result.outcome === 'found' ? result.permission : '';
     return (
       permission === 'admin' ||
       permission === 'maintain' ||
@@ -727,24 +1404,32 @@ function resolveTrustedCollaboratorMarkerLogins(owner, repo, comments) {
 /**
  * Exported for direct unit testing (matching this file's established
  * `fetchBranchRulesets`/`fetchGovernanceJson` injectable-fetch pattern) --
- * `fetchPermission` defaults to the real live `gh api .../permission` call
- * and is overridden in tests to simulate a 404 vs. a transient failure
- * without mocking `execFileSync`.
+ * `fetchPermission` defaults to the real `ProviderPort.getCollaboratorPermission`
+ * read and is overridden in tests to simulate a 404 vs. a transient failure
+ * without a live adapter. The default maps the port's never-throwing
+ * `{outcome}` result back onto this function's own throw-based contract
+ * (a synthetic `(HTTP 404)` error on `not-collaborator`, matching
+ * `idd-merge-execute.mts`'s `resolveRemoteSoloCodeownerAdminFallbackMode`
+ * default) so the `catch` block below -- and its existing tests -- stay
+ * byte-identical.
  */
 export function resolveEligibleCodeownerUserLogins(
   owner,
   repo,
   logins,
-  fetchPermission = (login) =>
-    ghText(
-      [
-        'api',
-        `repos/${owner}/${repo}/collaborators/${encodeURIComponent(login)}/permission`,
-        '--jq',
-        '.permission',
-      ],
-      GH_TEXT_LOOP_OPTIONS,
-    ),
+  fetchPermission = (login) => {
+    const result = createGithubProviderAdapter(
+      owner,
+      repo,
+    ).getCollaboratorPermission(login);
+    if (result.outcome === 'not-collaborator') {
+      throwSyntheticGhNotFound();
+    }
+    if (result.outcome === 'error') {
+      throw new Error(result.error.message);
+    }
+    return result.permission;
+  },
 ) {
   let unreadable = false;
   const eligible = normalizeTrustedMarkerLogins(logins).filter((login) => {
@@ -773,16 +1458,9 @@ export function resolveEligibleCodeownerUserLogins(
   });
   return { eligible, unreadable };
 }
-function fetchCodeownersText(owner, repo, ref) {
+function fetchCodeownersText(port, owner, repo, ref) {
   const payloads = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'].map(
-    (path) => {
-      return ghApiJson(
-        `repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`,
-        false,
-        [],
-        { allowHttpStatuses: [404] },
-      );
-    },
+    (path) => port.getRepositoryContentAtRef(owner, repo, path, ref),
   );
   return selectCodeownersText(payloads);
 }
@@ -824,15 +1502,25 @@ function fetchCodeownersText(owner, repo, ref) {
  * the empty/skipped result the gate expects.
  *
  * `fetchRulesetDetail` is injectable for tests; production uses the default
- * `gh api` call.
+ * `ProviderPort.getRepositoryRulesetDetail` read, mapped back onto this
+ * function's throw-based contract the same way
+ * {@link resolveEligibleCodeownerUserLogins}'s default does.
  */
 export function fetchBranchRulesets(
   owner,
   repo,
   branchRules,
   trustEmptyReads = false,
-  fetchRulesetDetail = (path) =>
-    ghApiJson(path, false, ['-H', 'Accept: application/vnd.github+json']),
+  fetchRulesetDetail = (path) => {
+    const outcome = createGithubProviderAdapter(
+      owner,
+      repo,
+    ).getRepositoryRulesetDetail(path);
+    if (outcome.outcome === 'not-found') {
+      throwSyntheticGhNotFound();
+    }
+    return outcome.value;
+  },
 ) {
   const rulesetPaths = [];
   const seenPaths = new Set();
@@ -867,6 +1555,7 @@ export function fetchBranchRulesets(
   return { value, unreadable };
 }
 function resolveViewerClassicBypassTeamSlugs(
+  port,
   owner,
   viewerLogin,
   branchProtection,
@@ -890,15 +1579,9 @@ function resolveViewerClassicBypassTeamSlugs(
         extractTeamOrgFromHtmlUrl(team?.html_url) ??
         owner,
     ).trim();
-    const state = safeGhText(
-      [
-        'api',
-        `orgs/${encodeURIComponent(org)}/teams/${encodeURIComponent(slug)}/memberships/${encodeURIComponent(viewerLogin)}`,
-        '--jq',
-        '.state',
-      ],
-      GH_TEXT_LOOP_OPTIONS,
-    ).toLowerCase();
+    const state = port
+      .getTeamMembershipStateSafe(org, slug, viewerLogin)
+      .toLowerCase();
     if (state === 'active') {
       viewerTeams.add(slug);
     }
@@ -909,155 +1592,44 @@ function extractTeamOrgFromHtmlUrl(htmlUrl) {
   const match = String(htmlUrl ?? '').match(/\/orgs\/([^/]+)\/teams\//);
   return match?.[1] ?? '';
 }
-function fetchReviewThreads(owner, repo, prNumber) {
-  const nodes = [];
-  let cursor = null;
-  while (true) {
-    const payload = ghGraphql(
-      `
-        query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-          repository(owner: $owner, name: $repo) {
-            pullRequest(number: $number) {
-              reviewThreads(first: 100, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                  id
-                  isResolved
-                  comments(first: 100) {
-                    pageInfo { hasNextPage endCursor }
-                    nodes {
-                      body
-                      createdAt
-                      updatedAt
-                      author { login }
-                      pullRequestReview { id }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }`,
-      {
-        owner,
-        repo,
-        number: Number.parseInt(String(prNumber), 10),
-        cursor,
-      },
-    );
-    const reviewThreads = payload?.data?.repository?.pullRequest?.reviewThreads;
-    for (const thread of reviewThreads?.nodes ?? []) {
-      if (thread.comments?.pageInfo?.hasNextPage) {
-        // hasNextPage with a missing thread id or cursor is a malformed
-        // payload; fail fast with a clear message instead of a confusing
-        // GraphQL error or a silently truncated thread.
-        if (!thread.id || !thread.comments.pageInfo.endCursor) {
-          throw new Error(
-            'review thread pagination payload is missing id or endCursor',
-          );
-        }
-        thread.comments.nodes.push(
-          ...fetchThreadCommentPages(
-            thread.id,
-            thread.comments.pageInfo.endCursor,
-          ),
-        );
-        thread.comments.pageInfo.hasNextPage = false;
-      }
-    }
-    nodes.push(...(reviewThreads?.nodes ?? []));
-    if (!reviewThreads?.pageInfo?.hasNextPage) {
-      break;
-    }
-    // hasNextPage with a missing cursor would re-fetch the first page
-    // forever; fail fast on the malformed payload instead.
-    if (!reviewThreads.pageInfo.endCursor) {
-      throw new Error('review thread pagination payload is missing endCursor');
-    }
-    cursor = reviewThreads.pageInfo.endCursor;
-  }
-  return nodes;
+/**
+ * Synthesize the same `(HTTP 404)`-in-`stderr` error shape a thrown `gh`
+ * failure would have carried, so a caller's existing `deriveGhHttpStatus(error)
+ * === 404` classification (unchanged by this migration) still recognizes a
+ * port `{outcome:'not-found'}`/`{outcome:'not-collaborator'}` result --
+ * mirrors `idd-merge-execute.mts`'s `resolveRemoteSoloCodeownerAdminFallbackMode`
+ * default.
+ */
+function throwSyntheticGhNotFound() {
+  const notFound = new Error('Not Found (HTTP 404)');
+  notFound.stderr = 'Not Found (HTTP 404)';
+  throw notFound;
 }
-function fetchThreadCommentPages(threadId, afterCursor) {
-  const nodes = [];
-  let cursor = afterCursor;
-  while (cursor) {
-    const payload = ghGraphql(
-      `
-        query($id: ID!, $cursor: String) {
-          node(id: $id) {
-            ... on PullRequestReviewThread {
-              comments(first: 100, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                  body
-                  createdAt
-                  updatedAt
-                  author { login }
-                  pullRequestReview { id }
-                }
-              }
-            }
-          }
-        }`,
-      { id: threadId, cursor },
-    );
-    const comments = payload?.data?.node?.comments;
-    nodes.push(...(comments?.nodes ?? []));
-    if (comments?.pageInfo?.hasNextPage && !comments.pageInfo.endCursor) {
-      throw new Error('thread comment pagination payload is missing endCursor');
-    }
-    cursor = comments?.pageInfo?.hasNextPage
-      ? comments.pageInfo.endCursor
-      : null;
+/** Unwrap a `ProviderGovernanceReadOutcome`, throwing the same synthetic
+ * 404 {@link throwSyntheticGhNotFound} does on `not-found` so a caller
+ * passing this as `fetchGovernanceJson`'s `fetchJson` thunk preserves that
+ * function's existing `deriveGhHttpStatus(error) === 404` catch. */
+function unwrapGovernanceOutcome(outcome) {
+  if (outcome.outcome === 'not-found') {
+    throwSyntheticGhNotFound();
   }
-  return nodes;
-}
-function ghGraphql(query, variables) {
-  const args = ['api', 'graphql', '-f', `query=${query}`];
-  for (const [key, value] of Object.entries(variables)) {
-    if (value === null || value === undefined) {
-      continue;
-    }
-    if (typeof value === 'number') {
-      args.push('-F', `${key}=${value}`);
-      continue;
-    }
-    args.push('-f', `${key}=${value}`);
-  }
-  return JSON.parse(runGh(args).trim() || '{}');
-}
-function ghJson(args, options = {}) {
-  return JSON.parse(runGh(args, options).trim() || '[]');
-}
-function ghApiJson(path, paginate = false, extraArgs = [], options = {}) {
-  const args = ['api', path, ...extraArgs];
-  if (paginate) {
-    // gh api with --paginate and --jq '.[]' emits one JSON object per line.
-    // --slurp landed in gh v2.48.0, but Ubuntu 24.04 LTS ships gh v2.45.0
-    // via apt, so keep the NDJSON-compatible form here.
-    args.push('--paginate', '--jq', '.[]');
-  }
-  const raw = runGh(args, options).trim();
-  if (!raw) {
-    return paginate ? [] : {};
-  }
-  if (paginate) {
-    return parsePaginatedGhNdjson(raw);
-  }
-  return JSON.parse(raw);
+  return outcome.value;
 }
 /**
  * Decide how a thrown `gh` failure is tolerated, returning the string result to
- * use or `undefined` when the caller must re-throw.
+ * use or `undefined` when the caller must re-throw. No longer called by this
+ * file's own collection path (#2267 routed every call site onto the provider
+ * port, which classifies its own failures), but kept -- pure, no `gh`
+ * invocation of its own -- for `idd-doctor.mts`'s own `fetchGhApiJsonAt`
+ * (an independent, un-migrated `gh api` caller) and its direct tests below.
  *
  * - `allowHttpStatuses` matches the HTTP status derived from the gh error via
- *   the shared `deriveGhHttpStatus` (the same extractor `fetchBranchRulesets`
- *   uses) and yields an **empty** string. `gh api` writes the JSON error body to
- *   stdout on a non-2xx response (a 404 prints `{"message":"Not Found",…}`), so
- *   returning that body would make `ghApiJson` parse the error object instead of
- *   `{}` / `[]`. An allowed status never carries useful data, so the empty
- *   result lets `ghApiJson` resolve it to an empty object / array.
+ *   the shared `deriveGhHttpStatus` and yields an **empty** string. `gh api`
+ *   writes the JSON error body to stdout on a non-2xx response (a 404 prints
+ *   `{"message":"Not Found",…}`), so returning that body would make the
+ *   caller parse the error object instead of `{}` / `[]`. An allowed status
+ *   never carries useful data, so the empty result resolves cleanly to an
+ *   empty object / array instead.
  * - `allowStatuses` matches the process exit code and returns stdout **only**
  *   when the body is genuinely the wanted JSON (`gh` commands that exit non-zero
  *   yet still print the data, e.g. the checks rollup).
@@ -1086,95 +1658,222 @@ export function resolveToleratedGhFailure(error, options = {}) {
   }
   return undefined;
 }
-function runGh(args, options = {}) {
-  try {
-    return ghText(args, {
-      ...GH_TEXT_LOOP_OPTIONS,
-      ...(args.includes('--paginate')
-        ? { timeout: DEFAULT_GH_PAGINATED_TIMEOUT_MS }
-        : {}),
-    });
-  } catch (error) {
-    const tolerated = resolveToleratedGhFailure(error, options);
-    if (tolerated !== undefined) {
-      return tolerated;
-    }
-    throw error;
-  }
-}
 function splitCsv(value) {
   return String(value ?? '')
     .split(',')
     .map((token) => token.trim())
     .filter(Boolean);
 }
-function isTruthy(value) {
-  return /^(1|true|yes)$/i.test(String(value ?? '').trim());
-}
-function readCollaboratorTrustEnabled() {
-  try {
-    return resolveCollaboratorMarkerTrust(
-      JSON.parse(readFileSync('.github/idd/config.json', 'utf8')),
-      process.env.IDD_TRUST_COLLABORATOR_MARKERS,
-    );
-  } catch {
-    // Fall through to env-var fallback.
-  }
-  return isTruthy(process.env.IDD_TRUST_COLLABORATOR_MARKERS);
+// #2373: takes the already-resolved trusted-ref config (see
+// `collectPreMergeReadiness`'s own `iddConfig` resolution) instead of
+// reading `.github/idd/config.json` locally -- `normalizePolicyConfig`/
+// `resolveCollaboratorMarkerTrust` already treat `null` (and a malformed
+// shape within a valid object) as "unconfigured", so no try/catch is
+// needed here now that the fetch itself owns the fail-closed contract.
+function readCollaboratorTrustEnabled(iddConfig) {
+  return resolveCollaboratorMarkerTrust(
+    iddConfig,
+    process.env.IDD_TRUST_COLLABORATOR_MARKERS,
+  );
 }
 // Configured waivable external-check selectors (`ciGate.externalChecks.
 // waivable`). The F2 gate only lets a valid waiver fold a check into
-// `requiredChecksPassing` when that check sits on this surface; an absent or
-// unreadable config yields an empty list (nothing waivable).
-function readWaivableCheckSelectors() {
-  try {
-    return [
-      ...normalizePolicyConfig(
-        JSON.parse(readFileSync('.github/idd/config.json', 'utf8')),
-      ).ciGate.externalChecks.waivable,
-    ];
-  } catch {
-    return [];
-  }
+// `requiredChecksPassing` when that check sits on this surface; an absent
+// config yields an empty list (nothing waivable).
+function readWaivableCheckSelectors(iddConfig) {
+  return [...normalizePolicyConfig(iddConfig).ciGate.externalChecks.waivable];
 }
 // Configured external-check waiver validity window (`ciGate.
 // externalCheckWaivers.maxValidity`). The consume side re-enforces it so a
 // waiver whose `expiresAt - createdAt` outlives the policy window cannot count
-// as valid. `normalizePolicyConfig` already defaults this to `PT24H`; an absent
-// or unreadable config falls back to the same authoring default.
-function readExternalCheckWaiverMaxValidity() {
+// as valid. `normalizePolicyConfig` already defaults this to `PT24H`; an
+// absent config falls back to the same authoring default.
+function readExternalCheckWaiverMaxValidity(iddConfig) {
+  return normalizePolicyConfig(iddConfig).ciGate.externalCheckWaivers
+    .maxValidity;
+}
+// Configured external-check waiver mode (`ciGate.externalCheckWaivers.mode`,
+// #2046). `mode` gates the WHOLE waiver mechanism independent of the
+// `waivable` selector list -- an absent config falls back to
+// `normalizePolicyConfig`'s own schema default (`disabled`), the fail-closed
+// choice: an unconfigured repository can never make this check wrongly
+// report an otherwise-valid waiver as covered when the real required check
+// would not honor it, mirroring `advisory-convergence.mts`'s own
+// fail-closed guard.
+function readExternalCheckWaiverMode(iddConfig) {
+  return normalizePolicyConfig(iddConfig).ciGate.externalCheckWaivers.mode;
+}
+// #2353 (Codex review on PR #2370, second follow-up): a declaration's own
+// `startedAt` is generated before the `--declare --apply` interactive
+// confirmation prompt, while the GitHub comment's `createdAt` is stamped
+// only once the maintainer actually confirms posting it. A failed check
+// that completes during that pause satisfies a `startedAt`-only cutoff
+// even though the declaration did not verifiably exist on GitHub yet and
+// the check never reran under it. Use the LATER of the two timestamps as
+// the true "this declaration became a real, postable fact" moment.
+// `createdAt` may be the literal string `"none"` (schema-documented) or
+// otherwise unparseable; in that case this falls back to `startedAt`
+// alone, unchanged from before this fix -- never widening the cutoff.
+export function resolveDeclarationActiveSince(declaration) {
+  const startedAtMs = Date.parse(String(declaration?.startedAt ?? ''));
+  const createdAtMs = Date.parse(String(declaration?.createdAt ?? ''));
+  const candidates = [startedAtMs, createdAtMs].filter((ms) =>
+    Number.isFinite(ms),
+  );
+  if (candidates.length === 0) return '';
+  return new Date(Math.max(...candidates)).toISOString();
+}
+// #2353: resolve whether a repository-scoped `providerOutage.
+// declarationTarget` declaration relieves the `idd-advisory-convergence`
+// selector for this pull request -- the SAME selector
+// #2554: resolve whether a repository-scoped `providerOutage.
+// declarationTarget` declaration is active for the `idd-advisory-convergence`
+// selector, used ONLY to gate the declaration-scoped terminal-window
+// override (`resolveEffectiveAdvisoryTerminalWindowMinutes`'s
+// `declarationActive` input, above). Deliberately independent of
+// `resolveAdvisoryConvergenceOutageRelief` below rather than sharing its
+// result: this file already tolerates independent per-consumer evidence
+// collection (see `lastCopilotCommit`'s doc comment further up). Fails
+// closed to `false` on ANY error (unset target, unreadable/unparseable
+// comments, authority-lookup failure) -- a transient fetch failure must
+// never shorten the terminal-unavailability window this gates.
+function resolveOutageDeclarationActiveForConvergenceSelector({
+  port,
+  owner,
+  repo,
+  iddConfig,
+  now,
+}) {
   try {
-    return normalizePolicyConfig(
-      JSON.parse(readFileSync('.github/idd/config.json', 'utf8')),
-    ).ciGate.externalCheckWaivers.maxValidity;
+    const policy = normalizePolicyConfig(iddConfig);
+    const targetIssue = policy.providerOutage.declarationTarget;
+    if (!targetIssue) return false;
+    const declarationComments = port
+      .listWorkItemComments(targetIssue)
+      .map(toIssueCommentPayload);
+    const authorityOf = (actorLogin) =>
+      normalizeAuthorityEvidence(
+        resolveCollaboratorAuthority({ owner, repo, actor: actorLogin }),
+        actorLogin,
+        owner,
+        policy.ciGate.externalCheckWaivers.authorityPolicy,
+      );
+    return resolveProviderOutageDeclaration({
+      declarationTargetConfigured: true,
+      comments: declarationComments,
+      service: DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+      policy,
+      authorityOf,
+      now: new Date(now),
+    }).active;
   } catch {
-    return 'PT24H';
+    return false;
+  }
+}
+// `advisory-convergence.mts`'s own gate relieves via its own,
+// independently-fetched declaration (see that file's `collectFromGitHub`).
+// Fails closed to `{ relieved: false, since: '' }` on ANY error (unset
+// target, unreadable/unparseable declaration-target comments, authority-
+// lookup failure) -- a transient fetch failure must never widen what this
+// gate accepts, matching `prFirstCommitAt`'s own fail-closed contract
+// above. `copilotUnavailable` is the caller-supplied `prTerminalUnavailable`
+// evidence `evaluateProviderOutageRelief` requires independently of the
+// declaration itself (never itself sufficient) -- the same terminal-
+// unavailability verdict this file's own `copilot-terminal-unavailable`
+// blocker already consumes. Requires `ciGate.externalCheckWaivers.mode`
+// to be `maintainer-authorized` (Codex review on PR #2370): without this,
+// an adopter that leaves `mode` at its `disabled` default but configures
+// the waivable selector and posts a declaration would relieve here while
+// `computeAdvisoryConvergenceVerdict`'s own gate -- gated on the SAME
+// `waiverMode === 'maintainer-authorized'` check -- still rejects it,
+// exactly the two-gate disagreement #2021 already fixed for the direct
+// per-pull-request waiver path. `since` is the declaration's own
+// active-since moment (Codex review on PR #2370): a required check's live
+// run must have STARTED (Copilot review, round 5: not "completed" --
+// `summarizeRequiredChecks`'s `treatAsCoveredByWaiver` cutoff anchors on
+// `startedAt`) AT OR AFTER this moment to count as covered -- otherwise
+// the check was never actually rerun during the declared outage window,
+// and GitHub's own required-check state stays whatever a stale
+// pre-declaration run left it at while this gate reports covered,
+// reproducing #2021's "ready but merge blocked" class one layer deeper.
+function resolveAdvisoryConvergenceOutageRelief({
+  port,
+  owner,
+  repo,
+  iddConfig,
+  copilotUnavailable,
+  waivableCheckSelectors,
+  now,
+}) {
+  const notRelieved = { relieved: false, since: '' };
+  try {
+    const policy = normalizePolicyConfig(iddConfig);
+    if (policy.ciGate.externalCheckWaivers.mode !== 'maintainer-authorized') {
+      return notRelieved;
+    }
+    const targetIssue = policy.providerOutage.declarationTarget;
+    if (!targetIssue) return notRelieved;
+    const declarationComments = port
+      .listWorkItemComments(targetIssue)
+      .map(toIssueCommentPayload);
+    const authorityOf = (actorLogin) =>
+      normalizeAuthorityEvidence(
+        resolveCollaboratorAuthority({ owner, repo, actor: actorLogin }),
+        actorLogin,
+        owner,
+        policy.ciGate.externalCheckWaivers.authorityPolicy,
+      );
+    const declaration = resolveProviderOutageDeclaration({
+      declarationTargetConfigured: true,
+      comments: declarationComments,
+      service: DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+      policy,
+      authorityOf,
+      now: new Date(now),
+    });
+    const relieved = evaluateProviderOutageRelief({
+      declarationActive: declaration.active,
+      prTerminalUnavailable: copilotUnavailable,
+      requestedSelector: DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+      waivableSelectors: waivableCheckSelectors
+        .map((entry) => ({
+          selector: String(entry.selector ?? ''),
+          matchMode:
+            typeof entry.matchMode === 'string' ? entry.matchMode : undefined,
+        }))
+        .filter((entry) => entry.selector.length > 0),
+    }).relieved;
+    return {
+      relieved,
+      since: relieved
+        ? resolveDeclarationActiveSince(declaration.declaration)
+        : '',
+    };
+  } catch {
+    return notRelieved;
   }
 }
 // Configured claim-staleness window (`claimTiming.staleAge`, #1310), parsed
 // to milliseconds so the write-gate claim resolver honors it instead of the
-// hardcoded 24h `isStaleAt` default. Reuses the shared `loadIddConfig`
-// loader (already imported by this file) instead of a per-helper
-// `readFileSync + JSON.parse` copy; `loadIddConfig` already fails safe to
-// `null` and `normalizePolicyConfig(null)` already defaults to `PT24H`, so
-// no separate try/catch is needed here. An absent, unreadable, or
-// unparseable config falls back to the shared `DEFAULT_STALE_AGE_MS`
-// (protocol-helpers.mts) rather than a second local 24h literal, so
-// behavior is unchanged for repos on the default and there is exactly one
-// hardcoded-24h source of truth.
-function readClaimStaleAgeMs() {
-  const staleAge = normalizePolicyConfig(loadIddConfig()).claimTiming.staleAge;
+// hardcoded 24h `isStaleAt` default. Takes the caller's already-resolved
+// trusted-ref config (#2373) instead of its own `.github/idd/config.json`
+// read; `normalizePolicyConfig(null)` already defaults to `PT24H`, so no
+// try/catch is needed here. An absent or unparseable value falls back to
+// the shared `DEFAULT_STALE_AGE_MS` (protocol-helpers.mts) rather than a
+// second local 24h literal, so behavior is unchanged for repos on the
+// default and there is exactly one hardcoded-24h source of truth.
+function readClaimStaleAgeMs(iddConfig) {
+  const staleAge = normalizePolicyConfig(iddConfig).claimTiming.staleAge;
   return parseIsoDurationToMs(staleAge) ?? DEFAULT_STALE_AGE_MS;
 }
 // Configured governance-read trust opt-in (`ciGate.trustEmptyProtectionReads`,
-// #1377). Reuses the shared `loadIddConfig` loader (already imported by this
-// file); an absent, unreadable, or unparseable config fails safe to the
-// `false` default via `normalizePolicyConfig(null)`, matching
-// `readClaimStaleAgeMs`'s pattern above.
-function readTrustEmptyProtectionReads() {
+// #1377). Takes the caller's already-resolved trusted-ref config (#2373);
+// an absent or unparseable config fails safe to the `false` default via
+// `normalizePolicyConfig(null)`, matching `readClaimStaleAgeMs`'s pattern
+// above.
+function readTrustEmptyProtectionReads(iddConfig) {
   return (
-    normalizePolicyConfig(loadIddConfig()).ciGate.trustEmptyProtectionReads ===
-    true
+    normalizePolicyConfig(iddConfig).ciGate.trustEmptyProtectionReads === true
   );
 }
 // Configured source-pinned required-check trust opt-in
@@ -1182,10 +1881,10 @@ function readTrustEmptyProtectionReads() {
 // `readTrustEmptyProtectionReads` above; see `summarizeRequiredChecks`'s
 // (protocol-helpers.mts) doc comment on the option of the same name for the
 // full rationale.
-function readTrustSourcePinnedRequiredChecks() {
+function readTrustSourcePinnedRequiredChecks(iddConfig) {
   return (
-    normalizePolicyConfig(loadIddConfig()).ciGate
-      .trustSourcePinnedRequiredChecks === true
+    normalizePolicyConfig(iddConfig).ciGate.trustSourcePinnedRequiredChecks ===
+    true
   );
 }
 /**
@@ -1210,14 +1909,23 @@ function readTrustSourcePinnedRequiredChecks() {
  * permission error.
  *
  * `fetchJson` is injectable for tests (mirrors `fetchBranchRulesets`'s
- * `fetchRulesetDetail` parameter); production uses the default `gh api` call.
+ * `fetchRulesetDetail` parameter). No generic default transport: unlike
+ * `fetchBranchRulesets`/`resolveEligibleCodeownerUserLogins`, this helper
+ * has no owner/repo/ref of its own to construct a port-backed read from --
+ * every real caller (this file's own two governance reads, plus
+ * `idd-doctor.mts`'s independent `fetchGhApiJsonAt`-backed caller) already
+ * passes an explicit `fetchJson`.
  */
 export function fetchGovernanceJson(
   path,
   paginate,
   trustEmptyReads,
   emptyValue,
-  fetchJson = (p, pg) => ghApiJson(p, pg, []),
+  fetchJson = () => {
+    throw new Error(
+      'fetchGovernanceJson: no default transport; pass an explicit fetchJson',
+    );
+  },
 ) {
   try {
     return { value: fetchJson(path, paginate), unreadable: false };

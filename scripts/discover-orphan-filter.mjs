@@ -4,6 +4,7 @@
 // The scripts/discover-orphan-filter.mjs copy is generated from the .mts
 // source named above by `pnpm run build`. Edit the .mts source, never the
 // generated .mjs. See docs/typescript-sources.md.
+import { existsSync } from 'node:fs';
 import {
   buildAuthoringLabelWarning,
   resolveAuthoringGuardPolicy,
@@ -14,6 +15,8 @@ import {
   parseAutopilotSuitability,
   rankAndRouteBySuitability,
 } from './autopilot-suitability.mjs';
+import { stripLeadingArgumentSeparator } from './cli-args.mjs';
+import { collaboratorPermission } from './collaborator-permission.mjs';
 import {
   extractBlockedByIssueNumbers,
   extractDependencyIssueNumbers,
@@ -24,12 +27,139 @@ import {
   buildClaimStateResolution,
 } from './discover-roadmap-graph.mjs';
 import { effortOrdinal, parseEffort } from './effort.mjs';
-import { GH_TEXT_LOOP_TIMEOUT_OPTIONS, ghText } from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
+import { stripMarkdownCodeRegions } from './markdown-code.mjs';
 import { createMarkerRegex } from './marker-regex.mjs';
 import { normalizePolicyConfig, POLICY_DEFAULTS } from './policy-helpers.mjs';
+import { resolveTrustedMarkerActors } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
+import {
+  findTrustedSuitabilityRejection,
+  isSuitabilityTriageVerdictCurrent,
+  resolveLatestSubstantiveIssueEditAt,
+} from './supersession-detection.mjs';
+import {
+  buildTrustedLoginPredicate,
+  candidateFilesExistOnDisk,
+  evaluateStructuralEvidence,
+  hasAllStructuralSignals,
+  hasVerificationCommandSignal,
+} from './triage-structural-evidence.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
+// A runtime/production-observation precondition (#2467) carries no
+// issue-number reference, so neither the marker checks above nor the
+// numbered-reference resolution below ever see it -- a follow-up gated by
+// "confirmed in production" / "observed live" / "runtime-observation" reads
+// as a plain orphan once its linked code dependency merges. Kept narrow
+// (three phrasings plus tense variants) rather than a broad "wait/deploy"
+// vocabulary: a false positive here permanently exiles a startable issue
+// from the discover pool, while a false negative only preserves today's
+// behavior.
+const RUNTIME_OBSERVATION_PATTERNS = [
+  /\bconfirm(?:ed|ing)?\s+(?:to\s+take\s+effect\s+)?in\s+production\b/gi,
+  /\bobserv(?:ed|ing)?\s+live\b/gi,
+  /\bruntime[- ]observation\b/gi,
+];
+const NEGATION_CUE_PATTERN =
+  /\b(?:not|never|without|isn't|is not|doesn't|does not|don't|do not|won't|will not|no need|needn't)\b/i;
+const NEGATION_CUE_WINDOW = 40;
+const NEGATION_HARD_BREAK_PATTERN = /[.;\n]|--|—/g;
+const OPEN_QUOTE_CHARS = new Set(['"', "'", '“', '‘']);
+const CLOSE_QUOTE_CHARS = new Set(['"', "'", '”', '’']);
+const TRAILING_QUOTE_PUNCTUATION_PATTERN = /^[.,!?;:]*/;
+// A match opening a much longer quoted excerpt attributed to a different,
+// cited issue by number ("Issue #2743 asserted in its Background:
+// '<trigger phrase>: ...much more quoted prose...' -- describing a
+// specific event.", #2746) is quoted historical context from another
+// issue, not a live precondition on THIS issue -- even though ordinary
+// sentence punctuation (a colon) continues the quotation right after the
+// match instead of a closing quote character, so `isQuotedMatch` below
+// never recognizes it. Scoped narrowly to the shape this issue found: an
+// open-quote character immediately before the match (the same adjacency
+// `isQuotedMatch` requires), preceded within a bounded window by an
+// issue-number reference and then a colon introducing the quotation.
+//
+// Two conditions bound the colon to that same attribution, not just any
+// nearby colon (Copilot/Codex/CodeRabbit review, PR #2760): the colon
+// must directly introduce the quote (only whitespace between the colon
+// and the opening quote character -- "Issue #42: prior history. The
+// requirement is 'X'" has no such colon and must NOT match), and no hard
+// clause break (period/semicolon/em-dash) may separate the issue-number
+// reference from that colon -- "See #42 for rollout details. Acceptance
+// gate: 'X'" has an unrelated label's colon after a sentence break and
+// must NOT match either, even though a colon does directly precede the
+// quote. When more than one issue reference sits in the window ("See #1.
+// Issue #2 asserted: 'X'"), bind to the LAST one, not the first -- an
+// earlier, unrelated reference must not make a genuine attribution look
+// hard-broken (round-2 Copilot/Codex review, PR #2760).
+//
+// Attribution alone does not prove the quoted text is inert history: an
+// issue can cite another issue's prerequisite and explicitly RE-ADOPT it,
+// either right after the quote closes ("Per issue #42: 'confirmed in
+// production before shipping' remains required" -- Codex review, PR
+// #2760) or right before the citation opens ("This change still
+// requires issue #42's gate: 'confirmed in production before shipping'"
+// -- Codex review round 4, PR #2760). A requirement-assertion word on
+// EITHER side, with no hard break in between, cancels this exclusion --
+// the same bidirectional shape `discover-viability-gate.mts`'s own
+// requirement-assertion cancellation already uses.
+const CITED_ISSUE_ATTRIBUTION_WINDOW = 80;
+const ISSUE_NUMBER_REFERENCE_PATTERN = /#\d+/g;
+const CITED_ISSUE_ATTRIBUTION_COLON_PATTERN = /:\s*$/;
+// Every standard English sentence terminator, not just period/semicolon
+// -- a question or exclamation mark ending an unrelated sentence must
+// also stop an earlier reference from attributing a later quote (Codex
+// review round 3, PR #2760). A bare newline is a Markdown SOFT wrap, not
+// a clause break -- only a blank line OR a following list-item marker
+// (a real paragraph/list boundary) counts, matching
+// `discover-viability-gate.mts`'s own CUE_HARD_BREAK_PATTERN exactly: a
+// genuine attribution can wrap between the reference and its colon just
+// as easily as between the colon and the quote (Codex review round 5,
+// PR #2760), but separate bullets written without a blank line ("-
+// Related issue #42\n- Acceptance gate: 'X'") must not connect through
+// each other either (Codex review round 6, PR #2760).
+const CITED_ISSUE_ATTRIBUTION_HARD_BREAK_PATTERN =
+  /[.;?!]|--|—|\n[ \t]*(?:[-*]\s|\d+[.)]\s)|\n[ \t]*\n/;
+// The requirement-assertion lookahead/lookbehind windows stay bounded
+// (40 chars); only the CLOSE-QUOTE search itself is unbounded, since
+// this exclusion exists specifically for quotes that copy a "much
+// longer" excerpt verbatim -- an artificial bound there left a real
+// closer, and any re-adoption cue past it, unreached (Codex review
+// round 4, PR #2760; comment corrected per Copilot review round 5).
+const ATTRIBUTION_REQUIREMENT_LOOKAHEAD_WINDOW = 40;
+// `blocked`/`blocking`/`pending`/`waiting`/`shall`/`essential` join the
+// same vocabulary `discover-viability-gate.mts`'s own requirement-
+// assertion pattern already uses, so a re-adopted prerequisite phrased
+// as "remains blocked" or "shall remain the acceptance gate" is
+// recognized too, not only "remains required" (Codex review rounds 3
+// and 5, PR #2760).
+const ATTRIBUTION_REQUIREMENT_ASSERTION_PATTERN =
+  /\b(required|require[sd]?|requiring|must|needed|needs?|mandatory|necessary|blocked|blocking|pending|waiting|shall|essential)\b/i;
+// A quoted excerpt's closer must PAIR with its actual opener, not match
+// any member of the flat CLOSE_QUOTE_CHARS set -- otherwise an unrelated
+// apostrophe of a DIFFERENT quote family inside the excerpt (a plural
+// possessive like "operators'", not merely a contraction already
+// guarded above) can still be mistaken for the closer, making the real
+// closer and any re-adoption cue past it unreachable (Codex review
+// round 5, PR #2760). Mirrors `discover-viability-gate.mts`'s own
+// `QUOTE_CHAR_PAIRS`.
+const QUOTE_CHAR_PAIRS = {
+  '"': '"',
+  "'": "'",
+  '‘': '’',
+  '“': '”',
+};
+// A straight/curly apostrophe inside the quoted excerpt itself (a
+// contraction or possessive, e.g. "it's") must not be mistaken for the
+// closing quote -- only a candidate NOT immediately followed by a
+// letter or digit is a plausible closer (Copilot review round 3, PR
+// #2760), mirroring `discover-viability-gate.mts`'s own
+// quote-vs-apostrophe adjacency check.
+const WORD_CHAR_PATTERN = /[A-Za-z0-9]/;
 if (import.meta.main) {
   await runCli();
 }
@@ -43,6 +173,207 @@ if (import.meta.main) {
  */
 export function extractBlockedByReferences(body) {
   return extractBlockedByIssueNumbers(String(body ?? ''));
+}
+// A negation ("does not need to be confirmed in production") within the
+// same clause turns the match into the opposite of a precondition -- scoped
+// to the nearest hard clause break so a negation cue from an earlier (or,
+// for the after-match check, a later) unrelated sentence cannot suppress a
+// genuine match (mirrors `AVOIDANCE_CUE_WINDOW`'s clause-scoping in
+// `discover-viability-gate.mts`). A same-clause negation can follow the
+// matched phrase too ("Runtime observation is not required before
+// starting", #2529 review) -- both directions share the same cue list and
+// window.
+function hasNegationCueBefore(text, matchIndex) {
+  const windowStart = Math.max(0, matchIndex - NEGATION_CUE_WINDOW);
+  const window = text.slice(windowStart, matchIndex);
+  const breaks = [...window.matchAll(NEGATION_HARD_BREAK_PATTERN)];
+  const lastBreak = breaks.at(-1);
+  const scoped = lastBreak
+    ? window.slice(lastBreak.index + lastBreak[0].length)
+    : window;
+  return NEGATION_CUE_PATTERN.test(scoped);
+}
+function hasNegationCueAfter(text, matchEnd) {
+  const windowEnd = Math.min(text.length, matchEnd + NEGATION_CUE_WINDOW);
+  const window = text.slice(matchEnd, windowEnd);
+  const breaks = [...window.matchAll(NEGATION_HARD_BREAK_PATTERN)];
+  const firstBreak = breaks[0];
+  const scoped = firstBreak ? window.slice(0, firstBreak.index) : window;
+  return NEGATION_CUE_PATTERN.test(scoped);
+}
+// A phrase quoted as a term being discussed (e.g. this function's own
+// motivating issue, which names the trigger phrases inside straight double
+// quotes) is meta-discussion, not an asserted precondition on THIS issue.
+// Sentence punctuation routinely sits INSIDE the closing quote ("observed
+// live." -- #2529 review), so the close side tolerates a short run of
+// punctuation between the match and the quote character; the open side
+// stays exact-adjacent, matching every observed real-world shape.
+function isQuotedMatch(text, start, end) {
+  const before = text[start - 1];
+  const afterSlice = text.slice(end, end + 4);
+  const punctuation = TRAILING_QUOTE_PUNCTUATION_PATTERN.exec(afterSlice);
+  const after = afterSlice[punctuation?.[0]?.length ?? 0];
+  return (
+    before !== undefined &&
+    after !== undefined &&
+    OPEN_QUOTE_CHARS.has(before) &&
+    CLOSE_QUOTE_CHARS.has(after)
+  );
+}
+// A requirement-assertion word shortly after the quote closes, with no
+// hard break in between, means the citing issue RE-ADOPTS the quoted
+// prerequisite as its own live requirement rather than merely reporting
+// inert history (Codex review, PR #2760). The close side searches the
+// rest of the corpus for a character that PAIRS with `opener` -- this
+// exclusion exists precisely for "much longer" quotes, so the closer can
+// be arbitrarily far from the match (Codex review round 4, PR #2760) --
+// rather than any member of CLOSE_QUOTE_CHARS, so an apostrophe of a
+// DIFFERENT quote family inside the excerpt (a plural possessive like
+// "operators'" inside a double-quoted excerpt) is never mistaken for
+// the real closer (Codex review round 5, PR #2760). Pairing alone still
+// isn't enough for a SINGLE-quoted excerpt: an internal plural
+// possessive apostrophe is the SAME family as the real closer, so every
+// plausible candidate is tried in order (not just the first) until one
+// is followed by a requirement assertion, or none are left (Copilot/
+// Codex review round 6, PR #2760).
+function isFollowedByRequirementAssertion(text, quotedContentStart, opener) {
+  const closer = QUOTE_CHAR_PAIRS[opener];
+  if (closer === undefined) {
+    return false;
+  }
+  const region = text.slice(quotedContentStart);
+  let searchFrom = 0;
+  while (searchFrom < region.length) {
+    let closeOffset = -1;
+    for (let i = searchFrom; i < region.length; i++) {
+      if (region[i] !== closer) {
+        continue;
+      }
+      if (WORD_CHAR_PATTERN.test(region[i + 1] ?? '')) {
+        continue;
+      }
+      closeOffset = i;
+      break;
+    }
+    if (closeOffset === -1) {
+      return false;
+    }
+    const afterClose = quotedContentStart + closeOffset + 1;
+    const lookahead = text.slice(
+      afterClose,
+      Math.min(
+        text.length,
+        afterClose + ATTRIBUTION_REQUIREMENT_LOOKAHEAD_WINDOW,
+      ),
+    );
+    const hardBreak =
+      CITED_ISSUE_ATTRIBUTION_HARD_BREAK_PATTERN.exec(lookahead);
+    const scoped = hardBreak ? lookahead.slice(0, hardBreak.index) : lookahead;
+    if (ATTRIBUTION_REQUIREMENT_ASSERTION_PATTERN.test(scoped)) {
+      return true;
+    }
+    searchFrom = closeOffset + 1;
+  }
+  return false;
+}
+// The mirror image of {@link isFollowedByRequirementAssertion}: a
+// requirement-assertion word shortly BEFORE the cited reference, with no
+// hard break in between, means the citing issue already re-adopted the
+// prerequisite before ever citing it ("This change still requires issue
+// #42's gate: 'X'" -- Codex review round 4, PR #2760).
+function isPrecededByRequirementAssertion(text, referenceStart) {
+  const windowStart = Math.max(
+    0,
+    referenceStart - ATTRIBUTION_REQUIREMENT_LOOKAHEAD_WINDOW,
+  );
+  const lookbehind = text.slice(windowStart, referenceStart);
+  const breaks = [
+    ...lookbehind.matchAll(
+      new RegExp(CITED_ISSUE_ATTRIBUTION_HARD_BREAK_PATTERN, 'g'),
+    ),
+  ];
+  const lastBreak = breaks.at(-1);
+  const scoped = lastBreak
+    ? lookbehind.slice(lastBreak.index + lastBreak[0].length)
+    : lookbehind;
+  return ATTRIBUTION_REQUIREMENT_ASSERTION_PATTERN.test(scoped);
+}
+// A match that opens a longer quoted excerpt attributed to a different,
+// cited issue by number (#2746) -- see the constants above for the
+// motivating shape. Only the open-quote adjacency is required on the
+// open side (unlike `isQuotedMatch`: the whole point of this exclusion
+// is the shape where no nearby closing quote follows the match itself).
+// `selfIssueNumber`, when given, prevents an issue from attributing a
+// quote to ITSELF: "Issue #122 acceptance criterion: 'X'" inside issue
+// #122's own body is not an external citation, so the cited number must
+// differ from the candidate's own (Codex review round 5, PR #2760).
+function isAttributedLongQuote(text, start, selfIssueNumber) {
+  const before = text[start - 1];
+  if (before === undefined || !OPEN_QUOTE_CHARS.has(before)) {
+    return false;
+  }
+  const windowStart = Math.max(0, start - 1 - CITED_ISSUE_ATTRIBUTION_WINDOW);
+  const window = text.slice(windowStart, start - 1);
+  const colonMatch = CITED_ISSUE_ATTRIBUTION_COLON_PATTERN.exec(window);
+  if (!colonMatch) {
+    return false;
+  }
+  const referenceMatches = [...window.matchAll(ISSUE_NUMBER_REFERENCE_PATTERN)];
+  const referenceMatch = referenceMatches.at(-1);
+  if (!referenceMatch || referenceMatch.index === undefined) {
+    return false;
+  }
+  if (
+    selfIssueNumber !== undefined &&
+    Number(referenceMatch[0].slice(1)) === selfIssueNumber
+  ) {
+    return false;
+  }
+  // Stop at the introducing colon itself -- the whitespace AFTER it
+  // (which can include a Markdown soft-wrap newline before the quote,
+  // e.g. "Background:\n\"X\"") is not part of the reference-to-colon
+  // relationship this hard-break scan is meant to police (Codex review
+  // round 3, PR #2760).
+  const betweenReferenceAndColon = window.slice(
+    referenceMatch.index + referenceMatch[0].length,
+    colonMatch.index,
+  );
+  return (
+    !CITED_ISSUE_ATTRIBUTION_HARD_BREAK_PATTERN.test(
+      betweenReferenceAndColon,
+    ) &&
+    !isFollowedByRequirementAssertion(text, start, before) &&
+    !isPrecededByRequirementAssertion(text, windowStart + referenceMatch.index)
+  );
+}
+/**
+ * Detect prose naming a runtime/production-observation precondition
+ * (#2467) anywhere in `body`, outside of code regions. Returns `true` on
+ * the first match that is neither quoted nor negated -- callers only need a
+ * boolean gate, not the matched span. `selfIssueNumber`, when given, stops
+ * the candidate's own issue number from being treated as an external
+ * citation by {@link isAttributedLongQuote} (Codex review round 5, PR
+ * #2760).
+ */
+export function detectRuntimeObservationPrecondition(body, selfIssueNumber) {
+  const stripped = stripMarkdownCodeRegions(String(body ?? ''));
+  for (const pattern of RUNTIME_OBSERVATION_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match = pattern.exec(stripped);
+    while (match) {
+      const end = match.index + match[0].length;
+      if (
+        !isQuotedMatch(stripped, match.index, end) &&
+        !isAttributedLongQuote(stripped, match.index, selfIssueNumber) &&
+        !hasNegationCueBefore(stripped, match.index) &&
+        !hasNegationCueAfter(stripped, end)
+      ) {
+        return true;
+      }
+      match = pattern.exec(stripped);
+    }
+  }
+  return false;
 }
 export function getOrphanFirstPolicy(config) {
   if (!config || typeof config !== 'object') {
@@ -63,6 +394,15 @@ export function getOrphanFirstPolicy(config) {
   return 'none';
 }
 export function classifyIssue(issue, options) {
+  // #2800: checked first, ahead of every marker/label check below — the
+  // declaration target is deliberately marker-less and label-less, so
+  // none of those checks would ever catch it on their own.
+  if (
+    options.providerOutageDeclarationTarget != null &&
+    Number(issue.number) === options.providerOutageDeclarationTarget
+  ) {
+    return { orphan: false, reason: 'provider_outage_target' };
+  }
   const labels = new Set(normalizeLabels(issue.labels));
   const body = String(issue.body ?? '');
   const markerPrefix = normalizeMarkerPrefix(options.markerPrefix);
@@ -98,6 +438,25 @@ export function classifyIssue(issue, options) {
       details: authoringLabelName,
     };
   }
+  // Runs regardless of blockedRefs/dependencyRefs state (#2467): a
+  // production-observation precondition has no issue-number reference to
+  // resolve, so it must still hold even when every numbered reference below
+  // is absent or already closed.
+  //
+  // #2767: a hit demotes to a warned orphan (fall through, don't return)
+  // only when every structural-evidence signal holds; otherwise this
+  // remains a hard filter exactly as before.
+  let runtimeObservationDemoted = false;
+  if (detectRuntimeObservationPrecondition(body, Number(issue.number))) {
+    if (hasAllStructuralSignals(options.structuralEvidence)) {
+      runtimeObservationDemoted = true;
+    } else {
+      return { orphan: false, reason: 'runtime_observation_precondition' };
+    }
+  }
+  const demotionWarning = runtimeObservationDemoted
+    ? { warning: 'runtime_observation_precondition_demoted' }
+    : {};
   // Two independent reference families, matching A3's own dependency check
   // in `discover-readiness-check.mts` (#1536): visible `Blocked by #NNN`
   // lines (a hard sequential dependency, no exemption) and `Depends on
@@ -113,7 +472,7 @@ export function classifyIssue(issue, options) {
   const blockedRefs = extractBlockedByReferences(body);
   const dependencyRefs = extractDependencyIssueNumbers(body);
   if (blockedRefs.length === 0 && dependencyRefs.length === 0) {
-    return { orphan: true, reason: 'orphan' };
+    return { orphan: true, reason: 'orphan', ...demotionWarning };
   }
   const unresolved = [];
   for (const ref of blockedRefs) {
@@ -162,9 +521,23 @@ export function classifyIssue(issue, options) {
   }
   // Reaching here means blockedRefs/dependencyRefs was non-empty (the
   // earlier both-empty check already returned `orphan`) and every ref
-  // resolved to a non-open, non-unresolvable state (closed, or an
-  // exempt open parent epic) -- never "no refs at all" again.
-  return { orphan: true, reason: 'blocked_references_closed' };
+  // resolved to a non-open, non-unresolvable state -- either genuinely
+  // closed, or an open parent epic exempted by isDependencyEpicExempt
+  // above (the `continue` a few lines up) -- never "no refs at all"
+  // again. Named `references_non_blocking` rather than a
+  // "blocked"-sounding name (originally `blocked_references_closed`):
+  // that name read as the opposite of its actual meaning once an
+  // issue also landed in `routed_to_human` for an unrelated reason
+  // (#2932, illustrated on #2781). `references_non_blocking` also
+  // covers the exempt-open-epic path correctly, unlike an interim
+  // `references_resolved` name would have (Copilot/Codex review, PR
+  // #2936): an exempt epic reference has not resolved/closed, it is
+  // merely non-blocking.
+  return {
+    orphan: true,
+    reason: 'references_non_blocking',
+    ...demotionWarning,
+  };
 }
 /**
  * Resolve whether an **open** dependency reference is exempt as a parent
@@ -195,17 +568,29 @@ export async function filterOrphanIssues(issues, options = {}) {
       ? options.fetchIssueStateByNumber
       : () => 'UNRESOLVABLE';
   const filtered = {
+    provider_outage_target: [],
     roadmap_marker: [],
     blocked_by_marker: [],
     blocked_label: [],
     authoring_label: [],
+    runtime_observation_precondition: [],
     blocked_by_open_reference: [],
     open_dependency_reference: [],
     unresolvable_reference: [],
+    triage_verdict_rejected: [],
   };
   const orphans = [];
   const unresolvable = [];
   const warnings = [];
+  // #2767 (CodeRabbit review, PR #2840): collected here, not pushed
+  // immediately -- a candidate can still be excluded from the final
+  // `orphans` list below (the triage-verdict-rejected filter, or
+  // autopilot's below-floor `routed_to_human` routing), and this warning's
+  // own text asserts "it stays listed as an orphan," which would be wrong
+  // for an issue that does not survive to the final partition. Emitted
+  // only for numbers still present in `ranked` at the end of this
+  // function.
+  const demotedOrphanNumbers = new Set();
   // Self-batch lookup for the dependency parent-epic exemption (#1536): in
   // the CLI wiring `issues` is always the full open-issue batch
   // (`fetchOpenIssues`), so any `Depends on` / task-list reference that
@@ -219,8 +604,20 @@ export async function filterOrphanIssues(issues, options = {}) {
       { title: candidate.title, labels: candidate.labels },
     ]),
   );
+  // #2243 staleness anchor lookup: each candidate's own createdAt, used as
+  // the resolveLatestSubstantiveIssueEditAt fallback below.
+  const issueCreatedAtByNumber = new Map(
+    issues.map((candidate) => [candidate.number, candidate.createdAt]),
+  );
+  // #2767: built once for the whole batch (not per-candidate) -- the
+  // static trustedMarkerLogins check is cheap, and isTrustedCollaborator
+  // (when supplied) already caches its own live lookups.
+  const isTrustedLogin = buildTrustedLoginPredicate(
+    options.trustedMarkerLogins ?? [],
+    options.isTrustedCollaborator ?? (() => false),
+  );
   for (const issue of issues) {
-    const result = classifyIssue(issue, {
+    const classifyOptions = {
       issueStateByNumber,
       fetchIssueStateByNumber,
       markerPrefix: options.markerPrefix,
@@ -228,8 +625,66 @@ export async function filterOrphanIssues(issues, options = {}) {
       blockedByHumanLabelName: options.blockedByHumanLabelName,
       needsDecisionLabelName: options.needsDecisionLabelName,
       roadmapLabelName: options.roadmapLabelName,
+      providerOutageDeclarationTarget: options.providerOutageDeclarationTarget,
       openIssueDetailsByNumber,
-    });
+    };
+    let result = classifyIssue(issue, classifyOptions);
+    // #2767: only a `runtime_observation_precondition` filter can ever be
+    // demoted, and computing structural evidence costs a network fetch
+    // (editor logins plus a live collaborator-permission check) -- pay it
+    // only for a candidate that plain classification already filtered on
+    // exactly this reason, and only when the caller actually wired the
+    // editor-login fetch (absent means "never demotes", the prior
+    // byte-stable behavior).
+    if (
+      result.reason === 'runtime_observation_precondition' &&
+      typeof options.fetchUserContentEditorsByIssueNumber === 'function'
+    ) {
+      // Codex review, PR #2840 (round 15): check the two local-only
+      // signals first -- both read only the already-loaded issue body, no
+      // network call -- and skip `fetchUserContentEditorsByIssueNumber` (a
+      // paginated GraphQL round trip) plus the live collaborator-
+      // permission check entirely when either is already false. Demotion
+      // requires all three signals together, so a false
+      // verificationCommand/candidateFilesExist makes the live
+      // trustedEditor signal moot regardless of what it would resolve to
+      // -- the same short-circuit `discover-viability-gate.mts` and
+      // `suitability-triage.mts`'s own `computeLiveStructuralEvidence`
+      // already apply for this identical reason.
+      const body = String(issue.body ?? '');
+      const existsAt = options.existsAt ?? existsSync;
+      const verificationCommand = hasVerificationCommandSignal(body);
+      const candidateFilesExist = candidateFilesExistOnDisk(body, existsAt);
+      if (verificationCommand && candidateFilesExist) {
+        // CodeRabbit review, PR #2557 (same fail-open contract this file
+        // already applies below to its other opportunistic per-candidate
+        // fetches): a transient GitHub API failure from either the editor
+        // fetch or the live collaborator-permission check must not abort
+        // the whole default-on discover pass. Degrade to "no structural
+        // evidence available" -- keep the plain `result` computed above
+        // unchanged -- rather than crashing or guessing a trust verdict.
+        try {
+          const authorLogin = issue.user?.login;
+          const structuralEvidence = evaluateStructuralEvidence({
+            body,
+            author: typeof authorLogin === 'string' ? authorLogin : '',
+            editorLogins: options.fetchUserContentEditorsByIssueNumber(
+              issue.number,
+            ),
+            isTrustedLogin,
+            existsAt,
+          });
+          result = classifyIssue(issue, {
+            ...classifyOptions,
+            structuralEvidence,
+          });
+        } catch {
+          // Keep the original `result` (still filtered under
+          // runtime_observation_precondition, the prior byte-stable
+          // behavior).
+        }
+      }
+    }
     if (result.reason === 'unresolvable_reference') {
       for (const number of result.details ?? []) {
         unresolvable.push({
@@ -255,6 +710,9 @@ export async function filterOrphanIssues(issues, options = {}) {
       }
     }
     if (result.orphan) {
+      if (result.warning === 'runtime_observation_precondition_demoted') {
+        demotedOrphanNumbers.add(issue.number);
+      }
       orphans.push({
         number: issue.number,
         title: issue.title,
@@ -273,6 +731,7 @@ export async function filterOrphanIssues(issues, options = {}) {
             ? options.markerPrefix
             : undefined,
         ),
+        milestone: extractOpenMilestoneTitle(issue.milestone),
       });
       continue;
     }
@@ -285,6 +744,87 @@ export async function filterOrphanIssues(issues, options = {}) {
       url: issue.url ?? '',
     };
     filtered[result.reason].push(entry);
+  }
+  // #2243: exclude a candidate whose most recent trusted `A4.5
+  // suitability gate rejection` comment carries a still-current
+  // `<!-- {prefix}-triage-verdict: <outcome> -->` marker for one of the
+  // four non-label outcomes (unclear/duplicate/out-of-scope/invalid).
+  // Survivors-only: runs after every free (body/label) filter above has
+  // already narrowed the candidate set, so this is at most one
+  // comments-plus-timeline fetch pair per surviving candidate, never per
+  // scanned issue. Default-on for the live CLI (see
+  // `FilterOrphanIssuesOptions.fetchCommentsByIssueNumber`'s doc comment)
+  // but a no-op here when either input is absent, keeping this file's
+  // existing tests and any other caller byte-stable by default.
+  if (
+    typeof options.fetchCommentsByIssueNumber === 'function' &&
+    Array.isArray(options.trustedMarkerLogins) &&
+    options.trustedMarkerLogins.length > 0
+  ) {
+    const fetchComments = options.fetchCommentsByIssueNumber;
+    const fetchTimeline =
+      typeof options.fetchTimelineByIssueNumber === 'function'
+        ? options.fetchTimelineByIssueNumber
+        : () => [];
+    const fetchUserContentEdits =
+      typeof options.fetchUserContentEditsByIssueNumber === 'function'
+        ? options.fetchUserContentEditsByIssueNumber
+        : () => [];
+    const trustedMarkerLogins = options.trustedMarkerLogins;
+    const markerPrefix =
+      typeof options.markerPrefix === 'string'
+        ? options.markerPrefix
+        : undefined;
+    const survivors = [];
+    for (const orphan of orphans) {
+      // CodeRabbit review, PR #2557: mirror resolveIssueLabelEvents's own
+      // fail-open contract for a per-candidate opportunistic fetch -- a
+      // transient GitHub API failure here must not abort the whole
+      // default-on discover pass; it degrades to "no evidence" (same as an
+      // absent marker) and the candidate stays selectable.
+      let record = null;
+      try {
+        record = findTrustedSuitabilityRejection(
+          fetchComments(orphan.number),
+          trustedMarkerLogins,
+          markerPrefix,
+        );
+      } catch {
+        record = null;
+      }
+      let editedAt = null;
+      if (record?.markerOutcome) {
+        // Both fetches evaluate inside this one try block (#2762): a
+        // failure from EITHER the timeline or the userContentEdits read
+        // degrades the whole anchor to null ("unknown") rather than
+        // computing a partial result from whichever fetch happened to
+        // succeed -- a partial result could still collapse to the bare
+        // `created_at` anchor this issue fixes.
+        try {
+          editedAt = resolveLatestSubstantiveIssueEditAt(
+            issueCreatedAtByNumber.get(orphan.number),
+            fetchTimeline(orphan.number),
+            fetchUserContentEdits(orphan.number),
+          );
+        } catch {
+          editedAt = null;
+        }
+      }
+      if (record && isSuitabilityTriageVerdictCurrent(record, editedAt)) {
+        filtered.triage_verdict_rejected.push({
+          number: orphan.number,
+          title: orphan.title,
+          state: orphan.state,
+          reason: 'triage_verdict_rejected',
+          details: record.markerOutcome,
+          url: orphan.url,
+        });
+        continue;
+      }
+      survivors.push(orphan);
+    }
+    orphans.length = 0;
+    orphans.push(...survivors);
   }
   // Opt-in (#1395): annotate each orphan candidate with active-claim
   // eligibility, mirroring `discover-roadmap-graph`'s own sequential
@@ -326,6 +866,26 @@ export async function filterOrphanIssues(issues, options = {}) {
       getScore: (orphan) => orphan.autopilotSuitability,
     },
   );
+  // #2767 (CodeRabbit review, PR #2840): emit the demotion warning only
+  // for a candidate that actually survives to the final `ranked` orphans
+  // list -- the triage-verdict filter above and the routing split just
+  // above can both remove a candidate from that final partition, and the
+  // warning's own text asserts it stays listed as an orphan.
+  if (demotedOrphanNumbers.size > 0) {
+    const rankedNumbers = new Set(ranked.map((orphan) => orphan.number));
+    for (const issueNumber of demotedOrphanNumbers) {
+      if (!rankedNumbers.has(issueNumber)) {
+        continue;
+      }
+      warnings.push({
+        issueNumber,
+        reason: 'runtime_observation_precondition_demoted',
+        message:
+          `Warning: Issue #${issueNumber} names a runtime/production-observation ` +
+          'precondition, but every structural-evidence signal held, so it stays listed as an orphan.',
+      });
+    }
+  }
   const counts = {
     scanned: issues.length,
     orphans: ranked.length,
@@ -353,21 +913,13 @@ async function runCli() {
     printHelp();
     process.exit(0);
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repoRef = `${owner}/${repo}`;
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
   const policy = loadPolicy(args.policy);
-  const openIssues = fetchOpenIssues(repoRef);
+  const openIssues = fetchOpenIssues(port);
   const openStateByNumber = new Map(
     openIssues.map((issue) => [issue.number, String(issue.state)]),
   );
@@ -379,8 +931,7 @@ async function runCli() {
   // discover-roadmap-graph's own CLI wiring).
   const claimState = args.withClaimState
     ? buildClaimStateResolution(
-        owner,
-        repo,
+        port,
         {
           claimTiming: policy.claimTiming,
           trustedMarkerActors: policy.trustedMarkerActors,
@@ -388,18 +939,54 @@ async function runCli() {
         args.currentClaimId,
       )
     : undefined;
+  // #2243: always resolved (unlike claimState above) -- the triage-verdict
+  // exclusion is default-on, not an opt-in flag. An empty resolution (no
+  // flag/env/config trusted actors configured) makes the check a no-op via
+  // filterOrphanIssues's own trustedMarkerLogins-empty guard, matching
+  // every other trusted-marker consumer's fail-safe default.
+  const { actors: trustedMarkerLogins } = resolveTrustedMarkerActors({
+    envValue: process.env.IDD_TRUSTED_MARKER_ACTORS ?? '',
+    config: { trustedMarkerActors: policy.trustedMarkerActors },
+  });
+  // #2767: shared across every isTrustedCollaborator call below, so a
+  // repeated editor login across candidates costs one live lookup.
+  const collaboratorPermissionCache = new Map();
   const result = await filterOrphanIssues(openIssues, {
     issueStateByNumber: openStateByNumber,
     fetchIssueStateByNumber: (issueNumber) =>
-      fetchIssueState(repoRef, issueNumber),
+      fetchIssueState(port, issueNumber),
     fetchLabelEventsByIssueNumber: (issueNumber) =>
-      fetchIssueLabelEvents(repoRef, issueNumber),
+      fetchIssueLabelEvents(port, issueNumber),
+    fetchCommentsByIssueNumber: (issueNumber) =>
+      fetchIssueCommentsForTriageVerdict(port, issueNumber),
+    fetchTimelineByIssueNumber: (issueNumber) =>
+      port.getWorkItemTimeline(issueNumber),
+    fetchUserContentEditsByIssueNumber: (issueNumber) =>
+      port.getWorkItemUserContentEditTimestamps(issueNumber),
+    // #2767: only ever called for a candidate plain classification already
+    // filtered as runtime_observation_precondition -- see
+    // filterOrphanIssues's own lazy-retry comment.
+    fetchUserContentEditorsByIssueNumber: (issueNumber) =>
+      port
+        .getWorkItemUserContentEdits(issueNumber)
+        .map((edit) => edit.editorLogin),
+    isTrustedCollaborator: (login) => {
+      const { permission } = collaboratorPermission(
+        owner,
+        repo,
+        login,
+        collaboratorPermissionCache,
+      );
+      return permission === 'admin' || permission === 'write';
+    },
+    trustedMarkerLogins,
     markerPrefix: policy.markerPrefix,
     authoringLabelName: policy.authoringLabelName,
     authoringStaleAgeMs: policy.authoringStaleAgeMs,
     blockedByHumanLabelName: policy.blockedByHumanLabelName,
     needsDecisionLabelName: policy.needsDecisionLabelName,
     roadmapLabelName: policy.roadmapLabelName,
+    providerOutageDeclarationTarget: policy.providerOutageDeclarationTarget,
     autopilotSuitabilityFloor: policy.autopilotSuitabilityFloor,
     autopilotSuitabilityEnabled: policy.autopilotSuitabilityEnabled,
     autopilot: args.autopilot,
@@ -430,7 +1017,11 @@ async function runCli() {
 // not itself look like another flag. `util.parseArgs` cannot express this:
 // a `string`-type option always requires exactly one value and a
 // `boolean`-type option never takes one; there is no in-between mode.
-function parseArgs(argv) {
+function parseArgs(rawArgv) {
+  // #1921/#2465: strip a pnpm-forwarded leading `--` the same way the
+  // shared cli-args.mts wrapper does -- this parser is excluded from that
+  // wrapper (see the comment above) so it must call the strip directly.
+  const argv = stripLeadingArgumentSeparator(rawArgv);
   const parsed = {
     owner: '',
     repo: '',
@@ -512,21 +1103,49 @@ Output schema:
   "repository": {"owner": "...", "repo": "..."},
   "diagnostics": {"pr": 404},
   "policy": {"source": "...", "orphanFirstPolicy": "none|maintainer-approved|public-disabled", "markerPrefix": "...", "authoringLabelName": "...", "authoringStaleAge": "...", "autopilotSuitabilityFloor": 3, "autopilotSuitabilityEnabled": true},
-  "orphans": [{"number": 1, "title": "...", "state": "OPEN", "reason": "orphan|blocked_references_closed", "url": "...", "autopilotSuitability": 4, "effort": "S|M|L|null"}],
-  "routed_to_human": [{"number": 2, "title": "...", "state": "OPEN", "reason": "orphan", "url": "...", "autopilotSuitability": 1, "effort": "S|M|L|null"}],
+  "orphans": [{"number": 1, "title": "...", "state": "OPEN", "reason": "orphan|references_non_blocking", "url": "...", "autopilotSuitability": 4, "effort": "S|M|L|null", "milestone": "v0.8.0|null"}],
+  "routed_to_human": [{"number": 2, "title": "...", "state": "OPEN", "reason": "orphan", "url": "...", "autopilotSuitability": 1, "effort": "S|M|L|null", "milestone": "v0.8.0|null"}],
   "filtered": {
+    "provider_outage_target": [...],
     "roadmap_marker": [...],
     "blocked_by_marker": [...],
     "blocked_label": [...],
     "authoring_label": [...],
+    "runtime_observation_precondition": [...],
     "blocked_by_open_reference": [...],
     "open_dependency_reference": [...],
-    "unresolvable_reference": [...]
+    "unresolvable_reference": [...],
+    "triage_verdict_rejected": [...]
   },
   "unresolvable": [{"issue": 1, "reference": 2, "reason": "issue-not-found-or-inaccessible"}],
   "warnings": [{"issueNumber": 1, "message": "Warning: ..."}],
   "counts": {"scanned": 0, "orphans": 0, "routed_to_human": 0, "filtered": {...}, "unresolvable": 0}
 }
+
+"filtered.provider_outage_target" (#2800) excludes the exact issue named by
+the configured "providerOutage.declarationTarget" -- a permanent,
+adopter-authored coordination issue documented to stay open indefinitely,
+never claimed, never closed, and carrying no roadmap/blocked marker or
+blocking label of its own. Checked by issue number alone, ahead of every
+marker/label check above, since none of them would otherwise catch it.
+Absent config leaves this filter a no-op.
+
+"filtered.runtime_observation_precondition" (#2467) excludes an issue whose
+body names a runtime/production-observation precondition in prose --
+"confirmed in production", "observed live", "runtime-observation" -- with no
+issue-number reference to resolve, so it stays excluded even once every
+numbered "Blocked by"/"Depends on" reference is closed.
+
+A "runtime_observation_precondition" hit demotes to a warned orphan
+(#2767) instead -- kept in "orphans" with "reason": "orphan" and a
+"warnings[]" entry carrying "reason":
+"runtime_observation_precondition_demoted" -- only when every
+structural-evidence signal (triage-structural-evidence.mts: a runnable
+verification command, an existing candidate file, a fully trusted
+author+editor set) holds for that issue. Requires
+"fetchUserContentEditorsByIssueNumber" to be wired (the live CLI always
+wires it); absent, this never demotes, matching the pre-#2767 behavior
+exactly.
 
 "filtered.open_dependency_reference" (#1536) mirrors A3's own dependency
 check in discover-readiness-check.mjs: a candidate whose body contains an
@@ -546,6 +1165,26 @@ first; equal scores tie-break by lowest issue number). With --autopilot
 (default 3) are moved to routed_to_human; without it (attended runs) they
 stay in orphans, ranked last. A missing or out-of-range score is treated
 as no score: the issue stays in orphans and is never routed out.
+
+"filtered.triage_verdict_rejected" (#2243, default-on, not opt-in) excludes
+a candidate whose most recent trusted "A4.5 suitability gate rejection"
+comment carries a still-current
+"<!-- {markerPrefix}-triage-verdict: <outcome> -->" marker for one of the
+four non-label outcomes (unclear/duplicate/out-of-scope/invalid); each
+filtered entry's "details" field is that outcome string.
+"needs-decision"/"blocked-by-human" never emit this marker -- those already
+carry a stable label. Only runs for a candidate every cheaper (label/body)
+filter above has already let through (one comments-plus-timeline fetch pair
+per surviving candidate, never per scanned issue), and requires trusted
+marker actors to be configured (env/flag/repo config); with none
+configured, this check is a no-op and makes no extra GitHub API call.
+Staleness-checked (fail-closed toward NOT excluding): the marker only
+excludes when the rejection comment is at or after the issue's latest
+substantive (title/body) edit, so an issue legitimately improved after
+being rejected stays selectable -- a title edit is a timeline "renamed"
+event, and a body edit is a GraphQL "userContentEdits.editedAt" value
+(#2762); a failed GraphQL read degrades the anchor to unknown rather than
+falling back to created_at.
 
 --with-claim-state (opt-in) annotates each candidate in "orphans" and
 "routed_to_human" with active-claim eligibility, exactly mirroring
@@ -580,7 +1219,8 @@ function loadPolicy(policyPath) {
   const { path: source, config: rawConfig } = loadPolicyConfig(policyPath);
   const config = rawConfig ?? {};
   const authoringPolicy = resolveAuthoringGuardPolicy(config);
-  const labelsPolicy = normalizePolicyConfig(config).labels;
+  const normalizedPolicy = normalizePolicyConfig(config);
+  const labelsPolicy = normalizedPolicy.labels;
   return {
     source,
     orphanFirstPolicy: getOrphanFirstPolicy(config),
@@ -591,6 +1231,12 @@ function loadPolicy(policyPath) {
     blockedByHumanLabelName: labelsPolicy.blockedByHumanLabelName,
     needsDecisionLabelName: labelsPolicy.needsDecisionLabelName,
     roadmapLabelName: labelsPolicy.roadmapLabelName,
+    // #2800: own-property-omitted when unconfigured or invalid, matching
+    // normalizePolicyConfig's own absence semantics -- resolved to
+    // `null` below so downstream callers get a stable, always-present
+    // field instead of testing for key presence.
+    providerOutageDeclarationTarget:
+      normalizedPolicy.providerOutage.declarationTarget ?? null,
     autopilotSuitabilityFloor: resolveAutopilotSuitabilityFloor(config),
     autopilotSuitabilityEnabled: resolveAutopilotSuitabilityEnabled(config),
     // Passed through verbatim (raw, un-normalized) for
@@ -623,7 +1269,35 @@ function normalizeIssue(issue) {
     labelEvents: Array.isArray(issue.labelEvents) ? issue.labelEvents : [],
     body: issue.body ?? '',
     url: issue.url ?? issue.html_url ?? '',
+    milestone: issue.milestone,
+    createdAt: issue.createdAt,
+    // #2767 (CodeRabbit review, PR #2840): carried through so the live CLI
+    // wiring below can read the author login for the `trustedEditor`
+    // structural-evidence signal -- omitting it here silently made that
+    // signal fail closed for every live orphan candidate.
+    user: issue.user,
   };
+}
+/**
+ * Read the OPEN milestone's title from a REST `milestone` object. Returns
+ * null for a missing/non-object field, a closed milestone, or a
+ * non-string/empty title -- every one of these is the same "no scope
+ * input" neutral case for the surfaced `milestone` output field (#2340).
+ * Duplicated from `discover-roadmap-graph.mts`'s identical helper rather
+ * than shared, matching this file's own already-duplicated
+ * `normalizeIssue` pattern.
+ */
+function extractOpenMilestoneTitle(milestone) {
+  if (typeof milestone !== 'object' || milestone === null) {
+    return null;
+  }
+  const record = milestone;
+  if (String(record.state ?? '').toLowerCase() !== 'open') {
+    return null;
+  }
+  return typeof record.title === 'string' && record.title.length > 0
+    ? record.title
+    : null;
 }
 function resolveIssueLabelEvents(issue, fetchLabelEventsByIssueNumber) {
   if (Array.isArray(issue.labelEvents) && issue.labelEvents.length > 0) {
@@ -663,55 +1337,28 @@ function resolveIssueState(
   issueStateByNumber.set(number, state);
   return state;
 }
-function fetchIssueState(repoRef, issueNumber) {
-  try {
-    const state = ghText(
-      [
-        'issue',
-        'view',
-        String(issueNumber),
-        '--repo',
-        repoRef,
-        '--json',
-        'state',
-        '--jq',
-        '.state',
-      ],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-    return state || 'UNRESOLVABLE';
-  } catch {
-    return 'UNRESOLVABLE';
-  }
+function fetchIssueState(port, issueNumber) {
+  return port.getWorkItemState(issueNumber) || 'UNRESOLVABLE';
 }
-function fetchIssueLabelEvents(repoRef, issueNumber) {
-  const events = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const rawPage = ghJson([
-      'api',
-      `repos/${repoRef}/issues/${issueNumber}/timeline?per_page=${pageSize}&page=${page}`,
-    ]);
-    events.push(...rawPage.filter((event) => event?.event === 'labeled'));
-    if (rawPage.length < pageSize) {
-      break;
-    }
-  }
-  return events;
+function fetchIssueLabelEvents(port, issueNumber) {
+  return port
+    .getWorkItemTimeline(issueNumber)
+    .filter((event) => event.event === 'labeled');
 }
-function ghJson(args) {
-  return JSON.parse(runGh(args).trim() || '[]');
-}
-function runGh(args) {
-  try {
-    return ghText(args, GH_TEXT_LOOP_TIMEOUT_OPTIONS);
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    if (stderr) {
-      throw new Error(`gh command failed: ${stderr}`);
-    }
-    throw error;
-  }
+/**
+ * #2243: adapts {@link ProviderPort.listWorkItemComments}'s camelCase
+ * `ProviderComment` shape to the raw-REST-shaped
+ * `SuitabilityRejectionComment` `findTrustedSuitabilityRejection` expects
+ * (mirroring `suitability-triage.mts`'s own direct `gh api` comment fetch).
+ * `html_url` is intentionally omitted -- this file never reads the
+ * resulting record's `url` field, only `markerOutcome`/`createdAt`.
+ */
+function fetchIssueCommentsForTriageVerdict(port, issueNumber) {
+  return port.listWorkItemComments(issueNumber).map((comment) => ({
+    body: comment.body,
+    created_at: comment.createdAt,
+    user: { login: comment.authorLogin },
+  }));
 }
 function normalizeMarkerPrefix(prefix) {
   if (typeof prefix !== 'string' || prefix.length === 0) {
@@ -746,21 +1393,26 @@ function normalizeRoadmapLabelName(labelName) {
     ? labelName
     : POLICY_DEFAULTS.labels.roadmapLabelName;
 }
-function fetchOpenIssues(repoRef) {
-  const issues = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const rawPage = ghJson([
-      'api',
-      `repos/${repoRef}/issues?state=open&per_page=${pageSize}&page=${page}`,
-    ]);
-    const pageItems = rawPage
-      .filter((item) => item?.pull_request === undefined)
-      .map((item) => normalizeIssue(item));
-    issues.push(...pageItems);
-    if (rawPage.length < pageSize) {
-      break;
-    }
-  }
-  return issues;
+/** Exported for `tests/discover-orphan-filter.test.mts`'s #2767 regression
+ * (CodeRabbit review, PR #2840): a direct `OrphanIssueInput` fixture in a
+ * test bypasses this function and `normalizeIssue` entirely, which is
+ * exactly how the live CLI's `user`-propagation gap went uncaught -- a
+ * test must go through this function to actually exercise it. */
+export function fetchOpenIssues(port) {
+  // listOpenWorkItems() already excludes pull requests -- no re-filtering
+  // needed here.
+  return port.listOpenWorkItems().map((item) =>
+    normalizeIssue({
+      number: item.number,
+      title: item.title,
+      state: item.state,
+      labels: item.labels,
+      body: item.body,
+      url: item.url,
+      html_url: item.htmlUrl,
+      milestone: item.milestone,
+      createdAt: item.createdAt,
+      user: item.user,
+    }),
+  );
 }

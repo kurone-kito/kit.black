@@ -20,6 +20,9 @@
 // resolution machinery there (normalizeTrustedMarkerLogins and friends), and
 // moving them here would force exactly that forbidden back-import. Only the
 // single-marker parse/render primitives move in this wave.
+import { createHash } from 'node:crypto';
+import { createMarkerRegex, escapeRegex } from './marker-regex.mjs';
+
 const ISO8601_UTC_PATTERN = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/;
 const OPTIONAL_IDD_VISIBLE_NOTE_PATTERN = String.raw`(?:\s*|\s*\n\s*_[^\n]*\bIDD\b[^\n]*_\s*)`;
 const OPERATIONAL_MARKER_ENTRIES = [
@@ -121,6 +124,27 @@ const OPERATIONAL_MARKER_ENTRIES = [
     startPattern: /^advisory-reroll:/,
   },
   {
+    // #2050: disposition-aware Clause 1 escape hatch. A trusted actor posts
+    // this after reading a specific primary-bot review's findings
+    // (including any body-embedded `Suppressed comments (N)` section, #1880)
+    // -- a whole-review acknowledgement rather than a per-finding identifier
+    // scheme (see the issue's "Decision" section for why). PLAIN-TEXT, same
+    // family shape as advisory-reroll: above (no visible note), for the same
+    // reason: the ack comment itself must never pollute review-currency/
+    // watermark computations. Same field shape as advisory-reroll:
+    // (`{agentId} {headSha} {timestamp}`) -- see post-idd-marker.mts's
+    // `--type review-ack`. This entry only recognizes/parses the marker's
+    // shape; validity (a trusted author whose OWN `created_at` postdates the
+    // latest primary-bot review's `submittedAt`) is evaluated by
+    // `advisory-convergence.mts`'s `resolveHasValidReviewAck`, not here.
+    label: 'review-ack:',
+    pattern:
+      /^review-ack:\s+\S+\s+[0-9a-f]{40}\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*$/,
+    // Case-sensitive on purpose (#1720), same reasoning as the
+    // advisory-wait: entry above.
+    startPattern: /^review-ack:/,
+  },
+  {
     // #1572: brand-new terminal marker type, no legacy form to preserve, so
     // the `claim:{claimId} attempt:{n}` binding suffix is unconditionally
     // required (unlike advisory-wait-recovery: above). PLAIN-TEXT, same
@@ -142,9 +166,44 @@ const OPERATIONAL_MARKER_ENTRIES = [
   },
   {
     label: '<!-- idd-external-check-waiver:',
+    // kurone-kito/idd-skill#2657 (Codex review, PR #2895): the trailing
+    // `run-id:` field is optional -- only `--auto-bootstrap` posts it --
+    // and must be accepted here the same way
+    // `parseExternalCheckWaiverComment`'s own regex already does.
+    // Without this, every auto-bootstrap marker fails this shape check,
+    // `operationalMarkerPrefix` returns null for it, and
+    // `summarizeRegularCommentsForGate`/`summarizeDispositionEvidenceForGate`
+    // misclassify the bot's own posted marker as unreplied regular
+    // feedback requiring human disposition -- a comment no one will ever
+    // reply to, permanently routing F2 back to E1 even after the waiver
+    // makes the required check ready.
     pattern:
-      /^<!--\s*idd-external-check-waiver:\s+\S+\s+\S+\s+[0-9a-f]{40}\s+check:\S+\s+reason:\S+\s+expires:\S+\s*-->[\s\S]*$/i,
+      /^<!--\s*idd-external-check-waiver:\s+\S+\s+\S+\s+[0-9a-f]{40}\s+check:\S+\s+reason:\S+\s+expires:\S+(?:\s+run-id:\S+)?\s*-->[\s\S]*$/i,
     startPattern: /^<!--\s*idd-external-check-waiver:/i,
+  },
+  {
+    label: '<!-- idd-provider-outage-declaration:',
+    pattern:
+      /^<!--\s*idd-provider-outage-declaration:\s+\S+\s+service:\S+\s+started:\S+\s+expires:\S+\s*-->[\s\S]*$/i,
+    startPattern: /^<!--\s*idd-provider-outage-declaration:/i,
+  },
+  {
+    label: '<!-- idd-provider-outage-advanced:',
+    pattern:
+      /^<!--\s*idd-provider-outage-advanced:\s+\S+\s+pr:\d+\s+head:[0-9a-f]{40}\s+declared:\S+\s*-->[\s\S]*$/i,
+    startPattern: /^<!--\s*idd-provider-outage-advanced:/i,
+  },
+  {
+    label: '<!-- idd-provider-outage-park:',
+    pattern:
+      /^<!--\s*idd-provider-outage-park:\s+\S+\s+issue:\d+\s+service:\S+\s+head:[0-9a-f]{40}\s+claim:\S+\s+parked:\S+\s+blockers:\S+\s*-->[\s\S]*$/i,
+    startPattern: /^<!--\s*idd-provider-outage-park:/i,
+  },
+  {
+    label: '<!-- idd-local-validation-evidence:',
+    pattern:
+      /^<!--\s*idd-local-validation-evidence:\s+\S+\s+head:[0-9a-f]{40}\s+commands:\S+\s+covers:\S+\s+outcome:(?:pass|fail)\s*-->[\s\S]*$/i,
+    startPattern: /^<!--\s*idd-local-validation-evidence:/i,
   },
 ];
 /**
@@ -163,6 +222,228 @@ const OPERATIONAL_MARKER_ENTRIES = [
 export const OPERATIONAL_MARKERS = Object.freeze(
   OPERATIONAL_MARKER_ENTRIES.map((marker) => Object.freeze(marker)),
 );
+const MARKER_HIDE_POLICY_ENTRIES = [
+  {
+    label: '<!-- claimed-by:',
+    policy: 'wired',
+    reason:
+      'Claim chain, grouped by supersedes: claim-id lineage (idd-claim.instructions.md).',
+  },
+  {
+    label: '<!-- unclaimed-by:',
+    policy: 'wired',
+    reason:
+      'Claim chain, grouped by supersedes: claim-id lineage (idd-claim.instructions.md).',
+  },
+  {
+    label: '<!-- activation-nonce:',
+    policy: 'excluded',
+    reason:
+      "No hide-at-post-time wiring yet: idd-claim.instructions.md's takeover " +
+      'minimization only targets claimed-by/unclaimed-by/heartbeat comments, ' +
+      'not activation-nonce (caught by Copilot review on PR #2759). Also ' +
+      'issue-scoped, not PR-scoped (posted via `post-idd-marker --type ' +
+      'activation-nonce --target issue`), so unlike an ordinary f4-only ' +
+      "family it has no F4 cleanup path either: audit-pr-cleanup.mts's " +
+      'GraphQL fetch is bound to the merged PR number and never sees a ' +
+      'comment on the separate issue (caught by chatgpt-codex-connector ' +
+      'review, second round).',
+  },
+  {
+    label: '<!-- review-watermark:',
+    policy: 'wired',
+    reason: 'Grouped by same claim-id (idd-review-snapshot.instructions.md).',
+  },
+  {
+    label: '<!-- review-baseline:',
+    policy: 'wired',
+    reason: 'Grouped by same claim-id (idd-review-snapshot.instructions.md).',
+  },
+  {
+    label: 'advisory-wait:',
+    policy: 'wired',
+    reason:
+      'Advisory-wait family, grouped by embedded HEAD SHA mismatch, AW3-H (idd-advisory-wait.instructions.md).',
+  },
+  {
+    label: 'advisory-wait-recovery:',
+    policy: 'wired',
+    reason:
+      'Advisory-wait family, grouped by embedded HEAD SHA mismatch, AW3-H (idd-advisory-wait.instructions.md).',
+  },
+  {
+    label: '<!-- advisory-wait:',
+    policy: 'wired',
+    reason:
+      'Advisory-wait family (HTML-comment form), grouped by embedded HEAD SHA mismatch, AW3-H (idd-advisory-wait.instructions.md).',
+  },
+  {
+    label: 'advisory-reroll:',
+    policy: 'wired',
+    reason:
+      'Advisory-wait family, grouped by embedded HEAD SHA mismatch, AW3-H (idd-advisory-wait.instructions.md).',
+  },
+  {
+    label: 'review-ack:',
+    policy: 'wired',
+    reason:
+      'review-ack family, grouped by embedded HEAD SHA mismatch. Hidden at post time by post-idd-marker.mjs itself (code-automated, not an agent-followed instruction step, unlike the other wired families above); requires a helper runtime, so an instructions-only manual post gets no equivalent hide step yet -- roadmap #2751 Track 2 (#2754).',
+  },
+  {
+    label: 'copilot-unavailable:',
+    policy: 'wired',
+    reason:
+      'copilot-unavailable family, grouped by same claim: value and a strictly lower attempt: number (a same-or-higher attempt is left alone). Hidden at post time by post-idd-marker.mjs itself (code-automated, not an agent-followed instruction step, unlike the other wired families above); requires a helper runtime, so an instructions-only manual post gets no equivalent hide step yet -- roadmap #2751 Track 2 (#2754).',
+  },
+  {
+    label: '<!-- forced-handoff:',
+    policy: 'excluded',
+    reason:
+      'Permanent maintainer-authority audit record of a claim transfer. The only excluded family with a matching F4 exemption today: audit-pr-cleanup.mts hardcodes a skip for this prefix.',
+  },
+  {
+    label: '<!-- idd-external-check-waiver:',
+    policy: 'excluded',
+    reason:
+      'Maintainer-authority marker; a correct grouping key needs the embedded check: selector, and hiding a still-relevant waiver for a different check would hide live authorization (roadmap #2751 Background).',
+  },
+  {
+    label: '<!-- idd-provider-outage-declaration:',
+    policy: 'excluded',
+    reason:
+      'Issue-scoped, cross-PR declare/advance protocol with no clean single-PR grouping key (roadmap #2751 Background).',
+  },
+  {
+    label: '<!-- idd-provider-outage-advanced:',
+    policy: 'excluded',
+    reason:
+      'Issue-scoped, cross-PR declare/advance protocol with no clean single-PR grouping key (roadmap #2751 Background).',
+  },
+  {
+    label: '<!-- idd-provider-outage-park:',
+    policy: 'excluded',
+    reason:
+      'Supersession would need to track claim lineage the way the claim chain does, but the marker carries no supersedes: reference back to it -- a same-claim-only rule risks leaving a park marker for an already-superseded claim visible, while a lineage-aware rule risks the reverse; needs its own design pass (roadmap #2751 Background).',
+  },
+  {
+    label: '<!-- idd-local-validation-evidence:',
+    policy: 'wired',
+    reason:
+      'idd-local-validation-evidence family, grouped by embedded HEAD SHA mismatch (mirroring the shipped advisory-wait AW3-H rule). Hidden at post time by local-validation-evidence.mts itself (code-automated, right after its own --record --apply POST succeeds) -- roadmap #2751 Track 3 (#2755).',
+  },
+];
+/**
+ * Wraps `map` in a brand-new, closure-backed object exposing only the
+ * `ReadonlyMap<K, V>` surface -- no mutating method, and no reference to
+ * `map` ever reaches the returned object's own property graph. This
+ * function went through two narrower attempts first, both a `Proxy` over
+ * the real `Map`, before landing here; both attempts are recorded so the
+ * next reader does not retry them:
+ *
+ * 1. A `Proxy` whose `get` trap rejected `set`/`delete`/`clear` and bound
+ *    every other method to the real underlying `map` (`Map.prototype`'s
+ *    own methods require a genuine `Map` internal slot as `this`, and
+ *    `Object.freeze` on a `Map` instance does not stop `#set`/`#delete`/
+ *    `#clear` -- those mutate the `[[MapData]]` internal slot, not an
+ *    ordinary object property, so freezing the `Map` itself was never a
+ *    workable option). `forEach` needed special-casing even within this
+ *    approach: `Map#forEach`'s native implementation passes its *own
+ *    receiver* as the callback's third argument, so a plain bind would
+ *    hand callers the real, mutable map as that argument (caught by
+ *    chatgpt-codex-connector review on PR #2759; found during this fix's
+ *    own E10 self-critique).
+ * 2. Adding `Object.preventExtensions(map)` to close a further reflective
+ *    escape from attempt 1: a `Proxy` with no `defineProperty`/`set` trap
+ *    still forwards a brand-new own-property assignment straight to
+ *    `target`, so a caller could define `MARKER_HIDE_POLICY.leak =
+ *    function () { return this; }` and read it back through the generic
+ *    function-binding `get` path, which bound it to `target` and handed
+ *    back the raw, mutable map (caught by chatgpt-codex-connector review
+ *    on PR #2759, a second round).
+ *
+ * Both attempts still shared the same flaw: the generic function-binding
+ * path (`typeof value === 'function' ? value.bind(target) : value`) binds
+ * *any* inherited function property to `target`, not just the ones this
+ * function intended to expose. `Object.prototype.valueOf` is one such
+ * property -- it is a function, it is inherited by every `Map`, and it
+ * returns `this` -- so `MARKER_HIDE_POLICY.valueOf()` bound `valueOf` to
+ * `target` and simply handed back the raw, mutable map, and neither
+ * `preventExtensions` nor the `mutators` denylist touched it (caught by
+ * `advisor()` review during this fix's own verification pass, a third
+ * round). A denylist over inherited `Object.prototype` methods would be
+ * a fourth patch on the same mechanism -- every fix so far has been
+ * "enumerate what's dangerous," and each round found something the
+ * previous enumeration missed. This rewrite instead removes the
+ * mechanism the escapes have in common: there is no `target` for any
+ * trap or bind call to leak, because the returned object has no relation
+ * to `map` other than the closures below capturing it by reference. The
+ * eight members below are exactly `ReadonlyMap<K, V>`'s interface --
+ * `get`/`has`/`size`/`keys`/`values`/`entries`/`forEach`/
+ * `[Symbol.iterator]` -- so nothing else is reachable to bind or leak in
+ * the first place. `forEach` still substitutes the returned object for
+ * its own third callback argument, matching `Map#forEach`'s documented
+ * shape without the third-argument leak the earlier `Proxy` attempts had
+ * to special-case. `Object.freeze` on the returned object blocks adding
+ * new properties (the injection escape from attempt 2), since this is now
+ * a plain object, not a `Map` -- `Object.freeze` is fully effective here.
+ * The result deliberately does not satisfy `instanceof Map`; nothing in
+ * this codebase relies on that, and a lookup that only ever exposes
+ * `ReadonlyMap` behavior should not also claim to be a `Map` it isn't.
+ */
+function freezeMap(map) {
+  const readOnlyMap = {
+    get: (key) => map.get(key),
+    has: (key) => map.has(key),
+    get size() {
+      return map.size;
+    },
+    keys: () => map.keys(),
+    values: () => map.values(),
+    entries: () => map.entries(),
+    forEach(callbackFn, thisArg) {
+      map.forEach((value, key) => {
+        callbackFn.call(thisArg, value, key, readOnlyMap);
+      });
+    },
+    [Symbol.iterator]: () => map.entries(),
+  };
+  return Object.freeze(readOnlyMap);
+}
+/**
+ * Builds the frozen {@link MARKER_HIDE_POLICY} lookup from `entries`,
+ * throwing if two entries share a `label` -- plain `new Map(...)`
+ * construction would otherwise let the later entry silently win, hiding a
+ * copy-paste mistake (a duplicate row that still names every required
+ * label passes the "exactly one classification per marker" coverage test
+ * in `tests/marker-helpers-facade.test.mts`, since that test only checks
+ * label-set membership, not per-label uniqueness in the source array).
+ * Exported so that test can also exercise the duplicate-detection path
+ * directly, without needing to corrupt the real production entries (caught
+ * by chatgpt-codex-connector review on PR #2759).
+ */
+export function buildMarkerHidePolicyMap(entries) {
+  const map = new Map();
+  for (const entry of entries) {
+    if (map.has(entry.label)) {
+      throw new Error(`duplicate hide-policy label: ${entry.label}`);
+    }
+    map.set(entry.label, Object.freeze(entry));
+  }
+  return freezeMap(map);
+}
+/**
+ * Frozen, exported lookup from an `OPERATIONAL_MARKERS` entry's `label` to
+ * its hide-at-post-time classification (#2751/#2752).
+ * `tests/marker-helpers-facade.test.mts` asserts this map's key set exactly
+ * matches `OPERATIONAL_MARKERS`' labels, so a future new marker family with
+ * no entry here fails that test instead of silently drifting the way issue
+ * #1705 did. See {@link buildMarkerHidePolicyMap} for the duplicate-label
+ * guard and {@link freezeMap} for why this is a closure-backed object
+ * exposing only the `ReadonlyMap<K, V>` surface, not a `Map` itself.
+ */
+export const MARKER_HIDE_POLICY = buildMarkerHidePolicyMap(
+  MARKER_HIDE_POLICY_ENTRIES,
+);
 export const IDD_AGENT_DERIVED_MARKERS = new Set([
   '<!-- claimed-by:',
   '<!-- unclaimed-by:',
@@ -173,8 +454,98 @@ export const IDD_AGENT_DERIVED_MARKERS = new Set([
   'advisory-wait-recovery:',
   '<!-- advisory-wait:',
   'advisory-reroll:',
+  'review-ack:',
   'copilot-unavailable:',
+  '<!-- idd-provider-outage-park:',
 ]);
+// ---------------------------------------------------------------------------
+// Review-reply identity stamp (#2135)
+//
+// Utterance identity on a visible E6/E13 reply body — not an E1 activity
+// snapshot. Deliberately absent from OPERATIONAL_MARKERS and
+// IDD_AGENT_DERIVED_MARKERS so F4 minimization never hides a stamped
+// disposition as OUTDATED and deriveIddAgentLogins never treats the stamp
+// as a first-bytes operational marker. The token rides AFTER the visible
+// **Accepted** / **Rejected** prefix; first bytes stay the disposition.
+// ---------------------------------------------------------------------------
+/** Distributed default `markerPrefix` when config is absent. */
+const DEFAULT_REVIEW_REPLY_MARKER_PREFIX = 'idd-skill';
+/**
+ * Suffix passed to {@link createMarkerRegex} for the reply-identity stamp.
+ * Must not be `watermark` or `review-watermark` — those are the E1 snapshot.
+ */
+export const REVIEW_REPLY_STAMP_SUFFIX = 'review-reply';
+function normalizeReviewReplyMarkerPrefix(markerPrefix) {
+  const trimmed = typeof markerPrefix === 'string' ? markerPrefix.trim() : '';
+  return trimmed.length > 0 ? trimmed : DEFAULT_REVIEW_REPLY_MARKER_PREFIX;
+}
+/** Render `<!-- {prefix}-review-reply -->` for the configured marker prefix. */
+export function renderReviewReplyStamp(
+  markerPrefix = DEFAULT_REVIEW_REPLY_MARKER_PREFIX,
+) {
+  return `<!-- ${normalizeReviewReplyMarkerPrefix(markerPrefix)}-${REVIEW_REPLY_STAMP_SUFFIX} -->`;
+}
+/**
+ * True when `body` carries a prefix-aware `review-reply` stamp anywhere
+ * (typically after the visible disposition). Mid-body match is required:
+ * the stamp is not first-bytes. The stamp has no payload, so after the
+ * shared `createMarkerRegex` hit we require the matched comment to be
+ * exactly `<!-- {prefix}-review-reply -->` (optional whitespace). That
+ * rejects suffix extensions such as `review-reply-extra` that `\b`
+ * would otherwise accept before a hyphen.
+ */
+export function hasReviewReplyStamp(
+  body,
+  markerPrefix = DEFAULT_REVIEW_REPLY_MARKER_PREFIX,
+) {
+  const prefix = normalizeReviewReplyMarkerPrefix(markerPrefix);
+  const coarse = createMarkerRegex(prefix, REVIEW_REPLY_STAMP_SUFFIX);
+  const exact = new RegExp(
+    `^<!--\\s*${escapeRegex(prefix)}-${REVIEW_REPLY_STAMP_SUFFIX}\\s*-->$`,
+    'i',
+  );
+  // createMarkerRegex is non-global and will stop at the first suffix
+  // lookalike. Scan every match so an earlier `review-reply-extra` does
+  // not hide a later valid stamp (and so append stays idempotent).
+  const global = new RegExp(coarse.source, 'gi');
+  for (const match of (body ?? '').matchAll(global)) {
+    if (exact.test(match[0])) {
+      return true;
+    }
+  }
+  return false;
+}
+/**
+ * Classify a comment as IDD-originated from the reply-identity stamp alone.
+ * Ordinary human prose (`LGTM`, `thanks, fixed`) is not originated. A
+ * well-formed stamp is sufficient; this does not inspect author login and
+ * does not satisfy Copilot Clause 2 by itself (that still needs a valid
+ * disposition body).
+ */
+export function isIddOriginatedReply(
+  body,
+  markerPrefix = DEFAULT_REVIEW_REPLY_MARKER_PREFIX,
+) {
+  return hasReviewReplyStamp(body, markerPrefix);
+}
+/**
+ * Append the reply-identity stamp after a visible reply body. Empty input
+ * is left unchanged. Already-stamped input is not double-stamped. The
+ * visible first bytes are preserved so `isDispositionComment` still matches.
+ */
+export function appendReviewReplyStamp(
+  body,
+  markerPrefix = DEFAULT_REVIEW_REPLY_MARKER_PREFIX,
+) {
+  const text = body ?? '';
+  if (text.trim() === '') {
+    return text;
+  }
+  if (hasReviewReplyStamp(text, markerPrefix)) {
+    return text;
+  }
+  return `${text.replace(/\s+$/, '')}\n\n${renderReviewReplyStamp(markerPrefix)}`;
+}
 const FORCED_HANDOFF_CONTEXT_SCOPES = new Set(['issue-only', 'issue-plus-pr']);
 const FORCED_HANDOFF_LINKED_PR_PATTERN = /^(?:[1-9]\d*|https?:\/\/[^\s<>"]+)$/;
 export function parseClaimComment(body, createdAt) {
@@ -228,14 +599,19 @@ export function parseActivationNonceComment(body, createdAt) {
  * matching `activation-nonce` marker exists -- callers must treat that as
  * "no comparison possible," not a mismatch (#1522 AC3).
  */
-export function findActivationNonceWinner(events, claimId) {
-  const nonces = events
+/** Sorted activation-nonce values in `events` for `claimId`. Empty when
+ * none match. `events` must already be trust-filtered. */
+export function listActivationNonces(events, claimId) {
+  return events
     .map((event) =>
       parseActivationNonceComment(event.body ?? '', event.createdAt ?? ''),
     )
     .filter((marker) => Boolean(marker) && marker?.claimId === claimId)
     .map((marker) => marker.nonce)
     .sort();
+}
+export function findActivationNonceWinner(events, claimId) {
+  const nonces = listActivationNonces(events, claimId);
   return nonces.length > 0 ? nonces[0] : null;
 }
 export function parseReleaseComment(body) {
@@ -451,6 +827,7 @@ export function renderExternalCheckWaiverComment(payload) {
   const expiresAt = normalizeIsoTimestamp(
     payload?.expiresAt ?? payload?.expires,
   );
+  const runId = normalizeNonWhitespaceToken(payload?.runId);
   if (
     !agentId ||
     !claimId ||
@@ -463,8 +840,9 @@ export function renderExternalCheckWaiverComment(payload) {
   }
   const encodedCheck = encodeExternalCheckWaiverField(checkSelector);
   const encodedReason = encodeExternalCheckWaiverField(reason);
+  const runIdSuffix = runId ? ` run-id:${runId}` : '';
   return [
-    `<!-- idd-external-check-waiver: ${agentId} ${claimId} ${headSha} check:${encodedCheck} reason:${encodedReason} expires:${expiresAt} -->`,
+    `<!-- idd-external-check-waiver: ${agentId} ${claimId} ${headSha} check:${encodedCheck} reason:${encodedReason} expires:${expiresAt}${runIdSuffix} -->`,
     '',
     renderExternalCheckWaiverNote({
       actor: payload?.actor,
@@ -473,6 +851,758 @@ export function renderExternalCheckWaiverComment(payload) {
       expiresAt,
     }),
   ].join('\n');
+}
+/**
+ * SHA-256 hex digest of `body`'s exact UTF-8 bytes, used to bind a
+ * `idd-self-waiver-marker-*` Actions artifact (kurone-kito/idd-skill#2912,
+ * round 3) to the precise content of the comment it attests, not merely
+ * that comment's id. Round 2's artifact-binding closed the
+ * comment-deletion forgery (an attacker deletes the genuine marker,
+ * leaving a same-run-id forged sibling as the sole survivor) but left a
+ * sibling gap open: `issues: write` also permits EDITING an existing
+ * comment's body in place, which preserves its `id` and `createdAt` while
+ * replacing the content -- round 2's check alone would still accept the
+ * edited body because it only ever looked at the id.
+ *
+ * Every caller on both sides of this check (the posting CLI in
+ * `external-check-waiver.mts`, and `advisory-convergence.mts`'s live
+ * comment scan) MUST hash a body obtained the SAME way -- read back from
+ * the GitHub API, not a locally-constructed string -- so an unedited
+ * comment always digests identically regardless of which side computed
+ * it. Hashing a writer-constructed string against a GitHub-returned one
+ * risks a false-negative on any GitHub-side content normalization this
+ * project does not control (trailing-newline handling, etc.). No
+ * normalization is applied here for that reason: both sides are expected
+ * to pass an API-returned body verbatim.
+ *
+ * Round 3 initially let the posting CLI hash a body observed in a LATER,
+ * separate re-read (its own post-write reconcile) when available, falling
+ * back to the locally-sent string only when that reconcile came up empty.
+ * Copilot's review of round 3's own commit (PR #2914) found this
+ * introduced a race: the later re-read is mutable in a way the original
+ * POST response is not, so a same-repository `issues: write` workflow
+ * that edited the genuine comment's body in the window between POST and
+ * reconcile would have its forged body hashed and attested as genuine.
+ * Round 4 removed that fallback entirely -- the posting CLI now hashes
+ * ONLY the `body` field GitHub's create-comment response returns for the
+ * exact POST that created the comment, atomically, with no such window;
+ * see `ExternalCheckWaiverReport.bodyDigest`'s own doc comment
+ * (external-check-waiver.mts) for the full reasoning. This follows the
+ * same `bodySha256` / `body-sha256` convention
+ * `authoring-owner-provenance.mts` and the issue-authoring skill already
+ * use for the identical purpose (binding a marker to an exact
+ * API-observed body rather than trusting an id alone).
+ */
+export function digestExternalCheckWaiverMarkerBody(body) {
+  return createHash('sha256').update(body, 'utf8').digest('hex');
+}
+function renderProviderOutageDeclarationNote(normalized) {
+  return `_${normalized.actor}: provider outage declaration for \`${normalized.service}\` until \`${normalized.expiresAt}\` — IDD automation marker. Do not edit._`;
+}
+/**
+ * Render a `<!-- idd-provider-outage-declaration: ... -->` marker (#2320).
+ * Posted to the configured `providerOutage.declarationTarget` issue by an
+ * authorized actor to open a repository-scoped, time-boxed outage relief
+ * window. `service` and the free-text fields reuse the same percent-encoded,
+ * newline/comment-token-safe field grammar as
+ * {@link renderExternalCheckWaiverComment}.
+ */
+export function renderProviderOutageDeclarationComment(payload) {
+  const actor = normalizeNonWhitespaceToken(payload?.actor);
+  const service = normalizeExternalCheckWaiverField(payload?.service);
+  const startedAt = normalizeSecondPrecisionIsoTimestamp(payload?.startedAt);
+  const expiresAt = normalizeSecondPrecisionIsoTimestamp(payload?.expiresAt);
+  if (!actor || !service || !startedAt || !expiresAt) {
+    throw new Error('invalid provider outage declaration payload');
+  }
+  const encodedService = encodeExternalCheckWaiverField(service);
+  return [
+    `<!-- idd-provider-outage-declaration: ${actor} service:${encodedService} started:${startedAt} expires:${expiresAt} -->`,
+    '',
+    renderProviderOutageDeclarationNote({ actor, service, expiresAt }),
+  ].join('\n');
+}
+export function parseProviderOutageDeclarationComment(body, createdAt) {
+  const match = body
+    .trimEnd()
+    .match(
+      new RegExp(
+        `^<!--\\s*idd-provider-outage-declaration:\\s+(\\S+)\\s+service:(\\S+)\\s+started:(\\S+)\\s+expires:(\\S+)\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
+        'i',
+      ),
+    );
+  if (!match) {
+    return null;
+  }
+  const actor = normalizeNonWhitespaceToken(match[1]);
+  const service = normalizeExternalCheckWaiverField(
+    decodeExternalCheckWaiverField(match[2]),
+  );
+  const startedAt = normalizeSecondPrecisionIsoTimestamp(match[3]);
+  const expiresAt = normalizeSecondPrecisionIsoTimestamp(match[4]);
+  if (!actor || !service || !startedAt || !expiresAt) {
+    return null;
+  }
+  return {
+    actor,
+    service,
+    startedAt,
+    expiresAt,
+    createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+  };
+}
+/**
+ * Render a `<!-- idd-provider-outage-advanced: ... -->` marker (#2320): one
+ * record of a pull request advanced under an active outage declaration,
+ * posted to the same declaration-target issue. `declaredAt` pins the record
+ * to the specific declaration window that authorized the advancement, so a
+ * post-recovery sweep can tell records from a superseded declaration apart
+ * from records made under the current one.
+ */
+export function renderProviderOutageAdvancedComment(payload) {
+  const actor = normalizeNonWhitespaceToken(payload?.actor);
+  const prNumber = normalizePositiveIntegerToken(payload?.prNumber);
+  const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
+  const declaredAt = normalizeSecondPrecisionIsoTimestamp(payload?.declaredAt);
+  if (
+    !actor ||
+    prNumber === null ||
+    !/^[0-9a-f]{40}$/.test(headSha) ||
+    !declaredAt
+  ) {
+    throw new Error('invalid provider outage advancement payload');
+  }
+  return [
+    `<!-- idd-provider-outage-advanced: ${actor} pr:${prNumber} head:${headSha} declared:${declaredAt} -->`,
+    '',
+    `_${actor}: pull request #${prNumber} advanced under an active outage declaration — IDD automation marker. Do not edit._`,
+  ].join('\n');
+}
+export function parseProviderOutageAdvancedComment(body, createdAt) {
+  const match = body
+    .trimEnd()
+    .match(
+      new RegExp(
+        `^<!--\\s*idd-provider-outage-advanced:\\s+(\\S+)\\s+pr:(\\d+)\\s+head:([0-9a-f]{40})\\s+declared:(\\S+)\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
+        'i',
+      ),
+    );
+  if (!match) {
+    return null;
+  }
+  const actor = normalizeNonWhitespaceToken(match[1]);
+  const prNumber = normalizePositiveIntegerToken(match[2]);
+  const declaredAt = normalizeSecondPrecisionIsoTimestamp(match[4]);
+  if (!actor || prNumber === null || !declaredAt) {
+    return null;
+  }
+  return {
+    actor,
+    prNumber,
+    headSha: match[3].toLowerCase(),
+    declaredAt,
+    createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+  };
+}
+/**
+ * Render a `<!-- idd-provider-outage-park: ... -->` marker (#2321). Posted
+ * to the parked pull request by the holding session before it releases the
+ * originating issue's claim. `service` reuses the same percent-encoded,
+ * comment-token-safe field grammar as the sibling outage markers rather than
+ * hard-restricting to an enum here -- the caller validates `service` against
+ * `PROVIDER_HEALTH_SERVICES` (provider-health.mts) before rendering.
+ * `blockers` is the caller's own `pre-merge-readiness` blocker-gate names
+ * that justified eligibility (the issue's own acceptance criteria requires
+ * naming "the service and the blocking evidence") -- each entry is
+ * percent-encoded individually before joining with a raw `,`, matching
+ * {@link renderLocalValidationEvidenceComment}'s `covers` field exactly, so
+ * a gate name containing a literal comma still round-trips.
+ */
+export function renderProviderOutageParkComment(payload) {
+  const actor = normalizeNonWhitespaceToken(payload?.actor);
+  const issueNumber = normalizePositiveIntegerToken(payload?.issueNumber);
+  const service = normalizeExternalCheckWaiverField(payload?.service);
+  const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
+  const claimId = normalizeNonWhitespaceToken(payload?.claimId);
+  const parkedAt = normalizeSecondPrecisionIsoTimestamp(payload?.parkedAt);
+  const blockersList = (
+    Array.isArray(payload?.blockers) ? payload.blockers : []
+  )
+    .map((entry) => String(entry ?? '').trim())
+    .filter(Boolean);
+  if (
+    !actor ||
+    issueNumber === null ||
+    !service ||
+    !/^[0-9a-f]{40}$/.test(headSha) ||
+    !claimId ||
+    !parkedAt ||
+    blockersList.length === 0
+  ) {
+    throw new Error('invalid provider outage park payload');
+  }
+  const encodedService = encodeExternalCheckWaiverField(service);
+  const encodedBlockers = blockersList
+    .map((entry) => encodeExternalCheckWaiverField(entry))
+    .join(',');
+  return [
+    `<!-- idd-provider-outage-park: ${actor} issue:${issueNumber} service:${encodedService} head:${headSha} claim:${claimId} parked:${parkedAt} blockers:${encodedBlockers} -->`,
+    '',
+    `_${actor}: pull request parked -- \`${service}\` unavailable (blockers: ${blockersList.join(', ')}), issue #${issueNumber}'s claim released -- IDD automation marker. Do not edit._`,
+  ].join('\n');
+}
+export function parseProviderOutageParkComment(body, createdAt) {
+  const match = body
+    .trimEnd()
+    .match(
+      new RegExp(
+        `^<!--\\s*idd-provider-outage-park:\\s+(\\S+)\\s+issue:(\\d+)\\s+service:(\\S+)\\s+head:([0-9a-f]{40})\\s+claim:(\\S+)\\s+parked:(\\S+)\\s+blockers:(\\S+)\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
+        'i',
+      ),
+    );
+  if (!match) {
+    return null;
+  }
+  const actor = normalizeNonWhitespaceToken(match[1]);
+  const issueNumber = normalizePositiveIntegerToken(match[2]);
+  const service = normalizeExternalCheckWaiverField(
+    decodeExternalCheckWaiverField(match[3]),
+  );
+  const claimId = normalizeNonWhitespaceToken(match[5]);
+  const parkedAt = normalizeSecondPrecisionIsoTimestamp(match[6]);
+  // Split on the raw `,` separator BEFORE decoding each entry -- the render
+  // side percent-encodes every entry individually, so a literal comma can
+  // only appear here as a join separator, never inside an entry's own
+  // encoded form (same invariant as parseLocalValidationEvidenceComment).
+  const blockers = match[7]
+    .split(',')
+    .map((entry) =>
+      normalizeExternalCheckWaiverField(decodeExternalCheckWaiverField(entry)),
+    )
+    .filter(Boolean);
+  if (
+    !actor ||
+    issueNumber === null ||
+    !service ||
+    !claimId ||
+    !parkedAt ||
+    blockers.length === 0
+  ) {
+    return null;
+  }
+  return {
+    actor,
+    issueNumber,
+    service,
+    headSha: match[4].toLowerCase(),
+    claimId,
+    parkedAt,
+    blockers,
+    createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+  };
+}
+/**
+ * Render a `<!-- idd-local-validation-evidence: ... -->` marker (#2323).
+ * Each `covers` entry is percent-encoded individually (reusing the same
+ * comment-token-safe field grammar as the sibling outage markers) before
+ * being joined with a raw `,`, so a check name containing a literal comma
+ * still round-trips correctly -- only the join separator itself is ever a
+ * raw `,` in the wire form.
+ */
+export function renderLocalValidationEvidenceComment(payload) {
+  const actor = normalizeNonWhitespaceToken(payload?.actor);
+  const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
+  const commandSet = normalizeExternalCheckWaiverField(payload?.commandSet);
+  const coversList = (Array.isArray(payload?.covers) ? payload.covers : [])
+    .map((entry) => String(entry ?? '').trim())
+    .filter(Boolean);
+  const outcome = String(payload?.outcome ?? '').trim();
+  if (
+    !actor ||
+    !/^[0-9a-f]{40}$/.test(headSha) ||
+    !commandSet ||
+    coversList.length === 0 ||
+    (outcome !== 'pass' && outcome !== 'fail')
+  ) {
+    throw new Error('invalid local validation evidence payload');
+  }
+  const encodedCommandSet = encodeExternalCheckWaiverField(commandSet);
+  // #2355 review (Copilot, CodeRabbit): encode each entry BEFORE joining --
+  // encoding the joined string instead would also turn a literal comma
+  // inside one entry's own name into the same `%2C` the join separator
+  // produces, making a comma-containing check name indistinguishable from
+  // the boundary between two entries on parse. Each encoded entry can
+  // never itself contain a raw `,` (percent-encoded away), so splitting on
+  // the raw `,` below is unambiguous.
+  const encodedCovers = coversList
+    .map((entry) => encodeExternalCheckWaiverField(entry))
+    .join(',');
+  return [
+    `<!-- idd-local-validation-evidence: ${actor} head:${headSha} commands:${encodedCommandSet} covers:${encodedCovers} outcome:${outcome} -->`,
+    '',
+    `_${actor}: local validation evidence (\`${commandSet}\`, ${outcome}) for \`${headSha}\` — IDD automation marker. Do not edit._`,
+  ].join('\n');
+}
+export function parseLocalValidationEvidenceComment(body, createdAt) {
+  const match = body
+    .trimEnd()
+    .match(
+      new RegExp(
+        `^<!--\\s*idd-local-validation-evidence:\\s+(\\S+)\\s+head:([0-9a-f]{40})\\s+commands:(\\S+)\\s+covers:(\\S+)\\s+outcome:(pass|fail)\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
+        'i',
+      ),
+    );
+  if (!match) {
+    return null;
+  }
+  const actor = normalizeNonWhitespaceToken(match[1]);
+  const commandSet = normalizeExternalCheckWaiverField(
+    decodeExternalCheckWaiverField(match[3]),
+  );
+  // Split on the raw `,` separator BEFORE decoding each entry -- the
+  // matching render side percent-encodes every entry individually, so a
+  // literal comma can only ever appear here as a join separator, never
+  // inside an entry's own encoded form.
+  const covers = match[4]
+    .split(',')
+    .map((entry) =>
+      normalizeExternalCheckWaiverField(decodeExternalCheckWaiverField(entry)),
+    )
+    .filter(Boolean);
+  if (!actor || !commandSet || covers.length === 0) {
+    return null;
+  }
+  return {
+    actor,
+    headSha: match[2].toLowerCase(),
+    commandSet,
+    covers,
+    outcome: match[5].toLowerCase(),
+    createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+  };
+}
+const AUTHORING_OWNER_MODES = new Set([
+  'acquire',
+  'resume',
+  'bootstrap',
+  'heartbeat',
+  'release',
+  'release-guard',
+  'release-complete',
+]);
+const AUTHORING_PUBLICATION_INTENT_STATES = new Set([
+  'pending',
+  'member',
+  'cleanup',
+  'abandoned',
+]);
+// docs/issue-authoring-skill.md documents body-sha256/snapshot-sha256 as
+// `<64-lowercase-hex|none>` specifically -- presence alone (accepting a
+// garbage value like `body-sha256=garbage`) is not shape-valid per that
+// grammar (#2628 review, Codex and Copilot both flagged this).
+const AUTHORING_OWNER_DIGEST_PATTERN = /^(?:none|[0-9a-f]{64})$/;
+/**
+ * Parse the `field=value; field2=value2; ...` payload of a
+ * `<!-- {markerPrefix}-{suffix}: ... -->` marker into a raw field map. Each
+ * value is split on the first `=` only and trimmed on both sides; a field
+ * with no `=` is dropped rather than treated as a key with an empty value,
+ * since none of the three markers above have a valueless field. Returns
+ * `null` when the marker itself is absent -- callers validate the required
+ * field set and any enum values themselves, since each marker's requirement
+ * differs.
+ */
+function parseSemicolonFieldMarker(body, markerPrefix, suffix) {
+  // Anchored at `^` (position 0, not "anywhere in body") and restricted to
+  // same-line whitespace between `<!--` and the prefix-suffix token: the
+  // contract requires each of these three markers to be an "HTML-first"
+  // comment/body line, not merely present somewhere in a longer comment or
+  // pasted example -- an unanchored search would also accept a marker
+  // quoted after prose, inside a fenced example, or opened across a
+  // newline (`<!--\nidd-skill-authoring-owner: ...`), none of which are the
+  // real marker the protocol posts (#2628 review, Codex).
+  // The payload capture (and its surrounding whitespace) is restricted to
+  // same-line spaces/tabs -- these are "HTML-first body line" markers in
+  // their entirety, not just at their opener, so a multi-line comment
+  // starting at byte 0 must not parse as well-formed either (#2628 review,
+  // Copilot and Codex).
+  const pattern = new RegExp(
+    `^<!--[ \\t]*${escapeRegex(markerPrefix)}-${suffix}:[ \\t]*([^\\r\\n]*?)[ \\t]*-->`,
+    'i',
+  );
+  const match = body.match(pattern);
+  if (!match) {
+    return null;
+  }
+  const fields = {};
+  for (const part of match[1].split(';')) {
+    const separatorIndex = part.indexOf('=');
+    if (separatorIndex < 0) {
+      continue;
+    }
+    const key = part.slice(0, separatorIndex).trim();
+    const value = part.slice(separatorIndex + 1).trim();
+    if (key) {
+      fields[key] = value;
+    }
+  }
+  return fields;
+}
+export function parseAuthoringOwnerComment(body, markerPrefix) {
+  const fields = parseSemicolonFieldMarker(
+    body,
+    markerPrefix,
+    'authoring-owner',
+  );
+  if (!fields) {
+    return null;
+  }
+  const mode = fields.mode;
+  if (
+    !fields.target ||
+    !fields.anchor ||
+    !AUTHORING_OWNER_MODES.has(mode) ||
+    !fields.owner ||
+    !fields.set ||
+    !fields.session ||
+    !AUTHORING_OWNER_DIGEST_PATTERN.test(fields['body-sha256'] ?? '') ||
+    !AUTHORING_OWNER_DIGEST_PATTERN.test(fields['snapshot-sha256'] ?? '') ||
+    !fields.supersedes
+  ) {
+    return null;
+  }
+  return {
+    target: fields.target,
+    anchor: fields.anchor,
+    mode: mode,
+    owner: fields.owner,
+    set: fields.set,
+    session: fields.session,
+    bodySha256: fields['body-sha256'],
+    snapshotSha256: fields['snapshot-sha256'],
+    supersedes: fields.supersedes,
+  };
+}
+export function parseAuthoringPublicationComment(body, markerPrefix) {
+  const fields = parseSemicolonFieldMarker(
+    body,
+    markerPrefix,
+    'authoring-publication',
+  );
+  if (
+    !fields ||
+    !fields.target ||
+    !fields.anchor ||
+    !fields.set ||
+    !fields.session ||
+    !fields.token
+  ) {
+    return null;
+  }
+  return {
+    target: fields.target,
+    anchor: fields.anchor,
+    set: fields.set,
+    session: fields.session,
+    token: fields.token,
+  };
+}
+export function parseAuthoringPublicationIntentComment(body, markerPrefix) {
+  const fields = parseSemicolonFieldMarker(
+    body,
+    markerPrefix,
+    'authoring-publication-intent',
+  );
+  if (!fields) {
+    return null;
+  }
+  const state = fields.state;
+  if (
+    !fields.target ||
+    !fields.anchor ||
+    !fields.set ||
+    !fields.session ||
+    !fields.token ||
+    !fields.journal ||
+    !fields.issue ||
+    !fields.actor ||
+    !AUTHORING_PUBLICATION_INTENT_STATES.has(state)
+  ) {
+    return null;
+  }
+  return {
+    target: fields.target,
+    anchor: fields.anchor,
+    set: fields.set,
+    session: fields.session,
+    token: fields.token,
+    journal: fields.journal,
+    issue: fields.issue,
+    actor: fields.actor,
+    state: state,
+  };
+}
+/**
+ * Render the canonical `authoring-owner` marker body (#2750): HTML-comment
+ * token + the fixed visible note, joined by a single newline -- this pair
+ * carries **no** blank line between them, unlike the `claimed-by`-family
+ * renderers below. This is the format the issue-authoring contract
+ * (`skills/issue-authoring/references/contract.md`) now pins as canonical,
+ * matching the most recently posted live instances; a real historical
+ * comment from before that pin can instead use a blank-line separator
+ * (confirmed live, e.g. kurone-kito/idd-skill#2706) and will correctly fail
+ * to byte-exact-match -- fail-closed, not a defect (independent critique
+ * pass, PR #2821). `markerPrefix` is the same value
+ * `parseAuthoringOwnerComment` takes as its second argument; every other
+ * field mirrors {@link ParsedAuthoringOwnerMarker}. Throws on an invalid
+ * payload, matching every other renderer in this module.
+ */
+export function renderAuthoringOwnerMarker(payload) {
+  const markerPrefix = normalizeNonWhitespaceToken(payload?.markerPrefix);
+  const target = normalizeNonWhitespaceToken(payload?.target);
+  const anchor = normalizeNonWhitespaceToken(payload?.anchor);
+  const mode = normalizeNonWhitespaceToken(payload?.mode);
+  const modeValid = AUTHORING_OWNER_MODES.has(mode);
+  const owner = normalizeNonWhitespaceToken(payload?.owner);
+  const set = normalizeNonWhitespaceToken(payload?.set);
+  const session = normalizeNonWhitespaceToken(payload?.session);
+  const bodySha256 = normalizeNonWhitespaceToken(payload?.bodySha256);
+  const bodySha256Valid = AUTHORING_OWNER_DIGEST_PATTERN.test(bodySha256);
+  const snapshotSha256 = normalizeNonWhitespaceToken(payload?.snapshotSha256);
+  const snapshotSha256Valid =
+    AUTHORING_OWNER_DIGEST_PATTERN.test(snapshotSha256);
+  const supersedes = normalizeNonWhitespaceToken(payload?.supersedes);
+  if (
+    !markerPrefix ||
+    !target ||
+    !anchor ||
+    !modeValid ||
+    !owner ||
+    !set ||
+    !session ||
+    !bodySha256Valid ||
+    !snapshotSha256Valid ||
+    !supersedes
+  ) {
+    throw new Error(
+      'invalid authoring-owner marker payload' +
+        describeInvalidMarkerFields([
+          {
+            name: 'markerPrefix',
+            raw: payload?.markerPrefix,
+            failed: !markerPrefix,
+          },
+          { name: 'target', raw: payload?.target, failed: !target },
+          { name: 'anchor', raw: payload?.anchor, failed: !anchor },
+          { name: 'mode', raw: payload?.mode, failed: !modeValid },
+          { name: 'owner', raw: payload?.owner, failed: !owner },
+          { name: 'set', raw: payload?.set, failed: !set },
+          { name: 'session', raw: payload?.session, failed: !session },
+          {
+            name: 'bodySha256',
+            raw: payload?.bodySha256,
+            failed: !bodySha256Valid,
+          },
+          {
+            name: 'snapshotSha256',
+            raw: payload?.snapshotSha256,
+            failed: !snapshotSha256Valid,
+          },
+          { name: 'supersedes', raw: payload?.supersedes, failed: !supersedes },
+        ]),
+    );
+  }
+  return [
+    `<!-- ${markerPrefix}-authoring-owner: target=${target}; anchor=${anchor}; mode=${mode}; owner=${owner}; set=${set}; session=${session}; body-sha256=${bodySha256}; snapshot-sha256=${snapshotSha256}; supersedes=${supersedes} -->`,
+    '_Issue-authoring ownership marker. Do not edit or delete._',
+  ].join('\n');
+}
+/**
+ * Render the canonical `authoring-publication-intent` marker body (#2750),
+ * mirroring {@link renderAuthoringOwnerMarker}'s contract (single-newline
+ * join, `markerPrefix` as the resolved target prefix, one field per
+ * {@link ParsedAuthoringPublicationIntentMarker}). Before this issue, the
+ * contract documented no visible note at all for this marker family, and
+ * live comments on the authoring journal (kurone-kito/idd-skill#2674)
+ * drifted across three shapes in practice: no note, a blank-line-separated
+ * note, and a single-newline-separated note with different wording
+ * (confirmed live; independent critique pass, PR #2821). This renderer's
+ * shape is the one the contract now pins as canonical going forward; none
+ * of the pre-pin variants will byte-exact-match it, by design (fail-closed,
+ * not retroactive cleanup). Throws on an invalid payload.
+ */
+export function renderAuthoringPublicationIntentMarker(payload) {
+  const markerPrefix = normalizeNonWhitespaceToken(payload?.markerPrefix);
+  const target = normalizeNonWhitespaceToken(payload?.target);
+  const anchor = normalizeNonWhitespaceToken(payload?.anchor);
+  const set = normalizeNonWhitespaceToken(payload?.set);
+  const session = normalizeNonWhitespaceToken(payload?.session);
+  const token = normalizeNonWhitespaceToken(payload?.token);
+  const journal = normalizeNonWhitespaceToken(payload?.journal);
+  const issue = normalizeNonWhitespaceToken(payload?.issue);
+  const actor = normalizeNonWhitespaceToken(payload?.actor);
+  const state = normalizeNonWhitespaceToken(payload?.state);
+  const stateValid = AUTHORING_PUBLICATION_INTENT_STATES.has(state);
+  if (
+    !markerPrefix ||
+    !target ||
+    !anchor ||
+    !set ||
+    !session ||
+    !token ||
+    !journal ||
+    !issue ||
+    !actor ||
+    !stateValid
+  ) {
+    throw new Error(
+      'invalid authoring-publication-intent marker payload' +
+        describeInvalidMarkerFields([
+          {
+            name: 'markerPrefix',
+            raw: payload?.markerPrefix,
+            failed: !markerPrefix,
+          },
+          { name: 'target', raw: payload?.target, failed: !target },
+          { name: 'anchor', raw: payload?.anchor, failed: !anchor },
+          { name: 'set', raw: payload?.set, failed: !set },
+          { name: 'session', raw: payload?.session, failed: !session },
+          { name: 'token', raw: payload?.token, failed: !token },
+          { name: 'journal', raw: payload?.journal, failed: !journal },
+          { name: 'issue', raw: payload?.issue, failed: !issue },
+          { name: 'actor', raw: payload?.actor, failed: !actor },
+          { name: 'state', raw: payload?.state, failed: !stateValid },
+        ]),
+    );
+  }
+  return [
+    `<!-- ${markerPrefix}-authoring-publication-intent: target=${target}; anchor=${anchor}; set=${set}; session=${session}; token=${token}; journal=${journal}; issue=${issue}; actor=${actor}; state=${state} -->`,
+    '_Issue-authoring publication-intent record. Do not edit or delete._',
+  ].join('\n');
+}
+/**
+ * Determine whether `body` is a byte-exact canonical rendering of an
+ * `authoring-owner` or `authoring-publication-intent` marker for the given
+ * `markerPrefix` (#2750): parse it with {@link parseAuthoringOwnerComment} /
+ * {@link parseAuthoringPublicationIntentComment}, re-render the parsed
+ * fields with the matching renderer above, and require the result to equal
+ * `body` exactly. A body that fails to parse, or that parses but whose
+ * canonical re-rendering differs in any way -- reordered or extra fields,
+ * altered spacing, trailing content, a different visible note -- is a
+ * **non-match**: this function never guesses, matching the "exact-template
+ * match only, fail closed" rule the hide-on-supersede step relies on. Tried
+ * in `authoring-owner` then `authoring-publication-intent` order; a body
+ * cannot validly match both, since each requires a different fixed marker
+ * label.
+ *
+ * Returns the matched family name, or `null` when neither matches.
+ */
+export function matchCanonicalAuthoringMarkerFamily(body, markerPrefix) {
+  const owner = parseAuthoringOwnerComment(body, markerPrefix);
+  if (owner) {
+    try {
+      if (renderAuthoringOwnerMarker({ markerPrefix, ...owner }) === body) {
+        return 'authoring-owner';
+      }
+    } catch {
+      // A parsed field failed the renderer's own stricter validation (for
+      // example internal whitespace the parser's plain trim() does not
+      // reject) -- a body that cannot be reconstructed is never a safe
+      // match.
+    }
+  }
+  const intent = parseAuthoringPublicationIntentComment(body, markerPrefix);
+  if (intent) {
+    try {
+      if (
+        renderAuthoringPublicationIntentMarker({ markerPrefix, ...intent }) ===
+        body
+      ) {
+        return 'authoring-publication-intent';
+      }
+    } catch {
+      // Same rationale as the authoring-owner branch above.
+    }
+  }
+  return null;
+}
+/**
+ * Classify `comments` for exactly one authoring marker `family` (#2935):
+ * find every byte-exact canonical match
+ * (`matchCanonicalAuthoringMarkerFamily`), determine the newest match
+ * among trusted-actor authors only (per the contract's "syntax alone
+ * never grants ownership" rule -- an untrusted actor's later byte-exact
+ * comment must never be mistaken for the live marker to keep), and split
+ * the rest into eligible-for-minimization vs. already-minimized.
+ * `family` is matched against the RAW `comment.body` (never
+ * `stripMarkdownCodeRegions`-masked), matching exactly what a live
+ * `matchCanonicalAuthoringMarkerFamily` call against the real comment
+ * would see. `trustedActors` left `undefined` disables trust filtering
+ * entirely (every byte-exact match counts as a candidate regardless of
+ * author) -- callers that need an author-trust-filtered result (both
+ * current callers do) must pass a `Set` of lowercase logins.
+ */
+export function classifyAuthoringMarkerFamily(
+  comments,
+  markerPrefix,
+  family,
+  trustedActors,
+) {
+  const matchIndexes = [];
+  const untrustedIndexes = [];
+  comments.forEach((comment, index) => {
+    if (
+      matchCanonicalAuthoringMarkerFamily(comment.body, markerPrefix) !== family
+    ) {
+      return;
+    }
+    matchIndexes.push(index);
+    if (trustedActors !== undefined) {
+      const author = comment.author;
+      if (
+        typeof author !== 'string' ||
+        !trustedActors.has(author.toLowerCase())
+      ) {
+        untrustedIndexes.push(index);
+      }
+    }
+  });
+  const untrustedSet = new Set(untrustedIndexes);
+  const trustedMatchIndexes =
+    trustedActors === undefined
+      ? matchIndexes
+      : matchIndexes.filter((index) => !untrustedSet.has(index));
+  if (trustedMatchIndexes.length < 2) {
+    return {
+      matchIndexes,
+      trustedMatchIndexes,
+      newestTrustedIndex: null,
+      eligibleIndexes: [],
+      alreadyMinimizedIndexes: [],
+      untrustedIndexes,
+    };
+  }
+  const newestTrustedIndex =
+    trustedMatchIndexes[trustedMatchIndexes.length - 1];
+  const eligibleIndexes = [];
+  const alreadyMinimizedIndexes = [];
+  for (const index of trustedMatchIndexes) {
+    if (index === newestTrustedIndex) {
+      continue;
+    }
+    if (comments[index].isMinimized === true) {
+      alreadyMinimizedIndexes.push(index);
+    } else {
+      eligibleIndexes.push(index);
+    }
+  }
+  return {
+    matchIndexes,
+    trustedMatchIndexes,
+    newestTrustedIndex,
+    eligibleIndexes,
+    alreadyMinimizedIndexes,
+    untrustedIndexes,
+  };
 }
 // --- Per-cycle marker body renderers (#900) ---
 //
@@ -506,6 +1636,43 @@ function normalizeMarkerIsoOrNone(value) {
   }
   return normalizeIsoTimestamp(token) || null;
 }
+/**
+ * Build the field-attribution suffix for a marker-payload aggregate
+ * validation error (`#2247`): names every field whose check failed instead
+ * of leaving the generic "invalid ... marker payload" message unattributed.
+ * A field is "missing" when its raw payload value is absent, `null`, or (for
+ * a string) empty after trimming; anything else that still failed its own
+ * normalize/format check is "invalid" -- a non-empty but malformed value
+ * (a non-ISO timestamp, a non-hex-40 SHA). Every CLI-reachable renderer
+ * caller (`emit-marker.mts`, `post-idd-marker.mts`) already rejects a
+ * genuinely omitted flag before this guard runs (`#1722`, `requireFlag`), so
+ * this most commonly fires on the "invalid" branch in practice -- but a
+ * direct (non-CLI) caller can still hit "missing", so both stay covered.
+ * Returns `''` when every listed field passed (never expected to be called
+ * that way, but keeps the helper a total function).
+ */
+function describeInvalidMarkerFields(fields) {
+  const missing = [];
+  const invalid = [];
+  for (const { name, raw, failed } of fields) {
+    if (!failed) {
+      continue;
+    }
+    const rawMissing =
+      raw === undefined ||
+      raw === null ||
+      (typeof raw === 'string' && raw.trim() === '');
+    (rawMissing ? missing : invalid).push(`"${name}"`);
+  }
+  const parts = [];
+  if (missing.length > 0) {
+    parts.push(`missing ${missing.join(', ')}`);
+  }
+  if (invalid.length > 0) {
+    parts.push(`invalid ${invalid.join(', ')}`);
+  }
+  return parts.length > 0 ? `: ${parts.join('; ')}` : '';
+}
 export function renderClaimedByMarker(payload) {
   const agentId = normalizeNonWhitespaceToken(payload?.agentId);
   const claimId = normalizeNonWhitespaceToken(payload?.claimId);
@@ -523,7 +1690,15 @@ export function renderClaimedByMarker(payload) {
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
   const branch = normalizeBranchToken(payload?.branch);
   if (!agentId || !claimId || !timestamp || !branch) {
-    throw new Error('invalid claimed-by marker payload');
+    throw new Error(
+      'invalid claimed-by marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+          { name: 'branch', raw: payload?.branch, failed: !branch },
+        ]),
+    );
   }
   return [
     `<!-- claimed-by: ${agentId} ${claimId} supersedes: ${supersedes} ${timestamp} branch: ${branch} -->`,
@@ -537,7 +1712,15 @@ export function renderActivationNonceMarker(payload) {
   const nonce = normalizeNonWhitespaceToken(payload?.nonce);
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
   if (!agentId || !claimId || !nonce || !timestamp) {
-    throw new Error('invalid activation-nonce marker payload');
+    throw new Error(
+      'invalid activation-nonce marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'nonce', raw: payload?.nonce, failed: !nonce },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   return [
     `<!-- activation-nonce: ${agentId} ${claimId} ${nonce} ${timestamp} -->`,
@@ -552,15 +1735,38 @@ export function renderReviewWatermarkMarker(payload) {
   const maxActivityAt = normalizeMarkerIsoOrNone(payload?.maxActivityAt);
   const totalItemCount = normalizeMarkerCount(payload?.totalItemCount);
   const ciCompletedAt = normalizeMarkerIsoOrNone(payload?.ciCompletedAt);
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
   if (
     !agentId ||
     !claimId ||
-    !/^[0-9a-f]{40}$/.test(headSha) ||
+    !headShaValid ||
     maxActivityAt === null ||
     totalItemCount === null ||
     ciCompletedAt === null
   ) {
-    throw new Error('invalid review-watermark marker payload');
+    throw new Error(
+      'invalid review-watermark marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          {
+            name: 'maxActivityAt',
+            raw: payload?.maxActivityAt,
+            failed: maxActivityAt === null,
+          },
+          {
+            name: 'totalItemCount',
+            raw: payload?.totalItemCount,
+            failed: totalItemCount === null,
+          },
+          {
+            name: 'ciCompletedAt',
+            raw: payload?.ciCompletedAt,
+            failed: ciCompletedAt === null,
+          },
+        ]),
+    );
   }
   return [
     `<!-- review-watermark: ${agentId} ${claimId} ${headSha} ${maxActivityAt} ${totalItemCount} ${ciCompletedAt} -->`,
@@ -572,8 +1778,16 @@ export function renderReviewBaselineMarker(payload) {
   const agentId = normalizeNonWhitespaceToken(payload?.agentId);
   const claimId = normalizeNonWhitespaceToken(payload?.claimId);
   const sha = normalizeNonWhitespaceToken(payload?.sha).toLowerCase();
-  if (!agentId || !claimId || !/^[0-9a-f]{40}$/.test(sha)) {
-    throw new Error('invalid review-baseline marker payload');
+  const shaValid = /^[0-9a-f]{40}$/.test(sha);
+  if (!agentId || !claimId || !shaValid) {
+    throw new Error(
+      'invalid review-baseline marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'sha', raw: payload?.sha, failed: !shaValid },
+        ]),
+    );
   }
   return [
     `<!-- review-baseline: ${agentId} ${claimId} ${sha} -->`,
@@ -592,7 +1806,14 @@ export function renderUnclaimedByMarker(payload) {
   const claimId = normalizeNonWhitespaceToken(payload?.claimId);
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
   if (!agentId || !claimId || !timestamp) {
-    throw new Error('invalid unclaimed-by marker payload');
+    throw new Error(
+      'invalid unclaimed-by marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   return [
     `<!-- unclaimed-by: ${agentId} ${claimId} ${timestamp} -->`,
@@ -608,8 +1829,16 @@ export function renderAdvisoryWaitMarker(payload) {
   const agentId = normalizeNonWhitespaceToken(payload?.agentId);
   const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
-  if (!agentId || !/^[0-9a-f]{40}$/.test(headSha) || !timestamp) {
-    throw new Error('invalid advisory-wait marker payload');
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
+  if (!agentId || !headShaValid || !timestamp) {
+    throw new Error(
+      'invalid advisory-wait marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   return `advisory-wait: ${agentId} ${headSha} ${timestamp}`;
 }
@@ -644,8 +1873,16 @@ export function renderAdvisoryWaitRecoveryMarker(payload) {
   const agentId = normalizeNonWhitespaceToken(payload?.agentId);
   const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
-  if (!agentId || !/^[0-9a-f]{40}$/.test(headSha) || !timestamp) {
-    throw new Error('invalid advisory-wait-recovery marker payload');
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
+  if (!agentId || !headShaValid || !timestamp) {
+    throw new Error(
+      'invalid advisory-wait-recovery marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   const claimIdProvided =
     payload?.claimId !== undefined &&
@@ -680,14 +1917,22 @@ export function renderCopilotUnavailableMarker(payload) {
   const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
   const attempt = normalizePositiveIntegerToken(payload?.attempt);
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
-  if (
-    !agentId ||
-    !claimId ||
-    !/^[0-9a-f]{40}$/.test(headSha) ||
-    attempt === null ||
-    !timestamp
-  ) {
-    throw new Error('invalid copilot-unavailable marker payload');
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
+  if (!agentId || !claimId || !headShaValid || attempt === null || !timestamp) {
+    throw new Error(
+      'invalid copilot-unavailable marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'claimId', raw: payload?.claimId, failed: !claimId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          {
+            name: 'attempt',
+            raw: payload?.attempt,
+            failed: attempt === null,
+          },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   return `copilot-unavailable: ${agentId} ${headSha} ${timestamp} claim:${claimId} attempt:${attempt}`;
 }
@@ -701,10 +1946,70 @@ export function renderAdvisoryRerollMarker(payload) {
   const agentId = normalizeNonWhitespaceToken(payload?.agentId);
   const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
   const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
-  if (!agentId || !/^[0-9a-f]{40}$/.test(headSha) || !timestamp) {
-    throw new Error('invalid advisory-reroll marker payload');
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
+  if (!agentId || !headShaValid || !timestamp) {
+    throw new Error(
+      'invalid advisory-reroll marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
   }
   return `advisory-reroll: ${agentId} ${headSha} ${timestamp}`;
+}
+// #2050: review-ack is ALSO a PLAIN-TEXT marker (no visible note), same
+// family shape as advisory-wait: / advisory-reroll: above -- a trusted actor
+// posts it after reading a specific primary-bot review's findings (including
+// any body-embedded suppressed-comments section), so Clause 1
+// (advisory-convergence.mts) can treat that review's `suppressedCount` as
+// covered without a per-finding identifier scheme. It carries the PR HEAD
+// SHA (not a claim id), matching the advisory-wait/advisory-reroll shape
+// exactly, though -- unlike advisory-reroll's same-HEAD filter -- Clause 1's
+// own validity check does not filter on it: see
+// `resolveHasValidReviewAck`'s doc comment (advisory-convergence.mts) for
+// why the marker's own `created_at` compared against the review's
+// `submittedAt` is sufficient on its own.
+export function renderReviewAckMarker(payload) {
+  const agentId = normalizeNonWhitespaceToken(payload?.agentId);
+  const headSha = normalizeNonWhitespaceToken(payload?.headSha).toLowerCase();
+  const timestamp = normalizeSecondPrecisionIsoTimestamp(payload?.timestamp);
+  const headShaValid = /^[0-9a-f]{40}$/.test(headSha);
+  if (!agentId || !headShaValid || !timestamp) {
+    throw new Error(
+      'invalid review-ack marker payload' +
+        describeInvalidMarkerFields([
+          { name: 'agentId', raw: payload?.agentId, failed: !agentId },
+          { name: 'headSha', raw: payload?.headSha, failed: !headShaValid },
+          { name: 'timestamp', raw: payload?.timestamp, failed: !timestamp },
+        ]),
+    );
+  }
+  return `review-ack: ${agentId} ${headSha} ${timestamp}`;
+}
+/**
+ * Parse a `review-ack:` marker (#2754). Returns `null` on any structural
+ * mismatch (including a `copilot-unavailable:`-shaped bound body, which this
+ * plain 3-field pattern never matches). Used by `post-idd-marker.mts`'s
+ * hide-at-post-time step to find prior `review-ack:` comments whose
+ * embedded HEAD SHA differs from a freshly posted one.
+ */
+export function parseReviewAckComment(body, createdAt) {
+  const match = body
+    .trimEnd()
+    .match(
+      /^review-ack:\s+(\S+)\s+([0-9a-f]{40})\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s*$/,
+    );
+  if (!match) {
+    return null;
+  }
+  return {
+    agentId: match[1],
+    headSha: match[2].toLowerCase(),
+    timestamp: match[3],
+    createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+  };
 }
 // #1905: the grammar's positional claim-id field
 // (`{agent-id} {claim-id|none} {head-sha} ...`) already accepts an
@@ -718,7 +2023,7 @@ export function parseExternalCheckWaiverComment(body, createdAt) {
     .trimEnd()
     .match(
       new RegExp(
-        `^<!--\\s*idd-external-check-waiver:\\s+(\\S+)\\s+(\\S+)\\s+([0-9a-f]{40})\\s+check:(\\S+)\\s+reason:(\\S+)\\s+expires:(\\S+)\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
+        `^<!--\\s*idd-external-check-waiver:\\s+(\\S+)\\s+(\\S+)\\s+([0-9a-f]{40})\\s+check:(\\S+)\\s+reason:(\\S+)\\s+expires:(\\S+)(?:\\s+run-id:(\\S+))?\\s*-->${OPTIONAL_IDD_VISIBLE_NOTE_PATTERN}$`,
         'i',
       ),
     );
@@ -743,6 +2048,9 @@ export function parseExternalCheckWaiverComment(body, createdAt) {
     reason,
     expiresAt,
     createdAt: isValidIsoTimestamp(createdAt) ? createdAt : 'none',
+    // kurone-kito/idd-skill#2657: raw token, no percent-decoding -- see
+    // ParsedExternalCheckWaiver.runId's doc comment.
+    runId: match[7] ?? '',
   };
 }
 export function parseReviewWatermarkComment(body, createdAt) {
@@ -998,12 +2306,21 @@ function normalizeIsoTimestamp(value) {
   }
   return trimmed;
 }
-function normalizeSecondPrecisionIsoTimestamp(value) {
+export function normalizeSecondPrecisionIsoTimestamp(value) {
   const timestamp = normalizeIsoTimestamp(value);
-  if (!timestamp || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(timestamp)) {
+  if (!timestamp) {
     return '';
   }
-  return timestamp;
+  // Truncate a well-formed fractional-second timestamp (e.g. the millisecond
+  // precision `Date#toISOString()` always emits) down to second precision
+  // instead of rejecting it outright -- reusing the same canonical
+  // truncation `toSecondPrecisionIso` already applies for apply-time "now"
+  // values (see the comment below), rather than re-deriving it here.
+  const truncated = toSecondPrecisionIso(new Date(timestamp));
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(truncated)) {
+    return '';
+  }
+  return truncated;
 }
 function normalizeContextScope(value) {
   if (typeof value !== 'string') {
@@ -1023,8 +2340,50 @@ function isValidForcedHandoffOperationalMarker(body) {
   return parseForcedHandoffComment(body, '') !== null;
 }
 export function isValidIsoTimestamp(value) {
+  if (typeof value !== 'string') return false;
   const time = Date.parse(value);
   if (!Number.isFinite(time)) return false;
   const normalize = (ts) => ts.replace('.000Z', 'Z');
   return normalize(new Date(time).toISOString()) === normalize(value);
+}
+// --- Apply-time "now" normalization (#2568) ---
+//
+// `renderUnclaimedByMarker` and the other operational-marker renderers above
+// accept a second-precision `…Z` timestamp, or a well-formed sub-second `…Z`
+// value truncated down to one (#2592) -- but throw on anything else (an
+// offset form, or an otherwise malformed value). A production `now`
+// (`new Date().toISOString()`) always carries millisecond precision. These
+// two were independently re-implemented four times across
+// `idd-roadmap-audit-execute.mts`, `suitability-close-execute.mts`,
+// `provider-outage-park.mts`, and `provider-outage-declaration.mts` before
+// being consolidated here as the one canonical, tested implementation every
+// caller now imports instead of re-deriving.
+/**
+ * Strip the fractional-second component `Date#toISOString()` always emits,
+ * matching this repository's second-precision operational-marker
+ * convention.
+ */
+export function toSecondPrecisionIso(date) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+/**
+ * Validate and normalize an apply-time "now" value to UTC second-precision
+ * ISO (`YYYY-MM-DDTHH:mm:ssZ`), or `null` when unparseable. Callers that
+ * gate a mutation on this value (claim staleness, release markers) must fail
+ * closed on `null` BEFORE any mutation: an unparseable value would
+ * mis-evaluate staleness (`NaN` comparisons read as not-stale), and an
+ * offset form (e.g. `…+09:00`) would otherwise reach
+ * `renderUnclaimedByMarker` -- which throws on anything but a (possibly
+ * sub-second, per #2592) `…Z` value -- and throw AFTER other side effects
+ * (an evidence comment, a close) had already landed. Normalizing through
+ * `toISOString()` also converts any
+ * zone offset to UTC, so the single normalized value is safe for both the
+ * staleness checks and the release marker.
+ */
+export function normalizeApplyNow(raw) {
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return toSecondPrecisionIso(parsed);
 }

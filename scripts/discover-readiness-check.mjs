@@ -13,16 +13,21 @@ import {
   parseAutopilotSuitability,
 } from './autopilot-suitability.mjs';
 import { parseCliArgs } from './cli-args.mjs';
-import {
-  DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-  GH_TEXT_LOOP_OPTIONS,
-  ghText,
-} from './gh-exec.mjs';
 import { deriveGhHttpStatus } from './gh-http-status.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
 import { stripMarkdownCodeRegions } from './markdown-code.mjs';
 import { escapeRegex } from './marker-regex.mjs';
 import { normalizePolicyConfig, POLICY_DEFAULTS } from './policy-helpers.mjs';
+import { resolveTrustedMarkerActors } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
+import {
+  findTrustedSuitabilityRejection,
+  isSuitabilityTriageVerdictCurrent,
+  resolveLatestSubstantiveIssueEditAt,
+} from './supersession-detection.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // Leading-anchor source shared by the `Blocked by` / `Depends on` line parsers.
@@ -38,6 +43,23 @@ const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // path runs `extractBlockedByIssueNumbers` (a const declared after that block
 // would be in the temporal dead zone).
 const DEPENDENCY_LINE_PREFIX = String.raw`^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+)?`;
+// Declared here, above the `import.meta.main` CLI block, for the same
+// top-level-await TDZ reason as `DEPENDENCY_LINE_PREFIX` above: the block
+// awaits `evaluateDiscoverReadiness`, whose own synchronous body can call
+// `hasReviewFixLoopCutoffDeferMarker` (#2877) before that promise settles.
+/** The one currently-defined `{markerPrefix}-authoring-defer-source` value
+ * `hasReviewFixLoopCutoffDeferMarker` recognizes. */
+const REVIEW_FIX_LOOP_CUTOFF_DEFER_SOURCE = 'review-fix-loop-cutoff';
+// Declared here (same TDZ reason as the two constants above) for
+// `extractReviewFixLoopCutoffRefsIssueNumbers`'s trailing-reference check
+// (#2877 review fix round 4, Codex P2): matches a bare local `#N` NOT
+// immediately preceded by a word character, `/`, or `-` -- so
+// `other/repo#20` (a cross-repo mention) and a hyphen-joined token do not
+// match, but an ordinary prose reference like `#410` in
+// `(background; originating issue #410)` does. Deliberately not global
+// (`.test()` on a match-only, non-`g` regex is stateless); only existence
+// matters here, not position or count.
+const TRAILING_LOCAL_ISSUE_REF_PATTERN = /(?<![\w/-])#\d+\b/;
 const INACCESSIBLE_ISSUE_SENTINEL = Object.freeze({
   __iddLookupStatus: 'inaccessible',
 });
@@ -78,18 +100,10 @@ if (import.meta.main) {
       'missing required --issue <number> (repeatable) or --issues <n1,n2,...>',
     );
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
   const policyConfig = loadPolicy(args.policy);
   const authoringPolicy = resolveAuthoringGuardPolicy(policyConfig);
   const markerPrefix = resolveMarkerPrefix(policyConfig);
@@ -100,9 +114,24 @@ if (import.meta.main) {
     args.swarmFloor === null
       ? args.issueNumbers
       : listOpenIssueNumbers(owner, repo);
+  // #2243: resolved unconditionally (not opt-in) -- the triage-verdict
+  // exclusion is default-on. An empty resolution (no flag/env/config
+  // trusted actors configured) makes the check a no-op via
+  // evaluateDiscoverReadiness's own trustedMarkerLogins-empty guard.
+  const { actors: trustedMarkerLogins } = resolveTrustedMarkerActors({
+    envValue: process.env.IDD_TRUSTED_MARKER_ACTORS ?? '',
+    config: policyConfig,
+  });
   const summary = await evaluateDiscoverReadiness(issueNumbers, {
     includeUnresolvable: args.includeUnresolvable,
     loadIssue: buildIssueLoader(owner, repo),
+    fetchCommentsByIssueNumber: buildIssueCommentsLoader(owner, repo),
+    fetchTimelineByIssueNumber: buildIssueTimelineLoader(owner, repo),
+    fetchUserContentEditsByIssueNumber: buildIssueUserContentEditsLoader(
+      owner,
+      repo,
+    ),
+    trustedMarkerLogins,
     // `--swarm-floor` output never surfaces the stale-authoring warning, so
     // skip the per-issue timeline fetch this loader runs — over a whole-repo
     // sweep that is one extra paginated API call per open issue. The
@@ -149,7 +178,15 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
     autopilotSuitabilityFloor,
     autopilotSuitabilityEnabled,
     now = new Date(),
+    fetchCommentsByIssueNumber,
+    fetchTimelineByIssueNumber,
+    fetchUserContentEditsByIssueNumber,
+    trustedMarkerLogins,
   } = options ?? {};
+  const triageVerdictCheckEnabled =
+    typeof fetchCommentsByIssueNumber === 'function' &&
+    Array.isArray(trustedMarkerLogins) &&
+    trustedMarkerLogins.length > 0;
   // Route the three label-name options through normalizePolicyConfig rather
   // than a bare destructure default (which only applies on `undefined`), so
   // an invalid or empty-string input also falls back to POLICY_DEFAULTS
@@ -225,6 +262,8 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
         // No body is available for a not-found / inaccessible issue, so the
         // score is "no score" and the issue is never flagged below floor.
         ...suitabilitySignal(''),
+        // No label data available either.
+        isRoadmap: false,
       });
       continue;
     }
@@ -234,6 +273,7 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
         title: issue.title,
         reasons: ['issue_not_open'],
         ...suitabilitySignal(issue.body),
+        isRoadmap: issue.labels.has(roadmapLabelName),
       });
       continue;
     }
@@ -303,6 +343,52 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
         reasons.add(`blocked_by_open_issue:#${blockedNumber}`);
       }
     }
+    // #2877: a follow-up issue carrying the review-fix-loop-cutoff defer
+    // marker names its originating issue via a `Refs #NNN` line, which is
+    // otherwise non-blocking. Narrow exception: resolve that reference the
+    // same way an ordinary `Blocked by #NNN` is resolved above, so the
+    // follow-up cannot start before the work it was deferred from actually
+    // closes. An issue without the marker is completely unaffected -- its
+    // own `Refs` lines are never inspected here.
+    if (hasReviewFixLoopCutoffDeferMarker(issue.body, resolvedMarkerPrefix)) {
+      const {
+        numbers: deferSourceRefsNumbers,
+        ambiguous: deferSourceRefsAmbiguous,
+      } = extractReviewFixLoopCutoffRefsIssueNumbers(issue.body);
+      // Review fix (#2877): a marked issue with no extracted `Refs` target
+      // at all is a malformed marker -- missing the D3-required
+      // originating-issue line -- and must fail closed (blocked) rather
+      // than silently becoming Discover-ready with no blocker reasons.
+      // Review fix round 2 (#2877, Codex P2): a marked issue with *more
+      // than one* genuine `Refs` keyword line is equally malformed -- D3
+      // requires exactly one, and nothing about body order lets this
+      // function safely guess which line is the true origin -- so this
+      // also fails closed instead of picking one arbitrarily.
+      if (deferSourceRefsAmbiguous) {
+        reasons.add('ambiguous_defer_source_refs_lines');
+      } else if (deferSourceRefsNumbers.length === 0) {
+        reasons.add('missing_defer_source_refs_line');
+      }
+      for (const refsNumber of deferSourceRefsNumbers) {
+        const refsIssue = await getIssue(refsNumber, issueCache, loadIssue);
+        if (!refsIssue || isInaccessibleIssue(refsIssue)) {
+          const refsReason = isInaccessibleIssue(refsIssue)
+            ? 'issue_inaccessible'
+            : 'issue_not_found';
+          reasons.add('unresolvable_defer_source_refs_issue');
+          unresolvable.push({
+            issueNumber: issue.number,
+            kind: 'defer_source_refs_issue',
+            reference: `#${refsNumber}`,
+            reason: refsReason,
+          });
+          continue;
+        }
+        if (refsIssue.state === 'OPEN') {
+          reasons.add(`blocked_by_deferred_refs_issue:#${refsNumber}`);
+        }
+      }
+    }
     for (const marker of extractBlockedByRoadmapMarkers(
       issue.body,
       resolvedMarkerPrefix,
@@ -326,12 +412,65 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
         reasons.add(`blocked_by_open_roadmap_marker:${marker}`);
       }
     }
+    // #2243: exclude an otherwise-ready candidate whose most recent
+    // trusted `A4.5 suitability gate rejection` comment carries a
+    // still-current `<!-- {prefix}-triage-verdict: <outcome> -->` marker
+    // for one of the four non-label outcomes. Gated on
+    // `reasons.size === 0` so far -- this is the one check in the loop
+    // that needs a live comments-plus-timeline fetch, so it only runs for
+    // a candidate every cheaper (label/body) check above has already let
+    // through, never per scanned issue.
+    if (reasons.size === 0 && triageVerdictCheckEnabled) {
+      // CodeRabbit review, PR #2557: mirror this file's own fail-open
+      // contract for optional per-candidate lookups (e.g.
+      // resolveLabelEvents in discover-orphan-filter.mts) -- a transient
+      // GitHub API failure here must not abort the whole default-on
+      // readiness pass; it degrades to "no evidence" and the candidate
+      // stays selectable.
+      let record = null;
+      try {
+        record = findTrustedSuitabilityRejection(
+          fetchCommentsByIssueNumber(issue.number),
+          trustedMarkerLogins,
+          resolvedMarkerPrefix,
+        );
+      } catch {
+        record = null;
+      }
+      let editedAt = null;
+      if (record?.markerOutcome) {
+        // Both fetches evaluate inside this one try block (#2762): a
+        // failure from EITHER the timeline or the userContentEdits read
+        // degrades the whole anchor to null ("unknown") rather than
+        // computing a partial result from whichever fetch happened to
+        // succeed -- a partial result could still collapse to the bare
+        // `created_at` anchor this issue fixes.
+        try {
+          editedAt = resolveLatestSubstantiveIssueEditAt(
+            issue.createdAt,
+            typeof fetchTimelineByIssueNumber === 'function'
+              ? fetchTimelineByIssueNumber(issue.number)
+              : [],
+            typeof fetchUserContentEditsByIssueNumber === 'function'
+              ? fetchUserContentEditsByIssueNumber(issue.number)
+              : [],
+          );
+        } catch {
+          editedAt = null;
+        }
+      }
+      if (record && isSuitabilityTriageVerdictCurrent(record, editedAt)) {
+        reasons.add(`triage_verdict:${record.markerOutcome}`);
+      }
+    }
     const signal = suitabilitySignal(issue.body);
+    const isRoadmap = labels.has(roadmapLabelName);
     if (reasons.size === 0) {
       ready.push({
         number: issue.number,
         title: issue.title,
         ...signal,
+        isRoadmap,
       });
       continue;
     }
@@ -340,6 +479,7 @@ export async function evaluateDiscoverReadiness(issueNumbers, options) {
       title: issue.title,
       reasons: [...reasons].sort(),
       ...signal,
+      isRoadmap,
     });
   }
   const filteredByReason = countReasons(filteredOut);
@@ -412,7 +552,13 @@ function extractKeywordLineRefs(body, keyword) {
   );
   const numbers = [];
   for (const lineMatch of body.matchAll(linePattern)) {
-    numbers.push(...consumeDependencyRefList(lineMatch[1]));
+    numbers.push(...consumeDependencyRefList(lineMatch[1]).numbers);
+    numbers.push(
+      ...consumeContinuationRefLines(
+        body,
+        (lineMatch.index ?? 0) + lineMatch[0].length,
+      ),
+    );
   }
   return numbers;
 }
@@ -424,7 +570,10 @@ function extractKeywordLineRefs(body, keyword) {
  * (`(see other/repo#20)`) are excluded instead of being mis-read as local
  * blockers. This mirrors the separator-bounded reference parsing in
  * `discover-roadmap-graph.mts`, extended to also accept a plain-whitespace
- * separator so the space-separated multi-ref form is captured too.
+ * separator so the space-separated multi-ref form is captured too. Returns
+ * the parsed numbers alongside whatever text was not consumed, so a caller
+ * (e.g. {@link consumeContinuationRefLines}) can tell a line that is
+ * *entirely* a ref list apart from one that only starts with one.
  */
 function consumeDependencyRefList(segment) {
   const numbers = [];
@@ -443,6 +592,39 @@ function consumeDependencyRefList(segment) {
       break;
     }
     remaining = remaining.slice(separatorMatch[0].length);
+  }
+  return { numbers, remaining };
+}
+/**
+ * #2441: GitHub line-wraps a long, comma-separated "Blocked by"/"Depends on"
+ * list once it exceeds one line in the raw issue body, so a same-line-only
+ * scan silently loses every reference past the wrap. Starting right after
+ * the keyword line (`afterIndex`, the position of the newline that ends it,
+ * or end-of-body), consume zero or more immediately-following lines that
+ * are *entirely* a dependency-ref list -- each candidate line is parsed with
+ * {@link consumeDependencyRefList} and only swept in when nothing is left
+ * over, so a line starting a new paragraph, or mixing a reference with
+ * other prose, is excluded (matching the single-line prose exclusion this
+ * extends). Stops at the first blank line or non-continuation line.
+ */
+function consumeContinuationRefLines(body, afterIndex) {
+  const numbers = [];
+  let cursor = afterIndex;
+  while (body[cursor] === '\n') {
+    const lineStart = cursor + 1;
+    const nextNewline = body.indexOf('\n', lineStart);
+    const lineEnd = nextNewline === -1 ? body.length : nextNewline;
+    const trimmed = body.slice(lineStart, lineEnd).trim();
+    if (!trimmed) {
+      break;
+    }
+    const { numbers: lineNumbers, remaining } =
+      consumeDependencyRefList(trimmed);
+    if (lineNumbers.length === 0 || remaining.trim().length > 0) {
+      break;
+    }
+    numbers.push(...lineNumbers);
+    cursor = lineEnd;
   }
   return numbers;
 }
@@ -477,6 +659,115 @@ export function extractDependencyIssueNumbers(body) {
     ...explicitDependencies,
     ...taskListDependencies.map((match) => Number.parseInt(match[1], 10)),
   ]);
+}
+/**
+ * Whether `body` carries the exact
+ * `<!-- {markerPrefix}-authoring-defer-source: review-fix-loop-cutoff -->`
+ * marker (#2877). `idd-review-triage.instructions.md`'s round-count cutoff
+ * writes this marker, once, at Stage 1 publication time, on a follow-up
+ * issue that bundles deferred Low-severity review findings; that issue's
+ * body also carries a `Refs #<originating-issue>` line back to the PR/issue
+ * the deferral came from (the D3 follow-up-issue rule), which this file
+ * otherwise never parses as a dependency -- `Refs` is deliberately
+ * non-blocking everywhere else, including `discover-roadmap-graph`'s cycle
+ * exemption. `skills/issue-authoring/references/contract.md` documents
+ * this marker as valid only when it is part of the initial
+ * `authoring-publication` write, never added by a later edit -- this
+ * function does not itself verify that provenance, it only reads
+ * current body content. That is intentionally fine for Discover's
+ * narrow purpose here: a marker this function should not have honored
+ * (added after publication) can only make a candidate *more* blocked,
+ * never less, so a false positive here fails safe.
+ */
+export function hasReviewFixLoopCutoffDeferMarker(
+  body,
+  markerPrefix = DEFAULT_MARKER_PREFIX,
+) {
+  const pattern = new RegExp(
+    `<!--\\s*${escapeRegex(markerPrefix)}-authoring-defer-source:\\s*${escapeRegex(REVIEW_FIX_LOOP_CUTOFF_DEFER_SOURCE)}\\s*-->`,
+    'i',
+  );
+  // Strip code regions first, matching the #1121 boundary every other
+  // extractor in this file already applies: an issue that quotes this
+  // marker as inline-code or fenced-example prose (documenting the
+  // mechanism itself, as `#2877` and its own follow-up do) must not be
+  // misread as actually carrying a live marker.
+  return pattern.test(stripMarkdownCodeRegions(body));
+}
+/**
+ * Collect the `#N` reference declared on the body's `Refs` keyword line --
+ * never every `Refs` line the way {@link extractBlockedByIssueNumbers}
+ * collects every `Blocked by` line (#2877 review fix, Codex P2). The D3
+ * follow-up-issue rule requires exactly one `Refs #<originating-issue>`
+ * line naming exactly one issue this marker's target was deferred from.
+ * Reading only the first matching line by body position is order-fragile:
+ * a later, unrelated `Refs #N` citation that also happens to start its
+ * own line (for example a standalone `Refs #900 (non-blocking)` aside) is
+ * textually indistinguishable from the true origin, and nothing in D3
+ * guarantees the origin line comes first (#2877 review fix, Codex P2
+ * round 2). Rather than guess an order, this requires exactly one genuine
+ * `Refs` keyword line: zero yields `{ numbers: [], ambiguous: false }`
+ * (the caller's `missing_defer_source_refs_line` reason covers that);
+ * two or more yields `{ numbers: [], ambiguous: true }`, and the caller
+ * fails closed instead of arbitrarily picking one. The same ambiguity
+ * applies within the sole line itself: `Refs #410, #900` parses as two
+ * valid references (the generic dependency-ref-list grammar this shares
+ * with `Blocked by` intentionally allows a comma-separated list), but
+ * this marker's origin is a single issue, not a list, and this function
+ * cannot tell which of the two is the real origin -- so more than one
+ * extracted number (across the keyword line and any wrapped continuation
+ * lines together) is *also* ambiguous, not a multi-target blocker (#2877
+ * review fix round 3, Codex P2). The same check also inspects the text
+ * `consumeDependencyRefList` leaves unconsumed on the keyword line itself:
+ * that helper stops at the first non-ref-list token and discards the rest
+ * (by design, for the generic `Blocked by`/`Depends on` extractors, where
+ * trailing prose is deliberately not a blocker), so a line like
+ * `Refs #900 (background; originating issue #410)` would otherwise report
+ * the unambiguous single target `[900]` while silently hiding `#410` in
+ * the discarded remainder -- also ambiguous, not a hidden second number
+ * (#2877 review fix round 4, Codex P2). A `Refs` mention that does not
+ * start its own line (ordinary prose citing an issue mid-sentence, like
+ * `See also Refs #900 (non-blocking) for background.`) is not a keyword
+ * line at all and never counts toward any of this. See
+ * {@link hasReviewFixLoopCutoffDeferMarker} for how the caller decides
+ * whether any of this is blocking in the first place.
+ */
+export function extractReviewFixLoopCutoffRefsIssueNumbers(body) {
+  const stripped = stripMarkdownCodeRegions(body);
+  const linePattern = new RegExp(
+    `${DEPENDENCY_LINE_PREFIX}Refs:?[ \\t]+(#\\d+.*)$`,
+    'gim',
+  );
+  const lineMatches = [...stripped.matchAll(linePattern)];
+  if (lineMatches.length === 0) {
+    return { numbers: [], ambiguous: false };
+  }
+  if (lineMatches.length > 1) {
+    return { numbers: [], ambiguous: true };
+  }
+  const [match] = lineMatches;
+  const { numbers, remaining } = consumeDependencyRefList(match[1]);
+  const continuationNumbers = consumeContinuationRefLines(
+    stripped,
+    (match.index ?? 0) + match[0].length,
+  );
+  const allNumbers = dedupeNumbers([...numbers, ...continuationNumbers]);
+  // Round-4 review fix (Codex P2): `consumeDependencyRefList` only consumes
+  // a *contiguous* leading ref-list and silently discards everything after
+  // the first non-separator token -- by design for the generic
+  // `Blocked by`/`Depends on` extractors, where trailing prose is
+  // deliberately not a blocker. For this specific marker's single-origin
+  // requirement, a second local reference hiding in that discarded prose
+  // (e.g. `Refs #900 (background; originating issue #410)`) is just as
+  // disqualifying as a second comma-separated number would be -- checking
+  // only `allNumbers.length` above would miss it entirely.
+  if (
+    allNumbers.length > 1 ||
+    TRAILING_LOCAL_ISSUE_REF_PATTERN.test(remaining)
+  ) {
+    return { numbers: [], ambiguous: true };
+  }
+  return { numbers: allNumbers, ambiguous: false };
 }
 /**
  * Walk `argv` and return every occurrence of the given long-flag literals
@@ -557,10 +848,27 @@ function printHelp() {
   rather than a silent coercion. A "no score" issue is never below floor,
   matching discovery ranking.
 
+  #2243 triage-verdict exclusion (default-on, not opt-in): for a candidate
+  every cheaper (label/body) check already lets through, this makes one
+  comments-plus-timeline GitHub API call to look for a still-current
+  trusted "A4.5 suitability gate rejection" comment carrying a
+  "<!-- {markerPrefix}-triage-verdict: <outcome> -->" marker for one of the
+  four non-label outcomes (unclear/duplicate/out-of-scope/invalid). A match
+  excludes the candidate with reasons: ["triage_verdict:<outcome>"].
+  "needs-decision"/"blocked-by-human" never emit this marker -- those
+  already carry a stable label. Requires trusted marker actors to be
+  configured (env/flag/repo config); with none configured, this check is a
+  no-op and makes no extra GitHub API call. Staleness-checked (fail-closed
+  toward NOT excluding): the marker only excludes when the rejection
+  comment is at or after the issue's latest substantive (title/body) edit
+  -- a title edit is a timeline "renamed" event, and a body edit is a
+  GraphQL "userContentEdits.editedAt" value (#2762); a failed GraphQL read
+  degrades the anchor to unknown rather than falling back to created_at.
+
 Output schema (JSON mode):
   {
-    "ready": [{ "number": 123, "title": "...", "autopilotSuitability": 4, "belowFloor": false }],
-    "filteredOut": [{ "number": 124, "title": "...", "reasons": ["..."], "autopilotSuitability": null, "belowFloor": false }],
+    "ready": [{ "number": 123, "title": "...", "autopilotSuitability": 4, "belowFloor": false, "isRoadmap": false }],
+    "filteredOut": [{ "number": 124, "title": "...", "reasons": ["..."], "autopilotSuitability": null, "belowFloor": false, "isRoadmap": false }],
     "unresolvable": [{ "issueNumber": 124, "kind": "...", "reference": "...", "reason": "..." }],
     "warnings": [{ "issueNumber": 124, "message": "Warning: ..." }],
     "summary": { "total": 2, "readyCount": 1, "filteredCount": 1, "unresolvableCount": 0, "filteredByReason": { "...": 1 } }
@@ -568,7 +876,7 @@ Output schema (JSON mode):
 
 Output schema (--swarm-floor mode):
   {
-    "eligible": [{ "number": 123, "title": "...", "autopilotSuitability": 4, "belowFloor": false }],
+    "eligible": [{ "number": 123, "title": "...", "autopilotSuitability": 4, "belowFloor": false, "isRoadmap": false }],
     "eligible_count": 1,
     "total": 7
   }
@@ -594,6 +902,7 @@ function normalizeIssue(issue) {
     labels: normalizeLabels(issue.labels),
     labelEvents: Array.isArray(issue.labelEvents) ? issue.labelEvents : [],
     url: String(issue.url ?? ''),
+    createdAt: String(issue.createdAt ?? ''),
   };
 }
 function normalizeLabels(labelsInput) {
@@ -690,16 +999,18 @@ function countReasons(filteredOut) {
   }
   return counts;
 }
-function renderCsv(summary) {
-  const lines = ['number,title,status,reasons,suitability,belowFloor'];
+export function renderCsv(summary) {
+  const lines = [
+    'number,title,status,reasons,suitability,belowFloor,isRoadmap',
+  ];
   for (const item of summary.ready) {
     lines.push(
-      `${item.number},${escapeCsv(item.title)},ready,,${formatScore(item.autopilotSuitability)},${item.belowFloor}`,
+      `${item.number},${escapeCsv(item.title)},ready,,${formatScore(item.autopilotSuitability)},${item.belowFloor},${item.isRoadmap}`,
     );
   }
   for (const item of summary.filteredOut) {
     lines.push(
-      `${item.number},${escapeCsv(item.title)},filtered,${escapeCsv(item.reasons.join(';'))},${formatScore(item.autopilotSuitability)},${item.belowFloor}`,
+      `${item.number},${escapeCsv(item.title)},filtered,${escapeCsv(item.reasons.join(';'))},${formatScore(item.autopilotSuitability)},${item.belowFloor},${item.isRoadmap}`,
     );
   }
   return `${lines.join('\n')}\n`;
@@ -715,27 +1026,18 @@ function escapeCsv(value) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 function buildIssueLoader(owner, repo) {
+  const port = createGithubProviderAdapter(owner, repo);
   return async (issueNumber) => {
-    const args = [
-      'api',
-      `repos/${owner}/${repo}/issues/${issueNumber}`,
-      '--jq',
-      '.',
-    ];
     try {
-      const result = runGh(args).trim();
-      if (!result || result === 'null') {
-        return null;
-      }
-      return JSON.parse(result);
+      // getWorkItem's shape (number/title/state[uppercase]/body/labels/url)
+      // already matches everything normalizeIssue() reads -- no remap
+      // needed, unlike the richer files this migration also touched.
+      return port.getWorkItem(issueNumber);
     } catch (error) {
-      // `gh` exits 1 for every HTTP error, so derive the real status from
-      // its output. Fail closed: a genuine 404 maps to issue_not_found,
-      // a visibility 403/410/451 maps to issue_inaccessible, and auth /
-      // rate-limit / network / unknown failures propagate to abort.
-      if (deriveGhHttpStatus(error) === 404) {
-        return null;
-      }
+      // Fail closed: a visibility 403/410/451 maps to issue_inaccessible,
+      // auth / rate-limit / network / unknown failures propagate to abort.
+      // A genuine 404 already returns null from getWorkItem above, never
+      // reaching this catch.
       if (isInaccessibleIssueLookupError(error)) {
         return INACCESSIBLE_ISSUE_SENTINEL;
       }
@@ -744,28 +1046,46 @@ function buildIssueLoader(owner, repo) {
   };
 }
 function buildIssueLabelEventsLoader(owner, repo) {
+  const port = createGithubProviderAdapter(owner, repo);
   return async (issueNumber) => {
-    const repoRef = `${owner}/${repo}`;
-    return fetchIssueLabelEvents(repoRef, issueNumber);
+    return fetchIssueLabelEvents(port, issueNumber);
   };
 }
-function fetchIssueLabelEvents(repoRef, issueNumber) {
-  const events = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const rawPage = JSON.parse(
-      runGh([
-        'api',
-        `repos/${repoRef}/issues/${issueNumber}/timeline?per_page=${pageSize}&page=${page}`,
-      ]).trim() || '[]',
-    );
-    const labeled = rawPage.filter((event) => event?.event === 'labeled');
-    events.push(...labeled);
-    if (rawPage.length < pageSize) {
-      break;
-    }
-  }
-  return events;
+function fetchIssueLabelEvents(port, issueNumber) {
+  return port
+    .getWorkItemTimeline(issueNumber)
+    .filter((event) => event.event === 'labeled');
+}
+/** #2243: full raw timeline (unfiltered), for
+ * {@link resolveLatestSubstantiveIssueEditAt}'s `edited`-event scan. */
+function buildIssueTimelineLoader(owner, repo) {
+  const port = createGithubProviderAdapter(owner, repo);
+  return (issueNumber) => port.getWorkItemTimeline(issueNumber);
+}
+/** #2762: GraphQL `userContentEdits.editedAt` values, for
+ * {@link resolveLatestSubstantiveIssueEditAt}'s body-edit source. */
+function buildIssueUserContentEditsLoader(owner, repo) {
+  const port = createGithubProviderAdapter(owner, repo);
+  return (issueNumber) =>
+    port.getWorkItemUserContentEditTimestamps(issueNumber);
+}
+/**
+ * #2243: adapts {@link ProviderPort.listWorkItemComments}'s camelCase
+ * `ProviderComment` shape to the raw-REST-shaped
+ * `SuitabilityRejectionComment` `findTrustedSuitabilityRejection` expects
+ * (mirroring `discover-orphan-filter.mts`'s identical adapter and
+ * `suitability-triage.mts`'s own direct `gh api` comment fetch).
+ * `html_url` is intentionally omitted -- this file never reads the
+ * resulting record's `url` field, only `markerOutcome`/`createdAt`.
+ */
+function buildIssueCommentsLoader(owner, repo) {
+  const port = createGithubProviderAdapter(owner, repo);
+  return (issueNumber) =>
+    port.listWorkItemComments(issueNumber).map((comment) => ({
+      body: comment.body,
+      created_at: comment.createdAt,
+      user: { login: comment.authorLogin },
+    }));
 }
 export function buildRoadmapMarkerSearchQuery(
   owner,
@@ -779,6 +1099,7 @@ export function buildRoadmapMarkerSearchQuery(
   return `repo:${owner}/${repo} is:issue in:body "<!-- ${markerPrefix}-roadmap-id: ${marker} -->"`;
 }
 export function buildRoadmapMarkerResolver(owner, repo, markerPrefix) {
+  const port = createGithubProviderAdapter(owner, repo);
   return async (marker) => {
     const query = buildRoadmapMarkerSearchQuery(
       owner,
@@ -786,52 +1107,20 @@ export function buildRoadmapMarkerResolver(owner, repo, markerPrefix) {
       markerPrefix,
       marker,
     );
-    const encodedQuery = encodeURIComponent(query);
-    const result = runGh([
-      'api',
-      `search/issues?q=${encodedQuery}&per_page=100`,
-      '--jq',
-      '.items',
-    ]).trim();
-    return JSON.parse(result || '[]');
+    return port.searchWorkItems(query);
   };
 }
 /**
- * Every open issue number in the repository, orphans included. `--paginate`
- * walks all pages; `select(.pull_request == null)` drops pull requests, which
- * the REST issues endpoint otherwise returns alongside issues. Used by the
+ * Every open issue number in the repository, orphans included. Used by the
  * `--swarm-floor` sweep to answer "is there any eligible work left?".
+ * listOpenWorkItems() already excludes pull requests -- no re-filtering
+ * needed here.
  */
 function listOpenIssueNumbers(owner, repo) {
-  return parseIssueNumberLines(
-    ghText(
-      [
-        'api',
-        '--paginate',
-        `repos/${owner}/${repo}/issues?state=open&per_page=100`,
-        '--jq',
-        '.[] | select(.pull_request == null) | .number',
-      ],
-      { ...GH_TEXT_LOOP_OPTIONS, timeout: DEFAULT_GH_PAGINATED_TIMEOUT_MS },
-    ),
-  );
-}
-/**
- * Parse the newline-delimited issue numbers emitted by the
- * `listOpenIssueNumbers` `gh api --jq` sweep into a deduped list of positive
- * integers. Only **full-integer** lines are kept: blank, partially-numeric
- * (`5abc`), or non-positive lines are dropped rather than truncated by
- * `Number.parseInt`, so an empty sweep yields `[]`. Exported so the parse
- * contract is unit-testable without a live `gh` call — pull requests are
- * already excluded upstream by the `select(.pull_request == null)` jq filter.
- */
-export function parseIssueNumberLines(raw) {
   return dedupeNumbers(
-    raw
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => /^\d+$/.test(line))
-      .map((line) => Number.parseInt(line, 10)),
+    createGithubProviderAdapter(owner, repo)
+      .listOpenWorkItems()
+      .map((item) => item.number),
   );
 }
 // Read-and-parse failure semantics (explicit path throws; default path
@@ -858,27 +1147,6 @@ function resolveSuitabilityEnabled(config) {
   // Match resolveAutopilotSuitabilityEnabled in discover-orphan-filter.mts:
   // the kill switch is off only when explicitly set to `false`.
   return config?.autopilotSuitability?.enabled !== false;
-}
-function runGh(args) {
-  try {
-    return ghText(args, GH_TEXT_LOOP_OPTIONS);
-  } catch (error) {
-    const rawStatus = error?.status;
-    const status = typeof rawStatus === 'number' ? rawStatus : null;
-    const stderr = String(error?.stderr ?? '').trim();
-    const stdout = String(error?.stdout ?? '').trim();
-    const prefix = `gh ${args.join(' ')}`;
-    // Preserve stderr and stdout on the wrapped error so deriveGhHttpStatus
-    // can recover the real HTTP status; the process exit status is always
-    // 1 and is kept only for diagnostics.
-    const wrapped = new Error(
-      stderr ? `${prefix} failed: ${stderr}` : `${prefix} failed`,
-    );
-    wrapped.status = status;
-    wrapped.stderr = stderr;
-    wrapped.stdout = stdout;
-    throw wrapped;
-  }
 }
 function isInaccessibleIssue(value) {
   return value?.__iddLookupStatus === 'inaccessible';

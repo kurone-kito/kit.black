@@ -16,31 +16,168 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseAutopilotSuitability } from './autopilot-suitability.mjs';
 import { parseCliArgs } from './cli-args.mjs';
-import {
-  DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-  GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-  ghText,
-} from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
+import { findMarkdownCodeRanges } from './markdown-code.mjs';
 import { parseIsoDurationToMs } from './policy-helpers.mjs';
 import {
   resolveActiveClaim,
   resolveTrustedMarkerActors,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // Exported (#1484) so suitability-triage.mts's high-confidence Check 4 tier
 // can build the identical high-contention set this module uses for A4 Step 2,
 // instead of re-declaring its own copy of these defaults.
 export const DEFAULT_MANIFEST_PATH = 'audit/sync-manifest.json';
-/** F-phase bundles whose member instruction files concentrate concurrent edits. */
-export const DEFAULT_BUNDLE_IDS = ['bundle-review', 'bundle-merge'];
+/**
+ * F-phase bundles whose member instruction files concentrate concurrent
+ * edits. `bundle-review-triage-phase` + `bundle-review-fix-phase` replace
+ * the former single `bundle-review` id (#2694: split into E1-E8 assessment
+ * and E9-E15 remediation phase bundles, reusing #2789's shared `bundle-core`
+ * instead of a second overlapping core bundle); `bundle-merge-phase`
+ * likewise replaces the former single `bundle-merge` id (#2851: split into
+ * a phase-specific bundle, also reusing `bundle-core` instead of listing
+ * `idd-overview-core` / `idd-overview-appendix` directly). Because neither
+ * successor bundle carries the two core files directly any more,
+ * `bundle-core` is listed explicitly here so the resolved union stays the
+ * same 10 files as before the #2851 split, instead of silently shrinking
+ * by the two core files.
+ */
+export const DEFAULT_BUNDLE_IDS = [
+  'bundle-core',
+  'bundle-review-triage-phase',
+  'bundle-review-fix-phase',
+  'bundle-merge-phase',
+];
 /** Append-mostly shared surfaces that are not bundle members. */
 export const DEFAULT_EXTRA_FILES = [DEFAULT_MANIFEST_PATH];
 const DEFAULT_AUTOPILOT_SUITABILITY_FLOOR = 3;
 const DEFAULT_CLAIM_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 /** Upper bound on the best-effort open-PR scan (a `gh pr list --limit`). */
 const OPEN_PR_SCAN_LIMIT = 500;
+/** A Setext-style sibling heading's own underline: a lone run of `=` or `-`
+ * characters (optional leading indent up to 3 *space* characters -- a tab
+ * does not qualify (Codex review, PR #2840, round 11): CommonMark's block
+ * openers tolerate 0-3 literal spaces of indent, never a tab (which
+ * advances to the next 4-column tab stop, past the threshold), so a
+ * tab-indented `---` renders as plain paragraph text, not a real
+ * underline; the earlier `[ \t]{0,3}` wrongly counted a tab the same as a
+ * space -- optional trailing whitespace), with no other content on the
+ * line. Declared here (well above the `import.meta.main` CLI entry block
+ * below) rather than next to {@link parseCandidateFiles}'s own use of it
+ * -- a module-level binding initialized after that block is a
+ * top-level-await TDZ risk (`tests/cli-entry-smoke.test.mts`). */
+const SETEXT_UNDERLINE_PATTERN = /^ {0,3}(?:=+|-+)[ \t]*$/;
+/**
+ * A line CommonMark would never let become a Setext heading's own content
+ * line even when immediately followed by an underline-shaped line: a list
+ * item bullet/ordered marker, or a blockquote marker (Codex review, PR
+ * #2840, round 2). A `- \`src/a.mts\`` bullet directly followed by a `---`
+ * thematic break is not a Setext heading over that bullet -- the `---`
+ * ends the list instead -- so treating it as one dropped the list's own
+ * final (and, for a one-item list, only) candidate path. The marker-line
+ * alternative's own leading indent is `{0,3}` *spaces*, not `[ \t]`, for
+ * the same reason as {@link SETEXT_UNDERLINE_PATTERN} (Codex review, PR
+ * #2840, round 11).
+ */
+const SETEXT_MARKER_LED_LINE_PATTERN = /^ {0,3}(?:[-*+][ \t]+|\d+[.)][ \t]+|>)/;
+/**
+ * Any line indented at all (deliberately broad regardless of tab-vs-space,
+ * matching {@link SETEXT_MARKER_LED_LINE_PATTERN}'s own indent-tolerance
+ * looseness), used by {@link isSetextIneligiblePrecedingLine} both as its
+ * own indent test and to detect a *continuation* two lines up.
+ */
+const INDENTED_NONBLANK_LINE_PATTERN = /^[ \t]+\S/;
+/**
+ * True when `lines[contentIndex]` -- a line immediately followed (no
+ * blank line between) by an underline-shaped line -- is not eligible to
+ * be read as that Setext heading's own content, per CommonMark. Two
+ * disqualifiers:
+ *
+ * 1. A list-item bullet/ordered marker or blockquote marker (Codex
+ *    review, PR #2840, round 2): see {@link SETEXT_MARKER_LED_LINE_PATTERN}.
+ * 2. An indented line that is itself a *continuation* of a list item --
+ *    walking backward through the run of indented, non-blank lines this
+ *    line is part of eventually reaches a marker-led line (Codex review,
+ *    PR #2840, round 16, corrected round 20). A genuine multi-line Setext
+ *    heading's own content lines are ALL indented too (CommonMark allows
+ *    a Setext heading to span several lines), but that whole run traces
+ *    back to a blank line or an unindented top-level line, never a list
+ *    marker -- checking only the ONE line immediately before
+ *    (round 16's own form) wrongly treated a second heading content line
+ *    as a continuation just because the FIRST heading content line above
+ *    it also happened to be indented, e.g. `" First line\n Second
+ *    line\n ---"` right after a blank line: both lines are the SAME
+ *    multi-line heading's own content, not a continuation of anything.
+ *    `gh api /markdown` confirms CommonMark forms one heading
+ *    ("First line<br>Second line") from both lines together.
+ *
+ *    An indented *wrapped continuation* line of a multi-line bullet --
+ *    e.g. `- change:\n  \`src/a.mts\`\n---`, where the second line
+ *    carries the real candidate path but starts with a backtick, not a
+ *    marker -- is still correctly excluded this way, since walking back
+ *    from it reaches `- change:` directly (marker-led); a
+ *    continuation-of-a-continuation (`- Run:\n  one\n  two\n---`) is
+ *    also still excluded, since walking back from its last indented line
+ *    passes through the middle indented line and still reaches `- Run:`.
+ *    A genuine 1-3-space-indented top-level Setext heading (CommonMark-
+ *    legal, e.g. ` Notes\n -----` right after a blank line) is still
+ *    eligible: walking back one step reaches the blank line, not a
+ *    marker.
+ */
+function isSetextIneligiblePrecedingLine(lines, contentIndex) {
+  const line = lines[contentIndex] ?? '';
+  if (SETEXT_MARKER_LED_LINE_PATTERN.test(line)) {
+    return true;
+  }
+  if (!INDENTED_NONBLANK_LINE_PATTERN.test(line)) {
+    return false;
+  }
+  let index = contentIndex - 1;
+  while (
+    index >= 0 &&
+    INDENTED_NONBLANK_LINE_PATTERN.test(lines[index] ?? '')
+  ) {
+    index -= 1;
+  }
+  const boundary = lines[index];
+  return (
+    boundary !== undefined && SETEXT_MARKER_LED_LINE_PATTERN.test(boundary)
+  );
+}
+/**
+ * Given `lastContentIndex` -- a line already confirmed eligible (not
+ * `isSetextIneligiblePrecedingLine`) as the line directly above a Setext
+ * heading's own underline -- finds the FIRST line of that heading's own
+ * content paragraph, walking backward through as many immediately
+ * preceding non-blank, non-marker-led lines as exist (Codex review, PR
+ * #2840, round 24): CommonMark lets a Setext heading's content span
+ * several lines, e.g. `` "`package.json`\nNotes\n---" `` renders as one
+ * heading from BOTH lines -- `gh api /markdown` confirms
+ * `<h2><code>package.json</code><br>Notes</h2>`. Round 20's own fix only
+ * corrected *eligibility* (is the last line before the underline part of
+ * a real heading, not a list continuation); it left the truncation point
+ * itself at that last line, so a real backtick-quoted path on an EARLIER
+ * line of the same multi-line heading still leaked into the preceding
+ * section's own extracted text. Never walks back past `lowerBound`
+ * (the section's own opening line), matching the caller's existing
+ * `index > start` guard against misreading the section's own first line.
+ */
+function findSetextContentRunStart(lines, lastContentIndex, lowerBound) {
+  let index = lastContentIndex;
+  while (
+    index > lowerBound &&
+    (lines[index - 1] ?? '').trim() !== '' &&
+    !SETEXT_MARKER_LED_LINE_PATTERN.test(lines[index - 1] ?? '')
+  ) {
+    index -= 1;
+  }
+  return index;
+}
 // Flag-spec keys stay the dashed literal on purpose (never bare keys like
 // `candidate:`): tests/flag-name-matrix.test.mts scans this file's
 // *compiled* .mjs source text for quoted flag literals such as the
@@ -92,25 +229,105 @@ export function normalizeContentionPath(raw) {
 }
 /**
  * Parse the `## Candidate files` section of an issue body into a
- * de-duplicated, normalized path list. The section is advisory, so parsing is
- * lenient: it extracts every backtick-quoted path in the section — including
- * the continuation lines of a multi-line bullet — plus the leading path-like
- * token of any bullet that has no backticks at all. Returns `[]` when the
- * section is absent.
+ * de-duplicated list of {@link CandidateFileEntry} (raw path alongside its
+ * normalized contention key). The section is advisory, so parsing is
+ * lenient: it extracts every backtick-quoted path in the section —
+ * including the continuation lines of a multi-line bullet — plus the
+ * leading path-like token of any bullet that has no backticks at all.
+ * Returns `[]` when the section is absent. De-duplicates on `raw` (Codex
+ * review, PR #2840, round 9; previously deduplicated on `normalized`,
+ * which silently discarded a later raw spelling sharing an earlier one's
+ * contention key even when the later spelling is the one that actually
+ * exists on disk -- see {@link candidateFilesExistOnDisk}'s doc comment).
+ * `parseCandidateFiles` applies its own separate normalized-key dedup on
+ * top, preserving that function's pre-existing one-entry-per-contention-
+ * key contract for its own callers.
+ *
+ * (Considered and rejected, round 9: masking genuine inline code spans
+ * out of `body` first, to guard a multi-line span from smuggling a fake
+ * heading/Setext boundary past detection. Verified against GitHub's own
+ * renderer -- see `triage-structural-evidence.mts`'s
+ * `hasVerificationCommandSignal` doc comment -- that CommonMark's
+ * block-before-inline parsing order already makes that input impossible:
+ * an ATX heading (or Setext-eligible content line) inside an open span
+ * closes it as literal text before the span can extend across the
+ * heading, so there is no fake heading for a masking pass to hide.)
  */
-export function parseCandidateFiles(body) {
+export function parseCandidateFileEntries(body) {
   const text = typeof body === 'string' ? body : '';
   const lines = text.split(/\r?\n/);
   let start = -1;
   let end = lines.length;
   for (let index = 0; index < lines.length; index += 1) {
-    const heading = lines[index].match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    // Setext-style sibling heading boundary (Codex review, PR #2840): only
+    // once already inside the section (`start !== -1`), stop at a
+    // non-blank content line immediately followed (no blank line between)
+    // by its own underline -- e.g. `Notes\n-----` -- the same boundary
+    // `triage-structural-evidence.mts`'s own Acceptance-criteria section
+    // extraction already recognizes. An ATX heading alone missed this
+    // shape, letting an existing path in the later, unrelated section
+    // leak into `candidateFilesExist`. `index > start` (rather than `>=`)
+    // keeps the section's own opening line from ever being misread as a
+    // Setext heading's content line. The preceding line must also be
+    // Setext-heading-*eligible* (round 2, Codex): a list-item bullet or
+    // blockquote line directly above an underline-shaped line is never a
+    // Setext heading over that line -- e.g. a `---` right after this
+    // section's own last candidate-file bullet ends the list (CommonMark's
+    // own thematic-break rule), it does not retroactively turn that bullet
+    // into a heading -- so wrongly truncating there dropped a real,
+    // possibly the only, candidate path.
+    if (
+      start !== -1 &&
+      index > start &&
+      lines[index - 1].trim() !== '' &&
+      !isSetextIneligiblePrecedingLine(lines, index - 1) &&
+      SETEXT_UNDERLINE_PATTERN.test(lines[index])
+    ) {
+      end = findSetextContentRunStart(lines, index - 1, start);
+      break;
+    }
+    // Leading indent is `{0,3}` literal *spaces*, not `\s` (Codex review,
+    // PR #2840, round 11): `\s` also matches a tab, which CommonMark does
+    // not tolerate as ATX-heading indent (a tab advances to the next
+    // 4-column tab stop, past the 0-3-space threshold) -- a tab-indented
+    // `## Candidate files` line renders as an indented code block, not a
+    // real heading, so `\s{0,3}` wrongly opened (or closed) a section on
+    // a line GitHub itself never treats as one.
+    const heading = lines[index].match(/^ {0,3}(#{1,6})\s+(.*)$/);
     if (!heading) {
       continue;
     }
-    const title = heading[2].replace(/[*_`]/g, '').trim().toLowerCase();
+    const title = heading[2]
+      // Strip a valid ATX closing hash sequence (Codex review, PR #2840,
+      // round 14, reordered round 23): `## Candidate files ##` renders on
+      // GitHub as a level-2 heading titled exactly "Candidate files" --
+      // the trailing `##` is closing-sequence syntax, not part of the
+      // title -- the same trailing-hash tolerance
+      // `ACCEPTANCE_CRITERIA_HEADING_PATTERN` already carries for the
+      // sibling section. Without this, the round-12 exact-match fix
+      // rejected a heading GitHub itself renders identically to the bare
+      // form, silently dropping every candidate path in that section.
+      //
+      // Must run BEFORE stripping inline formatting characters (round
+      // 23): `` ## Candidate `files ##` `` keeps its trailing `##` as
+      // literal code-span CONTENT, not a real ATX closer -- `gh api
+      // /markdown` confirms the rendered heading is
+      // `Candidate <code>files ##</code>`, not `Candidate files`.
+      // Stripping backticks first exposed those code-span hashes as if
+      // they were a real closer, wrongly opening the section on a
+      // heading GitHub renders as something else entirely.
+      .replace(/[ \t]+#+[ \t]*$/, '')
+      .replace(/[*_`]/g, '')
+      .trim()
+      .toLowerCase();
     if (start === -1) {
-      if (/^candidate files\b/.test(title)) {
+      // Exact match, not a `\b`-bounded prefix (Codex review, PR #2840,
+      // round 12): the prefix form also matched a related but distinct
+      // sibling heading such as "## Candidate files considered but
+      // rejected" -- a real heading, just not this section's contract
+      // heading -- wrongly opening the section on it and letting an
+      // existing path listed there satisfy `candidateFilesExist`.
+      if (title === 'candidate files') {
         start = index + 1;
       }
       continue;
@@ -123,12 +340,33 @@ export function parseCandidateFiles(body) {
   }
   const section = lines.slice(start, end);
   const sectionText = section.join('\n');
-  const files = [];
-  // Every backtick-quoted path in the section, regardless of line wrapping.
+  const entries = [];
+  // Every backtick-quoted path in the section, regardless of line wrapping --
+  // but only a genuine inline-code-span match (#2865): a naive backtick pair
+  // can also fall inside an HTML tag's attribute value or a link's own
+  // title/destination (e.g. `<span title="`package.json`">not a
+  // candidate</span>`), which CommonMark renders as literal attribute/title
+  // text, never a code span (`gh api /markdown` confirms this). Reuse
+  // `markdown-code.mts`'s own exclusion (the same fix applied to
+  // `hasVerificationCommandSignal`'s command-span detection) by accepting a
+  // match only when it is fully contained in one of
+  // `findMarkdownCodeRanges`'s real code-span ranges -- containment, not
+  // exact-range equality, because adjacent real spans with no gap between
+  // them can merge into one wider range.
+  const codeRanges = findMarkdownCodeRanges(sectionText);
   for (const match of sectionText.matchAll(/`([^`]+)`/g)) {
-    const normalized = normalizeContentionPath(match[1]);
+    const matchStart = match.index;
+    const matchEnd = matchStart + match[0].length;
+    const isGenuineCodeSpan = codeRanges.some(
+      (range) => matchStart >= range.start && matchEnd <= range.end,
+    );
+    if (!isGenuineCodeSpan) {
+      continue;
+    }
+    const raw = match[1].trim();
+    const normalized = normalizeContentionPath(raw);
     if (looksLikePath(normalized)) {
-      files.push(normalized);
+      entries.push({ raw, normalized });
     }
   }
   // Bullets that quote no path fall back to a strict leading-token scan.
@@ -137,21 +375,54 @@ export function parseCandidateFiles(body) {
     if (!item || /`[^`]+`/.test(item[1])) {
       continue;
     }
-    const token = extractStandaloneToken(item[1]);
-    if (token) {
-      files.push(token);
+    const entry = extractStandaloneToken(item[1]);
+    if (entry) {
+      entries.push(entry);
     }
   }
-  return [...new Set(files)];
+  const seenRaw = new Set();
+  const deduped = [];
+  for (const entry of entries) {
+    if (seenRaw.has(entry.raw)) {
+      continue;
+    }
+    seenRaw.add(entry.raw);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+/**
+ * Parse the `## Candidate files` section into a de-duplicated, normalized
+ * path list, built from {@link parseCandidateFileEntries} for its callers:
+ * `suitability-triage.mts`'s Check 4 high-contention tier and this module's
+ * own `analyzeSharedFileOverlap`, both of which compare candidate paths as
+ * contention keys, never as filesystem paths. Applies its own
+ * normalized-key `Set` dedup (Codex review, PR #2840, round 9) --
+ * {@link parseCandidateFileEntries} itself now de-duplicates on `raw`, so
+ * two raw spellings sharing a contention key (e.g. an
+ * `idd-template/<name>` source and its `<name>` mirror) both survive
+ * there; collapsing them back to one entry per key here preserves this
+ * function's own pre-existing one-entry-per-contention-key contract.
+ * {@link candidateFilesExistOnDisk} (triage-structural-evidence.mts, #2767)
+ * needs the un-normalized `raw` form instead -- a filesystem existence
+ * check against a mirror-collapsed contention key can report a real file
+ * as existing when the path actually written in the issue does not.
+ */
+export function parseCandidateFiles(body) {
+  return [
+    ...new Set(
+      parseCandidateFileEntries(body).map((entry) => entry.normalized),
+    ),
+  ];
 }
 /** Extract a strict leading path token from a bullet that quotes no path. */
 function extractStandaloneToken(itemBody) {
   let text = itemBody.trim();
   text = text.split(/\s+(?:—|–|--)\s+/)[0];
   text = text.split(/\s+\(/)[0];
-  const leading = text.split(/[\s,;]+/)[0] ?? '';
-  const normalized = normalizeContentionPath(leading);
-  return looksLikeStandalonePath(normalized) ? normalized : null;
+  const raw = text.split(/[\s,;]+/)[0] ?? '';
+  const normalized = normalizeContentionPath(raw);
+  return looksLikeStandalonePath(normalized) ? { raw, normalized } : null;
 }
 /** A backtick-quoted token only needs a separator or extension. */
 function looksLikePath(value) {
@@ -320,31 +591,28 @@ function runCli() {
   if (args.candidates.length === 0) {
     throw new Error('at least one --candidate <number> is required');
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-    );
-  const repoRef = `${owner}/${repo}`;
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
   const policy = loadPolicy(args.policy);
   const now = args.now || new Date().toISOString();
-  const manifest = loadManifest(args.manifest);
-  const highContentionFiles = resolveHighContentionFiles({
-    manifest,
-    bundleIds: args.bundles ?? DEFAULT_BUNDLE_IDS,
-    // Track the manifest actually in use so a custom --manifest is the file
-    // reported (and matched) as high-contention, not the hard-coded default.
-    extraFiles: [args.manifest],
-  });
+  const { manifest, missing: manifestMissing } = loadManifest(args.manifest);
+  // A missing manifest must not fall back to resolveHighContentionFiles's
+  // extraFiles default (the manifest path itself) — that would fabricate a
+  // one-entry high-contention set from a file that doesn't exist.
+  const highContentionFiles = manifestMissing
+    ? new Set()
+    : resolveHighContentionFiles({
+        manifest,
+        bundleIds: args.bundles ?? DEFAULT_BUNDLE_IDS,
+        // Track the manifest actually in use so a custom --manifest is the file
+        // reported (and matched) as high-contention, not the hard-coded default.
+        extraFiles: [args.manifest],
+      });
   const candidates = args.candidates.map((number) => {
-    const issue = fetchIssue(repoRef, number);
+    const issue = fetchIssue(port, number);
     return {
       number,
       score: parseAutopilotSuitability(issue.body, policy.markerPrefix),
@@ -352,9 +620,12 @@ function runCli() {
     };
   });
   let activeIssues = [];
-  if (args.checkOverlap) {
+  // A missing manifest guarantees an empty high-contention set (see above),
+  // so every overlap intersection would be empty regardless of active-issue
+  // data — skip the API cost entirely in that case.
+  if (args.checkOverlap && !manifestMissing) {
     activeIssues = discoverActiveIssues({
-      repoRef,
+      port,
       trustedActors: policy.trustedMarkerActors,
       staleAgeMs: policy.claimStaleAgeMs,
       now,
@@ -370,6 +641,7 @@ function runCli() {
   const output = {
     repository: { owner, repo },
     checkedOverlap: args.checkOverlap,
+    manifestMissing,
     highContentionFiles: [...highContentionFiles].sort(),
     ...analysis,
   };
@@ -391,13 +663,13 @@ function runCli() {
  * forced-handoff-successor adoption (the default `resolveActiveClaim` path).
  */
 function discoverActiveIssues(options) {
-  const { repoRef, trustedActors, staleAgeMs, now } = options;
+  const { port, trustedActors, staleAgeMs, now } = options;
   const active = new Map();
   // Active-by-PR: issues closed by an open PR (best-effort across open PRs,
   // bounded by the PR-list page cap).
-  for (const number of fetchOpenPrLinkedIssues(repoRef)) {
+  for (const number of fetchOpenPrLinkedIssues(port)) {
     if (!active.has(number)) {
-      const body = fetchIssue(repoRef, number).body;
+      const body = fetchIssue(port, number).body;
       active.set(number, {
         number,
         reason: 'pr',
@@ -418,17 +690,17 @@ function discoverActiveIssues(options) {
   const isStale = (activeCreatedAt, nextCreatedAt) =>
     new Date(nextCreatedAt).getTime() - new Date(activeCreatedAt).getTime() >=
     staleAgeMs;
-  for (const number of fetchActiveClaimBranchNumbers(repoRef)) {
+  for (const number of fetchActiveClaimBranchNumbers(port)) {
     if (active.has(number)) {
       continue;
     }
-    const comments = fetchIssueComments(repoRef, number);
+    const comments = fetchIssueComments(port, number);
     const claim = resolveActiveClaim(comments, {
       isTrustedAuthor: isTrusted,
       isStale,
     });
     if (claim && !isStale(claim.createdAt, now)) {
-      const body = fetchIssue(repoRef, number).body;
+      const body = fetchIssue(port, number).body;
       active.set(number, {
         number,
         reason: 'claim',
@@ -439,123 +711,83 @@ function discoverActiveIssues(options) {
   return [...active.values()].sort((left, right) => left.number - right.number);
 }
 /** Issue numbers that currently have an `issue/<n>-*` branch on the remote. */
-function fetchActiveClaimBranchNumbers(repoRef) {
+function fetchActiveClaimBranchNumbers(port) {
   const numbers = new Set();
-  // `--paginate` follows the Link headers to the end, so a repo with many
-  // issue branches does not silently drop branches past the first page.
-  const output = ghText(
-    [
-      'api',
-      '--paginate',
-      `repos/${repoRef}/git/matching-refs/heads/issue/`,
-      '--jq',
-      '.[].ref',
-    ],
-    {
-      ...GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-      timeout: DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-    },
-  );
-  for (const line of output.split('\n')) {
-    const match = line.match(/^refs\/heads\/issue\/(\d+)-/);
+  for (const ref of port.listIssueBranchRefs()) {
+    const match = ref.match(/^refs\/heads\/issue\/(\d+)-/);
     if (match) {
       numbers.add(Number.parseInt(match[1], 10));
     }
   }
   return [...numbers];
 }
-function fetchIssue(repoRef, number) {
+function fetchIssue(port, number) {
   // Fail closed: let a fetch failure surface rather than returning an empty
   // body, which would silently suppress this issue's candidate files and emit
-  // a false "no overlap" result.
-  const body = ghText(
-    [
-      'issue',
-      'view',
-      String(number),
-      '--repo',
-      repoRef,
-      '--json',
-      'body',
-      '--jq',
-      '.body',
-    ],
-    GH_TEXT_LOOP_TIMEOUT_OPTIONS,
-  );
-  return { body };
+  // a false "no overlap" result. `getWorkItem` returns null on a 404 instead
+  // of throwing (unlike this file's pre-migration `gh issue view`, which
+  // threw on any failure, missing issues included), so a missing issue is
+  // turned back into a thrown error here to preserve that fail-closed
+  // contract.
+  const issue = port.getWorkItem(number);
+  if (!issue) {
+    throw new Error(`issue #${number} not found`);
+  }
+  return { body: issue.body };
 }
 /**
- * Map a REST issue-comment payload to the `CommentLike` shape
- * `resolveActiveClaim` consumes. `resolveActiveClaim` reads the author from
- * `author.login`, but the REST comments API returns it under `user.login`, so
- * the login must be mapped across here (matching `discover-roadmap-graph`'s
- * comment loader). Emitting `user` would leave the author empty and silently
+ * Map a `ProviderComment` to the `CommentLike` shape `resolveActiveClaim`
+ * consumes. `resolveActiveClaim` reads the author from `author.login`, but
+ * `ProviderComment` carries it as a flat `authorLogin` (matching
+ * `discover-roadmap-graph`'s own comment loader, which maps the equivalent
+ * REST `user.login` the same way), so the login must be mapped across here.
+ * Emitting `authorLogin` unmapped would leave `author` empty and silently
  * disable claim detection.
  */
 export function toClaimComment(raw) {
-  const entry = raw;
   return {
-    body: String(entry.body ?? ''),
-    createdAt: String(entry.created_at ?? ''),
-    author: { login: String(entry.user?.login ?? '') },
+    body: raw.body,
+    createdAt: raw.createdAt,
+    author: { login: raw.authorLogin },
   };
 }
-function fetchIssueComments(repoRef, number) {
-  const comments = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const rawPage = ghJson([
-      'api',
-      `repos/${repoRef}/issues/${number}/comments?per_page=${pageSize}&page=${page}`,
-    ]);
-    for (const raw of rawPage) {
-      comments.push(toClaimComment(raw));
-    }
-    if (rawPage.length < pageSize) {
-      break;
-    }
-  }
-  return comments;
+function fetchIssueComments(port, number) {
+  return port.listWorkItemComments(number).map(toClaimComment);
 }
-function fetchOpenPrLinkedIssues(repoRef) {
-  const numbers = new Set();
+function fetchOpenPrLinkedIssues(port) {
   // Best-effort: `gh pr list` caps at --limit, so a repo with more open PRs
   // than the cap drops the overflow. Acceptable for an advisory signal.
-  const prs = ghJson([
-    'pr',
-    'list',
-    '--repo',
-    repoRef,
-    '--state',
-    'open',
-    '--limit',
-    String(OPEN_PR_SCAN_LIMIT),
-    '--json',
-    'closingIssuesReferences',
-  ]);
-  for (const pr of prs) {
-    const refs = pr.closingIssuesReferences;
-    if (Array.isArray(refs)) {
-      for (const ref of refs) {
-        const value = Number.parseInt(String(ref.number ?? ''), 10);
-        if (Number.isInteger(value) && value > 0) {
-          numbers.add(value);
-        }
-      }
-    }
-  }
-  return [...numbers];
+  return port.listIssueNumbersClosedByOpenChangeRequests(OPEN_PR_SCAN_LIMIT);
 }
-function loadManifest(manifestPath) {
+/**
+ * Load the sync manifest. A missing file (`ENOENT` — the common adopter case,
+ * since `audit/sync-manifest.json` is a source-repo audit artifact that
+ * adopter repositories do not ship) degrades quietly: `missing: true`, no
+ * throw. Any other read failure (permissions, a directory in place of the
+ * file, …) or a present-but-malformed manifest still fails closed exactly as
+ * before — an empty manifest would otherwise yield an empty high-contention
+ * set, making every candidate look non-overlapping.
+ */
+export function loadManifest(manifestPath) {
   const targetPath = resolve(
     process.cwd(),
     manifestPath || DEFAULT_MANIFEST_PATH,
   );
+  let raw;
   try {
-    return JSON.parse(readFileSync(targetPath, 'utf8'));
+    raw = readFileSync(targetPath, 'utf8');
   } catch (error) {
-    // Fail closed: an empty manifest would yield an empty high-contention set,
-    // making every candidate look non-overlapping. Surface the load failure.
+    if (error.code === 'ENOENT') {
+      return { manifest: null, missing: true };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `failed to load sync manifest at ${targetPath}: ${message}`,
+    );
+  }
+  try {
+    return { manifest: JSON.parse(raw), missing: false };
+  } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
       `failed to load sync manifest at ${targetPath}: ${message}`,
@@ -673,7 +905,7 @@ function parsePositiveInt(value, flag) {
 }
 function printHelp() {
   process.stdout.write(`Usage:
-  node scripts/discover-shared-file-overlap.mjs --candidate <number> [--candidate <number> ...] [--candidates <n1,n2>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--manifest <path>] [--bundles <id1,id2>] [--check-overlap] [--now <ISO8601>] [--help]
+  node scripts/discover-shared-file-overlap.mjs --candidate <number> [--candidate <number> ...] [--candidates <n1,n2>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--manifest <path>] [--bundles <id1,id2,...>] [--check-overlap] [--now <ISO8601>] [--help]
 
 Reports, per candidate, the high-contention shared files it would touch (from
 its '## Candidate files' section) and — with --check-overlap — whether any
@@ -694,22 +926,4 @@ claim stale age, so a non-stale claim held by another session is detected even
 when it is outside the unclaimed candidate set being ranked. A claim whose
 branch is not yet pushed is picked up once it appears remotely.
 `);
-}
-// Exported (#1484) as the array-safe `gh` JSON parser: suitability-triage.mts
-// reuses it (aliased at the import site to avoid colliding with that file's
-// own object-shaped `ghJson`) instead of re-declaring an equivalent helper.
-export function ghJson(args) {
-  const parsed = JSON.parse(runGh(args).trim() || '[]');
-  return Array.isArray(parsed) ? parsed : [];
-}
-function runGh(args) {
-  try {
-    return ghText(args, GH_TEXT_LOOP_TIMEOUT_OPTIONS);
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    if (stderr) {
-      throw new Error(`gh command failed: ${stderr}`);
-    }
-    throw error;
-  }
 }
