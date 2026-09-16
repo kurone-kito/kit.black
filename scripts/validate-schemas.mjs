@@ -19,6 +19,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { collectVendoredFiles } from './helper-runtime-manifest.mjs';
 
 // Resolve the repository root by walking up to the nearest package.json.
 // This is location-independent, so it returns the same root whether this
@@ -354,14 +355,47 @@ export function validateFixture(schemaPath, fixturePath, expectValid) {
   return { ok: true, errors: [] };
 }
 /**
+ * Names (without the `.schema.json` suffix) of schemas that
+ * `helper-runtime-manifest.mjs`'s `vendored-node` manifest actually declares
+ * a fixture pair for, derived from `collectVendoredFiles(root)`'s
+ * `EXTRA_RUNTIME_FILES` contribution rather than a physical directory scan.
+ * A name is "managed" only when both its `.valid.json` and `.invalid.json`
+ * fixture paths are present in the declared manifest — a schema that is
+ * declared managed but has only one of the pair still counts as managed here
+ * (so a genuinely missing fixture fails closed in `discoverSchemaCases`
+ * below), while a schema absent from the manifest entirely is not "managed"
+ * and its fixtures, if any exist on disk, are not required.
+ */
+function collectManagedFixtureSchemaNames(root) {
+  const declared = new Set(
+    collectVendoredFiles(root).map((file) => file.targetPath),
+  );
+  const names = new Set();
+  for (const path of declared) {
+    const match = /^fixtures\/schemas\/(.+)\.valid\.json$/.exec(path);
+    if (match && declared.has(`fixtures/schemas/${match[1]}.invalid.json`)) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+/**
  * Auto-discover schema/fixture validation cases under `root`: every
- * `schemas/*.schema.json` is paired with `fixtures/schemas/<name>.valid.json`
- * (expect-pass) and `<name>.invalid.json` (expect-fail). A schema missing
- * either fixture is reported in `missing` rather than silently skipped, so the
- * CLI can fail closed and a new schema cannot slip through unvalidated. Pure
- * over the filesystem (globs and stats only), so it is unit-testable.
+ * `schemas/*.schema.json` whose name is in the `vendored-node` manifest's
+ * declared managed-fixture set (see `collectManagedFixtureSchemaNames`
+ * above) is paired with `fixtures/schemas/<name>.valid.json` (expect-pass)
+ * and `<name>.invalid.json` (expect-fail). A managed schema missing either
+ * fixture on disk is reported in `missing` rather than silently skipped, so
+ * the CLI can fail closed and a genuine gap cannot slip through unvalidated.
+ * A schema outside the managed-fixture set is skipped entirely — neither a
+ * `cases` entry nor a `missing` report — since the manifest never declared a
+ * fixture requirement for it (the `vendored-node` adopter profile curates a
+ * smaller managed-fixture set than managed-schema set by design). Pure over
+ * the filesystem (globs, stats, and the manifest's own import-graph walk),
+ * so it is unit-testable.
  */
 export function discoverSchemaCases(root) {
+  const managedFixtureNames = collectManagedFixtureSchemaNames(root);
   const schemaFiles = readdirSync(join(root, 'schemas'))
     .filter((file) => file.endsWith('.schema.json'))
     .sort();
@@ -369,6 +403,9 @@ export function discoverSchemaCases(root) {
   const missing = [];
   for (const file of schemaFiles) {
     const name = file.slice(0, -'.schema.json'.length);
+    if (!managedFixtureNames.has(name)) {
+      continue;
+    }
     const schemaPath = `schemas/${file}`;
     const validFixture = `fixtures/schemas/${name}.valid.json`;
     const invalidFixture = `fixtures/schemas/${name}.invalid.json`;
