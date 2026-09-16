@@ -360,6 +360,14 @@ under the same review bar) becomes available — see Deferred below.
 
 **Status**: installed at `.claude/skills/issue-authoring/`.
 
+**Authoring journal**: `issueAuthoring.journalIssue` is set to
+`kurone-kito/kit.black#267` (#268). Issue #267 is the durable,
+comment-only publication-intent journal for standalone issue-authoring
+sets with no existing issue or anchor of their own — it must stay open
+and comment-only (never closed, never treated as an IDD work item).
+The broader v0.11.0 onboarding-hearing durable record for this area,
+including this field, is still owned by open issue #252.
+
 ## Worktree Guard
 
 **Status**: enabled (`worktreeGuard.enabled: true`).
