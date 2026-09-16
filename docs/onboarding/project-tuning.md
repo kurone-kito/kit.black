@@ -62,10 +62,10 @@ output before treating either profile as wired.
 ## Extra trusted marker actors
 
 `--substitute` (or a `--hear` transcript) resolves exactly one
-`kurone-kito` login into
+`{{TRUSTED_MARKER_ACTOR}}` login into
 `.github/idd/config.json`'s `trustedMarkerActors` array. Add further
 trusted logins as additional quoted array entries by hand after the
-first substitution — see [`kurone-kito`](placeholders.md)
+first substitution — see [`{{TRUSTED_MARKER_ACTOR}}`](placeholders.md)
 for the single-login replacement step this extends.
 
 ## Claim-timing overrides and custom label names
