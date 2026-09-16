@@ -44,7 +44,8 @@
   "iddVersion": "0.11.0",
   "issueAuthoring": {
     "maxClarificationRounds": 3,
-    "authoringLabelName": "status:authoring"
+    "authoringLabelName": "status:authoring",
+    "journalIssue": "kurone-kito/kit.black#267"
   },
   "issueScope": "roadmap-first",
   "labels": {
