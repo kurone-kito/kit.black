@@ -93,7 +93,7 @@ tooling. Common patterns:
 - Rust: `cargo fmt`
 - no relevant auto-fix tooling: `true`
 
-### `pnpm run lint && pnpm run test`
+### `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test`
 
 Propose a non-mutating lint/build/test sequence. Common patterns:
 
@@ -106,7 +106,7 @@ Propose a non-mutating lint/build/test sequence. Common patterns:
 - Rust: `cargo check && cargo test`
 - no relevant verification command: `true`
 
-### `pnpm run lint:fix && pnpm run lint && pnpm run test`
+### `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test`
 
 Usually a superset of `fix-validate` and `pre-push-validate`.
 
@@ -130,8 +130,8 @@ placeholders:
 | `kit-black`      | Hidden issue-body marker prefix                           | `my-app`                           |
 | `kurone-kito`       | Single JSON-escaped login allowed to post trusted markers | `trusted-user-a`                   |
 | `pnpm run lint:fix && pnpm run lint`      | Auto-fix plus validate command row                        | `npm run lint:fix && npm run lint` |
-| `pnpm run lint && pnpm run test` | Non-mutating verify command row                           | `npm run lint && npm run test`     |
-| `pnpm run lint:fix && pnpm run lint && pnpm run test` | Post-fix validate command row                             | `npm run lint:fix && npm test`     |
+| `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test` | Non-mutating verify command row                           | `npm run lint && npm run test`     |
+| `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test` | Post-fix validate command row                             | `npm run lint:fix && npm test`     |
 | `pnpm install --prefer-frozen-lockfile`       | Dependency install command, or `true` when unnecessary    | `npm install`                      |
 
 ### No-op substitution
