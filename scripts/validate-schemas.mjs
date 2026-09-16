@@ -357,23 +357,25 @@ export function validateFixture(schemaPath, fixturePath, expectValid) {
 /**
  * Names (without the `.schema.json` suffix) of schemas that
  * `helper-runtime-manifest.mjs`'s `vendored-node` manifest actually declares
- * a fixture pair for, derived from `collectVendoredFiles(root)`'s
+ * a fixture for, derived from `collectVendoredFiles(root)`'s
  * `EXTRA_RUNTIME_FILES` contribution rather than a physical directory scan.
- * A name is "managed" only when both its `.valid.json` and `.invalid.json`
- * fixture paths are present in the declared manifest — a schema that is
- * declared managed but has only one of the pair still counts as managed here
- * (so a genuinely missing fixture fails closed in `discoverSchemaCases`
- * below), while a schema absent from the manifest entirely is not "managed"
- * and its fixtures, if any exist on disk, are not required.
+ * A name is "managed" when *either* its `.valid.json` or `.invalid.json`
+ * fixture path is present in the declared manifest — deliberately not
+ * requiring both, so that a schema the manifest declares only partially
+ * (a manifest-authoring gap) still reaches `discoverSchemaCases`' own
+ * per-file `existsSync` checks below and fails closed with a `missing`
+ * report naming the absent half, rather than being silently skipped
+ * outright. A schema absent from the manifest entirely is not "managed",
+ * and its fixtures, if any happen to exist on disk, are not required.
  */
 function collectManagedFixtureSchemaNames(root) {
-  const declared = new Set(
-    collectVendoredFiles(root).map((file) => file.targetPath),
-  );
+  const declared = collectVendoredFiles(root).map((file) => file.targetPath);
   const names = new Set();
   for (const path of declared) {
-    const match = /^fixtures\/schemas\/(.+)\.valid\.json$/.exec(path);
-    if (match && declared.has(`fixtures/schemas/${match[1]}.invalid.json`)) {
+    const match = /^fixtures\/schemas\/(.+)\.(?:valid|invalid)\.json$/.exec(
+      path,
+    );
+    if (match) {
       names.add(match[1]);
     }
   }
