@@ -365,8 +365,31 @@ under the same review bar) becomes available — see Deferred below.
 comment-only publication-intent journal for standalone issue-authoring
 sets with no existing issue or anchor of their own — it must stay open
 and comment-only (never closed, never treated as an IDD work item).
-The broader v0.11.0 onboarding-hearing durable record for this area,
-including this field, is still owned by open issue #252.
+
+Issue #252's own acceptance criteria were scoped, at hearing time, to
+record "no standalone journal issue" as part of the broader v0.11.0
+onboarding-hearing durable record for this area. This configuration
+supersedes that hearing-time outcome: #252's eventual record must
+reflect the #267 journal configured here rather than the earlier
+"none" state.
+
+**Residual risk**: no mechanical Discover exclusion protects #267 from
+ordinary issue selection yet — `idd-discover.instructions.md`'s A0-O
+orphan-first fallback has no special case for a configured
+`issueAuthoring.journalIssue` target, and neither does the vendored
+`scripts/discover-orphan-filter.mjs` helper. In practice, both
+`node scripts/discover-viability-gate.mjs --issue 267` and
+`node scripts/suitability-triage.mjs --issue 267` already reject #267
+today (`clear_verification` / `actionability` fail, since the issue
+describes no implementable work), so accidental selection is unlikely
+under this repository's current A4/A4.5 gates — but that protection is
+incidental (a byproduct of the issue's own prose), not a guaranteed
+invariant. Recommended follow-ups: apply the configured
+`status:blocked-by-human` label to #267 directly (cheapest; mechanically
+excludes it via A3's own label bullet, though the semantic fit is a
+stretch since the issue is not actually blocked on a human decision),
+or extend A0-O and its helper to explicitly skip the configured journal
+target.
 
 ## Worktree Guard
 
