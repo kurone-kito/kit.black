@@ -19,6 +19,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { collectVendoredFiles } from './helper-runtime-manifest.mjs';
 
 // Resolve the repository root by walking up to the nearest package.json.
 // This is location-independent, so it returns the same root whether this
@@ -354,14 +355,77 @@ export function validateFixture(schemaPath, fixturePath, expectValid) {
   return { ok: true, errors: [] };
 }
 /**
- * Auto-discover schema/fixture validation cases under `root`: every
- * `schemas/*.schema.json` is paired with `fixtures/schemas/<name>.valid.json`
- * (expect-pass) and `<name>.invalid.json` (expect-fail). A schema missing
- * either fixture is reported in `missing` rather than silently skipped, so the
- * CLI can fail closed and a new schema cannot slip through unvalidated. Pure
- * over the filesystem (globs and stats only), so it is unit-testable.
+ * The manifest's declared schema/fixture paths for the `vendored-node`
+ * profile, from `collectVendoredFiles(root)`'s `EXTRA_RUNTIME_FILES`
+ * contribution rather than a physical directory scan. Exposed separately
+ * from `discoverSchemaCases` below (rather than called inline) so a
+ * caller under test can precompute this once against a full checkout —
+ * or supply a synthetic declared-paths list directly — and pass it
+ * through `discoverSchemaCases`' own `declaredPaths` option, decoupling
+ * the manifest's import-graph walk from the filesystem root under test
+ * (PR #266 review, Copilot: `collectVendoredFiles` reads every
+ * `HELPER_COMMANDS` entry file, so it throws `ENOENT` against a minimal
+ * synthetic root that lacks them).
  */
-export function discoverSchemaCases(root) {
+function collectDeclaredFixturePaths(root) {
+  return new Set(collectVendoredFiles(root).map((file) => file.targetPath));
+}
+/**
+ * For each schema name with at least one declared fixture half, record
+ * which of `.valid.json` / `.invalid.json` the manifest actually
+ * declares — not just whether the name is "managed" at all. Tracking the
+ * specific declared half (PR #266 review, Codex) closes a gap the
+ * original either-half-counts-as-managed fix left open: if the manifest
+ * drops only one half's declaration while its physical file lingers on
+ * disk (a manifest-authoring gap distinct from a physically-missing
+ * file), an unconditional `existsSync` check against both computed paths
+ * would silently accept the leftover file and mask the manifest/reality
+ * drift instead of reporting it. A schema absent from the manifest
+ * entirely has no entry here at all, and its fixtures, if any happen to
+ * exist on disk, are not required.
+ */
+function collectManagedFixtureDeclarations(declaredPaths) {
+  const declarations = new Map();
+  for (const path of declaredPaths) {
+    const match = /^fixtures\/schemas\/(.+)\.(valid|invalid)\.json$/.exec(
+      path,
+    );
+    if (!match) {
+      continue;
+    }
+    const [, name, half] = match;
+    const declaration = declarations.get(name) ?? {
+      valid: false,
+      invalid: false,
+    };
+    declaration[half] = true;
+    declarations.set(name, declaration);
+  }
+  return declarations;
+}
+/**
+ * Auto-discover schema/fixture validation cases under `root`: every
+ * `schemas/*.schema.json` whose name has at least one declared fixture in
+ * the `vendored-node` manifest (see `collectManagedFixtureDeclarations`
+ * above) is paired with `fixtures/schemas/<name>.valid.json` (expect-pass)
+ * and `<name>.invalid.json` (expect-fail), requiring each half to be both
+ * manifest-declared and present on disk. A managed schema missing either
+ * half — undeclared, physically absent, or both — is reported in `missing`
+ * rather than silently skipped, so the CLI can fail closed and a genuine
+ * gap (real or manifest-authoring) cannot slip through unvalidated. A
+ * schema outside the managed-fixture set entirely is skipped — neither a
+ * `cases` entry nor a `missing` report — since the manifest never declared
+ * a fixture requirement for it (the `vendored-node` adopter profile
+ * curates a smaller managed-fixture set than managed-schema set by
+ * design). Pure over the filesystem and the supplied/derived declared-path
+ * set, so it is unit-testable: pass `declaredPaths` explicitly to test
+ * against a minimal synthetic root without requiring
+ * `collectVendoredFiles`' own full-checkout import-graph walk to succeed.
+ */
+export function discoverSchemaCases(root, { declaredPaths } = {}) {
+  const managedFixtureDeclarations = collectManagedFixtureDeclarations(
+    declaredPaths ?? collectDeclaredFixturePaths(root),
+  );
   const schemaFiles = readdirSync(join(root, 'schemas'))
     .filter((file) => file.endsWith('.schema.json'))
     .sort();
@@ -369,14 +433,18 @@ export function discoverSchemaCases(root) {
   const missing = [];
   for (const file of schemaFiles) {
     const name = file.slice(0, -'.schema.json'.length);
+    const declaration = managedFixtureDeclarations.get(name);
+    if (!declaration) {
+      continue;
+    }
     const schemaPath = `schemas/${file}`;
     const validFixture = `fixtures/schemas/${name}.valid.json`;
     const invalidFixture = `fixtures/schemas/${name}.invalid.json`;
     const missingFixtures = [];
-    if (!existsSync(join(root, validFixture))) {
+    if (!declaration.valid || !existsSync(join(root, validFixture))) {
       missingFixtures.push(validFixture);
     }
-    if (!existsSync(join(root, invalidFixture))) {
+    if (!declaration.invalid || !existsSync(join(root, invalidFixture))) {
       missingFixtures.push(invalidFixture);
     }
     if (missingFixtures.length > 0) {

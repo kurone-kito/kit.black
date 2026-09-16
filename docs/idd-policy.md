@@ -460,3 +460,23 @@ re-import:
   see the v0.6.0 re-import verification note above. Non-blocking and
   profile-independent; the fix must land upstream and arrive via the next
   re-sync, since `scripts/` stays vendored byte-identical.
+- **`scripts/validate-schemas.mjs` manifest-aware fixture discovery
+  (#258)** — a deliberate, repository-owner-authored local divergence
+  from byte-identical vendoring, not a re-import artifact: the shipped
+  `discoverSchemaCases()` scanned the physical `schemas/` directory
+  unconditionally and required a fixture pair for every `*.schema.json`
+  file, so it exited 1 immediately whenever a managed schema lacked
+  fixtures (the `vendored-node` profile intentionally curates a
+  smaller managed-fixture set than managed-schema set). Fixed locally to
+  read the managed-fixture set from `helper-runtime-manifest.mjs`'s own
+  `collectVendoredFiles()` instead. Unlike the `idd-doctor.mjs` entry
+  above, this was **not** filed upstream by this workflow — autonomous
+  upstream filing is out of scope
+  ([Upstream-candidate escalation](../.github/instructions/idd-overview-appendix.instructions.md#upstream-candidate-escalation)'s
+  "what never to do" prohibits writing to `kurone-kito/idd-skill`, and
+  `upstreamEscalation.enabled` is unset here regardless). Whether to
+  report this upstream, and how to reconcile it with byte-identical
+  vendoring on the next re-sync, is an operator decision outside this
+  workflow; until then, expect `scripts/validate-schemas.mjs` to diff
+  against upstream at the next re-sync and re-apply (or re-evaluate) this
+  divergence rather than silently overwriting it.
