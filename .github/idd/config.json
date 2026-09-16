@@ -5,6 +5,7 @@
     "convergenceScope": "idd-claimed",
     "primaryBotLogin": "copilot"
   },
+  "authoringLanguage": "en",
   "autopilotSuitability": {
     "floor": 3
   },
@@ -41,6 +42,10 @@
     "profile": "vendored-node"
   },
   "iddVersion": "0.11.0",
+  "issueAuthoring": {
+    "maxClarificationRounds": 3,
+    "authoringLabelName": "status:authoring"
+  },
   "issueScope": "roadmap-first",
   "labels": {
     "roadmapLabelName": "roadmap",
@@ -51,6 +56,7 @@
   "markerPrefix": "kit-black",
   "mergeGate": { "soloCodeownerAdminFallback": "auto-admin-retry" },
   "mergePolicy": "fully_autonomous_merge",
+  "mergePolicyAck": "fully_autonomous_merge",
   "orphanFirstPolicy": "none",
   "reviewPolicy": "copilot-advisory",
   "threadResolutionPolicy": "fast-agent-resolve",
