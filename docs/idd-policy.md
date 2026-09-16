@@ -225,7 +225,8 @@ by the separate `prebuild:yaml` script (no credentials needed) and was
 also absent in a fresh worktree. `pre-push-validate` and
 `post-fix-validate` now also run
 `pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml` before
-`pnpm run lint`/`pnpm run test` (#270), the same credential-free way
+`pnpm run lint` (`pnpm run lint:fix` in `post-fix-validate`) and
+`pnpm run test` (#270), the same credential-free way
 `packages/lib`'s build gap was fixed above, so `constants.json` exists by
 the time `Head.test.tsx` runs in a fresh worktree and that test file no
 longer fails there. `prebuild:fetcher` and the aggregate
