@@ -192,12 +192,12 @@ change.
 
 <!-- dprint-ignore-start -->
 
-| Name                  | Commands                                                                                                    |
-| --------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **install-deps**      | `pnpm install --prefer-frozen-lockfile`                                                                     |
-| **fix-validate**      | `pnpm run lint:fix && pnpm run lint`                                                                        |
-| **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test`                      |
-| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test` |
+| Name                  | Commands                                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **install-deps**      | `pnpm install --prefer-frozen-lockfile`                                                                                                                                   |
+| **fix-validate**      | `pnpm run lint:fix && pnpm run lint`                                                                                                                                      |
+| **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml && pnpm run lint && pnpm run test`                      |
+| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml && pnpm run lint:fix && pnpm run lint && pnpm run test` |
 
 <!-- dprint-ignore-end -->
 
@@ -219,15 +219,21 @@ the resulting `src/data.json` with no fallback, so it stays a known,
 separate, credential-bound gap outside `pre-push-validate`'s scope — see
 the v0.6.0 re-import verification note above and #208.
 
-A sibling, non-credential-bound gap exists alongside it: `Head.test.tsx`
+A sibling, non-credential-bound gap existed alongside it: `Head.test.tsx`
 statically imports `packages/web/src/constants.json`, which is generated
-by the separate `prebuild:yaml` script (no credentials needed) and is
-also absent in a fresh worktree. `pre-push-validate` does not run
-`prebuild:yaml` either, so `Head.test.tsx` fails the same way
-`Calendar.test.tsx` does today, even though nothing blocks fixing it the
-same credential-free way `packages/lib`'s build gap was fixed here.
-Whether to fold `prebuild:yaml` into `pre-push-validate` is left open for
-a future decision, same as the `Calendar.test.tsx`/`data.json` follow-up.
+by the separate `prebuild:yaml` script (no credentials needed) and was
+also absent in a fresh worktree. `pre-push-validate` and
+`post-fix-validate` now also run
+`pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml` before
+`pnpm run lint` (`pnpm run lint:fix` in `post-fix-validate`) and
+`pnpm run test` (#270), the same credential-free way
+`packages/lib`'s build gap was fixed above, so `constants.json` exists by
+the time `Head.test.tsx` runs in a fresh worktree and that test file no
+longer fails there. `prebuild:fetcher` and the aggregate
+`pnpm run "/^prebuild:.+/"` (`prebuild`) script remain deliberately
+excluded from both commands — only `prebuild:yaml` was folded in — since
+`prebuild:fetcher` is the credential-bound step the paragraph above
+describes.
 
 ## Role Labels
 

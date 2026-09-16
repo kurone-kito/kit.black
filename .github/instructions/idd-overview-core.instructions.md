@@ -265,8 +265,8 @@ enabled and default approval actors to
 | Name | Commands |
 | --- | --- |
 | **fix-validate** | `pnpm run lint:fix && pnpm run lint` |
-| **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint && pnpm run test` |
-| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm run lint:fix && pnpm run lint && pnpm run test` |
+| **pre-push-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml && pnpm run lint && pnpm run test` |
+| **post-fix-validate** | `pnpm --filter @kurone-kito/kit.black-lib run build && pnpm --filter @kurone-kito/kit.black-web run prebuild:yaml && pnpm run lint:fix && pnpm run lint && pnpm run test` |
 | **install-deps** | `pnpm install --prefer-frozen-lockfile` |
 | **issue-scope** | `roadmap-first` |
 | **orphan-first-policy** | `none` |
