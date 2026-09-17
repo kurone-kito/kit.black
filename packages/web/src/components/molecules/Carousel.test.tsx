@@ -361,4 +361,33 @@ describe('Carousel', () => {
     ));
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('forwards each item srcset and the carousel-level sizes to every rendered image', () => {
+    const itemsWithSrcset: readonly Item[] = [
+      [
+        'https://example.test/0.webp',
+        'Item 0',
+        'https://example.test/0-320.webp 320w',
+      ],
+      [
+        'https://example.test/1.webp',
+        'Item 1',
+        'https://example.test/1-320.webp 320w',
+      ],
+    ];
+    const sizes = '(min-width: 768px) 50vw, 100vw';
+    const { container } = render(() => (
+      <Carousel
+        items={itemsWithSrcset}
+        label="Example carousel"
+        sizes={sizes}
+      />
+    ));
+    const images = [...container.querySelectorAll('img')];
+    expect(images).toHaveLength(itemsWithSrcset.length);
+    images.forEach((img, i) => {
+      expect(img.getAttribute('srcset')).toBe(itemsWithSrcset[i]?.[2]);
+      expect(img.getAttribute('sizes')).toBe(sizes);
+    });
+  });
 });
