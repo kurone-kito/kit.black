@@ -4,27 +4,46 @@
 // The scripts/suitability-triage.mjs copy is generated from the .mts
 // source named above by `pnpm run build`. Edit the .mts source, never
 // the generated .mjs. See docs/typescript-sources.md.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  normalizeMarkerPrefix,
+  parseAuthoringBucketMarker,
+} from './audit-authored-issue.mjs';
+import { computeBranchName } from './branch-name.mjs';
 import { parseCliArgs } from './cli-args.mjs';
+import { collaboratorPermission } from './collaborator-permission.mjs';
 import {
   DEFAULT_BUNDLE_IDS,
   DEFAULT_MANIFEST_PATH,
-  ghJson as ghJsonArray,
   parseCandidateFiles,
   resolveHighContentionFiles,
 } from './discover-shared-file-overlap.mjs';
-import { GH_TEXT_LOOP_TIMEOUT_OPTIONS, ghText } from './gh-exec.mjs';
+import {
+  GH_TEXT_LOOP_TIMEOUT_OPTIONS,
+  ghText,
+  resolveGhApiHostname,
+} from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
 import {
+  findFencedCodeRanges,
+  findIndentedCodeRanges,
   findMarkdownCodeRanges,
   getMarkdownCodeRange,
   maskMarkdownCodeRegionsPreservingPositions,
 } from './markdown-code.mjs';
+import { escapeRegex } from './marker-regex.mjs';
 import { normalizePolicyConfig, POLICY_DEFAULTS } from './policy-helpers.mjs';
 import { resolveTrustedMarkerActors } from './protocol-helpers.mjs';
 import {
+  hasResolvedDecision as computeHasResolvedDecision,
+  FRAMING_VERB_PATTERN,
+  findHtmlCommentRanges,
+  getParagraphSpans,
+} from './resolved-decision.mjs';
+import {
   buildClosedByMergedPrArgs,
+  buildMergedPrByBranchArgs,
   buildMergedPrListArgs,
   buildPrDetailArgs,
   evaluateHighConfidenceDuplicate,
@@ -33,6 +52,13 @@ import {
   prReferencesIssue,
   resolveCandidateFileSet,
 } from './supersession-detection.mjs';
+import {
+  buildTrustedLoginPredicate,
+  candidateFilesExistOnDisk,
+  evaluateStructuralEvidence,
+  hasAllStructuralSignals,
+  hasVerificationCommandSignal,
+} from './triage-structural-evidence.mjs';
 
 /**
  * Wall-clock budget for the #1484 merged-PR file-overlap scan (CodeRabbit
@@ -48,6 +74,9 @@ import {
  * as a live binding.)
  */
 const MERGED_PR_SCAN_DEADLINE_MS = 2 * 60 * 1000;
+/** Mirrors `provider-adapter-github.mts`'s
+ * `USER_CONTENT_EDITS_MAX_PAGES` -- see that constant's doc comment. */
+const USER_CONTENT_EDITORS_MAX_PAGES = 10;
 // Flag-spec keys stay the dashed literal on purpose (never bare keys like
 // `issue:`): tests/flag-name-matrix.test.mts scans this file's *compiled*
 // .mjs source text for quoted flag literals such as the --issue spec key
@@ -56,6 +85,13 @@ const MERGED_PR_SCAN_DEADLINE_MS = 2 * 60 * 1000;
 // marks, so it cannot itself satisfy the scan if the real key is ever
 // renamed -- see #1446's PR description for why that matters.)
 //
+// #2737: the default marker prefix Check 6 (Autonomy) uses to detect an
+// `authoring-bucket: blocked-by-human` marker when the caller does not
+// configure `markerPrefix`. Same TDZ hazard and same fallback value as
+// every other file's own local `DEFAULT_MARKER_PREFIX` constant (see
+// discover-readiness-check.mts, audit-authored-issue.mts, etc.) -- not
+// shared/exported centrally by convention in this codebase.
+const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // Declared here, above the import.meta.main trigger below, rather than
 // alongside parseArgs further down: the trigger calls runCli() ->
 // parseArgs() synchronously at module-evaluation time, and a `const`
@@ -63,7 +99,10 @@ const MERGED_PR_SCAN_DEADLINE_MS = 2 * 60 * 1000;
 // trigger fires (see ci-wait-policy.mts's identical note).
 const SUITABILITY_TRIAGE_FLAG_SPEC = {
   '--issue': { type: 'string' },
-  '--token': { type: 'string', default: '' },
+  '--body-file': { type: 'string' },
+  '--stdin': { type: 'boolean', default: false },
+  '--gh-token': { type: 'string' },
+  '--token': { type: 'string' },
   '--owner': { type: 'string', default: '' },
   '--repo': { type: 'string', default: '' },
   '--policy': { type: 'string', default: '' },
@@ -141,11 +180,86 @@ const EXTERNAL_SYSTEM_ACCESS_PATTERN =
 const DUPLICATE_DECLARATION_PATTERN =
   /\b(duplicate of|superseded by)\s*(?:#\d+|https?:\/\/\S+?\/(?:issues|pull)\/\d+)\b/gi;
 const DUPLICATE_NEGATION_PATTERN = /\b(not|no|avoid)\b[\s\S]{0,30}$/i;
+// A bare `\b` treats a hyphen as a non-word character, so it also matches the
+// tail of this repository's own hyphenated outcome/label vocabulary (e.g.
+// `decision` inside `needs-decision`, `human` inside `blocked-by-human`).
+// `(?<![\w-])`/`(?![\w-])` reject a match immediately adjacent to a hyphen
+// (part of a larger hyphenated token) while still matching a freestanding
+// use of the same word (#2205).
 const SUBJECTIVE_SUBJECT_PATTERN =
-  /\b(maintainer|stakeholder|human|opinion|judgment|judgement|ux|feel)\b/i;
-const SUBJECTIVE_GATE_PATTERN = /\b(approval|sign-?off|decision|preference)\b/i;
+  /(?<![\w-])(maintainer|stakeholder|human|opinion|judgment|judgement|ux|feel)(?![\w-])/i;
+const SUBJECTIVE_GATE_PATTERN =
+  /(?<![\w-])(approval|sign-?off|decision|preference)(?![\w-])/i;
+// #2501: a bare `\b` on each word's dictionary form never matches an
+// ordinary inflected form ("passes", "included", "requires", "failing",
+// "presented", "resulted") -- an Acceptance Criteria bullet written with
+// any of those verb forms produced a false `does not provide objective
+// verification signals` failure despite being concretely, objectively
+// checkable. Each verb word below carries an explicit `-s|-ed/-d|-ing`
+// suffix group instead of the bare form; `objective`/`measurable`/
+// `deterministic` stay bare since they are adjectives, not conjugated as
+// verbs in this context. `include`/`require` end in a silent `e` that
+// standard English orthography drops before `-ing` ("including" /
+// "requiring", not "includeing" / "requireing" -- caught in PR review),
+// so their stem omits the trailing `e` and the `e[sd]?|ing` group is
+// mandatory rather than optional.
 const OUTCOME_SIGNAL_PATTERN =
-  /\b(pass|fail|result|output|contains|include|present|required|objective|measurable|deterministic)\b/i;
+  /\b(pass(?:e[sd]|ing)?|fail(?:s|ed|ing)?|result(?:s|ed|ing)?|output(?:s|ted|ting)?|contain(?:s|ed|ing)?|includ(?:e[sd]?|ing)|present(?:s|ed|ing)?|requir(?:e[sd]?|ing)|objective|measurable|deterministic)\b/i;
+// Whole-body proximity variant of the subjective-approval check, built from
+// the same two pattern sources above (not hand-duplicated) so the
+// hyphen-boundary fix (#2205) applies to both the per-line and whole-body
+// test paths.
+const SUBJECTIVE_PROXIMITY_PATTERN = new RegExp(
+  `${SUBJECTIVE_GATE_PATTERN.source}[\\s\\S]{0,80}${SUBJECTIVE_SUBJECT_PATTERN.source}`,
+  'i',
+);
+// #2512: a match landing in a paragraph that also reports on another
+// document's or process's existing behavior ("...paragraph SAYS a later
+// worker session removes the label once a human decision resolves the
+// hold" -- #2472's exact shape) uses the subject/gate vocabulary as the
+// OBJECT of that report, not as a claim that THIS issue's own completion
+// needs anyone's say-so. GitHub issue bodies are hard-wrapped, so the
+// reporting verb and the subject/gate words routinely land on different
+// physical lines of the same sentence -- a paragraph (blank-line
+// delimited), not a raw split(\n) line, is the unit that must see both
+// (the same "line wrap is not a boundary, blank line is" shape as
+// `sliceUnsafeDirectiveWindow`'s Check 3 window). Exempting the whole
+// paragraph, not a tighter window around the verb, is a soft trade-off
+// matching this check's existing resolved-decision heuristic below: a
+// false negative (an unrelated reporting verb elsewhere in a long
+// paragraph) is accepted in exchange for not re-deriving sentence
+// boundaries.
+// FRAMING_VERB_PATTERN and getParagraphSpans now live in
+// resolved-decision.mts (imported above), shared with that module's own
+// resolved-decision detection -- this file's isFramedAsDescriptive below
+// still uses both, just via the import instead of a local definition.
+// #2661 C1 review: shared between `hasSubjectiveApproval` (#2512's original
+// use) and `hasResolvedDecision`'s inline-form scan. A match landing in a
+// paragraph that reports on another decision/approval as an example --
+// "issue #2641 states \"Maintainer decision (...)\" as an example of the
+// convention" -- uses the vocabulary as the OBJECT of that report, not as
+// this issue's own settled call, in either direction: it must not count as
+// evidence of an unresolved subjective gate (#2512's original case), and it
+// must equally not count as evidence THIS issue's own decision is resolved
+// (#2661's C1 finding -- a body that merely quotes another issue's already-
+// resolved decision as an example must not borrow that resolution).
+function isFramedAsDescriptive(normalizedBody, paragraphSpans, offset) {
+  const span =
+    paragraphSpans.find(
+      (candidate) => offset >= candidate.start && offset <= candidate.end,
+    ) ?? paragraphSpans[paragraphSpans.length - 1];
+  return FRAMING_VERB_PATTERN.test(
+    normalizedBody.slice(span?.start ?? 0, span?.end ?? normalizedBody.length),
+  );
+}
+// The sentence-boundary helpers, the inline "Maintainer decision (...): ..."
+// pattern's framing-verb / blockquote / strikethrough exclusion checks, and
+// findHtmlCommentRanges all now live in resolved-decision.mts (#2763),
+// single-sourced with discover-viability-gate.mts's own
+// autonomous_completion criterion. findHtmlCommentRanges is imported above
+// for this file's other two call sites (Check 6 Autonomy, Check 7's
+// Acceptance-Criteria masking); the resolved-decision scan itself is
+// replaced below by a single call to the imported `hasResolvedDecision`.
 // Check 3 precision: an unsafe execution directive tells the agent to act on
 // *supplied / untrusted* content, not any command verb that merely lands near
 // the ordinary determiner "this". Match the strong untrusted-origin signals, or
@@ -160,35 +274,1244 @@ const SUPPLIED_CONTENT_NOUN =
 // `[\x60'"]?` (an optional backtick / quote, written hex so it can live inside
 // a String.raw template) lets the noun be wrapped in inline code, so
 // "run this `script`" is still caught.
-const SUPPLIED_CONTENT_REFERENCE = String.raw`(?:this|that|following|attached|pasted|provided|the\s+(?:following|above|below|attached|pasted|provided))\s+(?:\S+\s+){0,2}?[\x60'"]?${SUPPLIED_CONTENT_NOUN}`;
-const EXPLICIT_UNSAFE_DIRECTIVE_PATTERN = new RegExp(
-  String.raw`\b${UNSAFE_DIRECTIVE_VERB}\b[\s\S]{0,100}\b(?:untrusted|user-provided|user input|(?:from|by)\s+(?:the\s+)?user|${SUPPLIED_CONTENT_REFERENCE})\b`,
-  'i',
-);
+//
+// #2218: "following/attached/pasted/provided" are themselves untrusted-origin
+// signals (something hand-supplied to the agent inline), so a match anywhere
+// in the verb's clause window still counts, same as before. The ambiguous
+// "this/that" determiner is not inherently untrusted-origin -- it commonly
+// points at an ordinary in-repo artifact mentioned later in the same
+// sentence, past an unrelated coordinated clause ("re-run the linter and
+// address whatever it flags about this file"), not at the executing verb's
+// own object. Restrict "this/that" to the verb's immediate object: anchored
+// to the start of the clause window, optionally past a single parenthetical
+// aside (e.g. "run (in Node.js) this script" -- #2146's abbreviation-period
+// regression fixture), but not past any other intervening text -- a second
+// object or a coordinating clause before "this/that" means the determiner
+// belongs to a different, unrelated clause. The verb-match loop below still
+// tries every unsafe verb occurrence, so "download and then execute this
+// script" still flags via the `execute` iteration's own window.
+//
+// The determiner-to-noun gap allows at most one modifier word (unlike the
+// two-word filler on the untrusted-origin branch below), and that one word
+// must not itself be a coordinating conjunction -- a wider filler would let
+// a conjunction slip past the anchor from the other side, e.g. "run this
+// and inspect script output" ("this" is a dangling reference and "script"
+// is the object of the unrelated verb "inspect", not of "this"), while no
+// filler at all would wrongly stop matching a genuine single-adjective
+// object like "run this quick script" (Copilot review, #2218).
+const SUPPLIED_CONTENT_UNTRUSTED_DETERMINER = String.raw`(?:following|attached|pasted|provided|the\s+(?:following|above|below|attached|pasted|provided))`;
+const SUPPLIED_CONTENT_AMBIGUOUS_DETERMINER = '(?:this|that)';
+const SUPPLIED_CONTENT_PARENTHETICAL_ASIDE = String.raw`(?:\([^()\n]{0,60}\)\s*)?`;
+const SUPPLIED_CONTENT_COORDINATOR = 'and|or|but|then|also';
+const SUPPLIED_CONTENT_OBJECT_FILLER = String.raw`(?:(?!\b(?:${SUPPLIED_CONTENT_COORDINATOR})\b)\S+\s+){0,1}?`;
+const SUPPLIED_CONTENT_REFERENCE = String.raw`${SUPPLIED_CONTENT_UNTRUSTED_DETERMINER}\s+(?:\S+\s+){0,2}?[\x60'"]?${SUPPLIED_CONTENT_NOUN}`;
+const SUPPLIED_CONTENT_OBJECT_REFERENCE = String.raw`^\s*${SUPPLIED_CONTENT_PARENTHETICAL_ASIDE}${SUPPLIED_CONTENT_AMBIGUOUS_DETERMINER}\s+${SUPPLIED_CONTENT_OBJECT_FILLER}[\x60'"]?${SUPPLIED_CONTENT_NOUN}`;
+const UNSAFE_DIRECTIVE_TARGET_SOURCE = String.raw`(?:\b(?:untrusted|user-provided|user input|(?:from|by)\s+(?:the\s+)?user|${SUPPLIED_CONTENT_REFERENCE})\b|${SUPPLIED_CONTENT_OBJECT_REFERENCE}\b)`;
+const UNSAFE_DIRECTIVE_WINDOW_CHARS = 100;
 const NEGATION_PATTERN =
   /\b(not|no|don'?t|doesn'?t|can'?t|won'?t|never|avoid|skip|omit|ignore|exempt)\b/i;
-const POLICY_OVERRIDE_PATTERN =
-  /\b(ignore|bypass|override|disable|disable|skip|turn off|suppress|disable)\b[\s\S]{0,60}\b(repo|repository|policy|workflow|idd|process|check|gate|requirement)\b/i;
-const ACCEPTANCE_CRITERIA_PATTERN = /^#+\s*Acceptance\s+Criteria\s*$/im;
-// A heading line such as "## Decision (resolved 2026-06-27)" records that a
-// human has already ruled on the issue's open question (see Check 7). The
-// negative lookahead rejects only a still-open *phrase* that directly negates
-// "resolved" ("not [yet] [been] resolved", "to be resolved", "never [been]
-// resolved"), so an unrelated negator elsewhere on the line — e.g. "Decision
-// (not user-facing; resolved 2026-06-27)" — still counts as resolved. A
-// lookahead (not a variable-length lookbehind) keeps the assertion portable
-// across JavaScript regex engines.
-const RESOLVED_DECISION_PATTERN =
-  /^#{1,6}\s+Decision\b(?![^\n]*\b(?:not(?:\s+yet)?(?:\s+been)?\s+resolved|(?:to\s+be|yet\s+to\s+be|remains?\s+to\s+be)\s+resolved|never(?:\s+been)?\s+resolved)\b)[^\n]*\bresolved\b/im;
+// The repeated `disable` entries are preserved verbatim from the original
+// inline regex literal (harmless redundancy in an alternation) to keep this
+// pattern byte-identical rather than pulled in as an incidental fix here.
+// #2399: this alternation deliberately stays on a bare, unguarded `\b`
+// (unlike `POLICY_OVERRIDE_NOUN_SOURCE` below) -- three review rounds on
+// #2407 each replaced a fixed-distance regex lookbehind here with a wider
+// one, and each replacement still let some hyphen- or symbol-prefixed CLI
+// flag phrasing (`--skip`, `--skip-checks`, `--force-skip`,
+// `/force-skip`) evade detection by looking enough like an ordinary
+// hyphenated compound word (`evidence-skip`) at a fixed lookbehind
+// distance. Distinguishing the two needs to trace a whole token back to
+// its own origin, which no fixed-width lookbehind can do; see
+// `isOrdinaryHyphenatedCompoundToken` below, called from
+// `findPolicyOverrideMatch`, for that classification instead.
+const POLICY_OVERRIDE_VERB_SOURCE = `(?:ignore|bypass|override|disable|disable|skip|turn off|suppress|disable)`;
+// #2218: a bare `\b` treats a hyphen as a non-word character, so every one
+// of these nouns also matched inside an ordinary hyphenated file-path
+// mention (e.g. this project's own marker prefix in `idd-workflow-notes.md`
+// -- both `idd` and `workflow` matched there, each independently), with
+// nothing nearby actually attempting to change this checker's own
+// behavior. The trailing `(?![\w-])` guard below excludes a noun
+// immediately followed by a hyphen (e.g. `idd` in `idd-workflow-notes.md`)
+// -- unlike the leading side (#2408 below), this direction has no
+// classifier-based counterpart: the leading-side classifier can trace a
+// hyphen run back to its own origin because a flag's OWN name always
+// starts there, but a hyphen AFTER the noun could just as easily continue
+// a real flag name the noun is only the first component of (`--policy-file`,
+// `--gate-config`) as it could an ordinary compound (`idd-workflow`) --
+// nothing at the noun's own trailing edge distinguishes the two shapes.
+// A listed noun referenced as a non-final flag component is therefore a
+// deliberate, documented limit of this guard, the same class of limit as
+// the verb side's bare, un-code-wrapped "force-skip" (see
+// isOrdinaryHyphenatedCompoundToken's own comment below): nothing in shape
+// alone separates `--policy-file` from `idd-workflow`, and any guard broad
+// enough to catch the former would reintroduce the #2218 false positive on
+// the latter.
+//
+// #2408: an earlier revision also wrapped the LEADING side in the same
+// `(?<![\w-])` shape (mirroring `SUBJECTIVE_SUBJECT_PATTERN`, #2205),
+// which excluded every hyphen-adjacent noun outright -- including a
+// genuine directive phrased as a hyphen-prefixed CLI flag reference
+// (`--policy`), the same class of gap `#2407` already fixed on the verb
+// side. A bare leading lookbehind cannot distinguish that from an
+// ordinary compound (`idd-workflow`); only tracing the whole hyphen run
+// back to its own origin can, which is exactly what
+// `isOrdinaryHyphenatedCompoundToken` (shared with the verb side, renamed
+// from `isOrdinaryHyphenatedCompoundVerb`) does. The leading guard is
+// removed here, and that classifier is called from
+// `findPolicyOverrideMatch` at the noun's own match position instead, so
+// a freestanding use ("bypass idd", "disable IDD gate", "bypass workflow
+// checks") and a flag-style reference ("--policy", "/policy") both still
+// match, while an ordinary hyphenated compound noun stays excluded.
+const POLICY_OVERRIDE_NOUN_SOURCE = String.raw`(?:repo|repository|policy|workflow|idd|process|check|gate|requirement)(?![\w-])`;
+// #2408: shared with findGenuineNounMatch below, which re-searches this
+// same verb-to-noun span when the pattern's own greedy noun pick turns out
+// to be an excluded ordinary compound.
+const POLICY_OVERRIDE_WINDOW_CHARS = 60;
+const POLICY_OVERRIDE_PATTERN = new RegExp(
+  `\\b(${POLICY_OVERRIDE_VERB_SOURCE})\\b[\\s\\S]{0,${POLICY_OVERRIDE_WINDOW_CHARS}}\\b(${POLICY_OVERRIDE_NOUN_SOURCE})\\b`,
+  'i',
+);
+// Reused by findNegationWithinTwoWordsAfter to stop the post-verb scan once
+// the phrase's own noun is reached -- a negation word past the noun negates
+// the *next* clause, not this trigger.
+const POLICY_OVERRIDE_NOUN_PATTERN = new RegExp(
+  `\\b(${POLICY_OVERRIDE_NOUN_SOURCE})\\b`,
+  'i',
+);
+// #2734: used only by isOrdinaryHyphenatedCompoundToken's head-compound
+// branch to test a compound's own TAIL WORD in isolation (already sliced
+// out of the raw source, never matched against `\b...\b` boundaries in
+// running text), so -- unlike `POLICY_OVERRIDE_NOUN_SOURCE` above --
+// deliberately includes simple plural forms ("checks", "gates"): a sliced
+// tail word has no following context to naturally supply one via a
+// separate word, the way "the repository gate**s**" would already match
+// the singular noun through its own `\b` boundary in ordinary prose.
+const POLICY_OVERRIDE_NOUN_TAIL_PATTERN =
+  /^(?:repositories|repository|repos?|policies|policy|workflows?|idd|process(?:es)?|checks?|gates?|requirements?)$/i;
+// #2468: the pattern's `[\s\S]{0,60}` window has no concept of a Markdown
+// heading boundary, so a verb ending one line -- most commonly this
+// repository's issue title, given the near-universal repeated-title-as-H1
+// body convention -- can pair with a noun that is only the leading word of
+// an unrelated heading starting immediately after. The heading is a
+// structural label, not a continuation of the verb's own sentence.
+// Excluding a heading-adjacent noun this way, rather than special-casing
+// only the title/body boundary, also covers a later `##` subheading whose
+// own leading noun coincidentally follows a verb from the end of the prior
+// paragraph. A genuine directive that does not cross a heading line is
+// unaffected -- including one deliberately split across the title/body
+// boundary with no heading in between (see the dedicated regression test
+// pinning this as distinct from "never match across the title/body split
+// at all"). CommonMark/GFM (what GitHub renders issue bodies with) also
+// allows a 1-3 space indent before the `#` run and still treats the line
+// as an ATX heading (#2468 critique finding 2), so the leading-space class
+// is optional-bounded rather than requiring the `#` at column 0.
+const HEADING_LINE_BOUNDARY_PATTERN = /\n {0,3}#{1,6}[ \t]/;
+/**
+ * True when `nounStart` (start of the matched noun) falls on the same
+ * physical line as ANY Markdown ATX heading marker (`\n {0,3}#{1,6}[\t ]`)
+ * that starts somewhere between `verbEnd` (end of the matched verb) and
+ * `nounStart` -- i.e. the noun is itself part of an unrelated heading's own
+ * text, not prose several lines further into the body (#2468 critique
+ * finding 1: a heading merely *appearing* in the gap, with the noun landing
+ * on a later, ordinary prose line, must not suppress a genuine directive).
+ * Checks every heading found in the gap, not only the first (#2468 critique
+ * round 2: a first heading whose own line does not reach the noun must not
+ * short-circuit a second heading further along whose line does). `scanSource`
+ * must always be `maskedText` -- both `findGenuineNounMatch` call sites in
+ * `findPolicyOverrideMatch` pass it here even in the raw-fallback loop
+ * (which otherwise scans raw `text`), so a heading marker inside a masked
+ * code region -- already replaced with spaces -- cannot itself manufacture
+ * a boundary (#2468 critique finding 1's code-comment-as-heading bypass).
+ */
+function matchCrossesHeadingBoundary(scanSource, verbEnd, nounStart) {
+  if (nounStart <= verbEnd) {
+    return false;
+  }
+  const gap = scanSource.slice(verbEnd, nounStart);
+  const headingPattern = new RegExp(HEADING_LINE_BOUNDARY_PATTERN.source, 'g');
+  let headingMatch;
+  while (true) {
+    headingMatch = headingPattern.exec(gap);
+    if (headingMatch === null) {
+      return false;
+    }
+    const headingLineStart = verbEnd + headingMatch.index + 1;
+    const nextNewline = scanSource.indexOf('\n', headingLineStart);
+    const headingLineEnd = nextNewline === -1 ? scanSource.length : nextNewline;
+    if (nounStart <= headingLineEnd) {
+      return true;
+    }
+    if (headingPattern.lastIndex === headingMatch.index) {
+      headingPattern.lastIndex += 1;
+    }
+  }
+}
+// #2219: broadens checkAutonomy's coordination-language matcher beyond its two
+// original fixed templates (requires .../stakeholder ... sign-off) to catch
+// equally natural phrasings for the same unresolved human-coordination
+// dependency -- reported by an adopter as passing checkAutonomy under
+// different wording. Deliberately excludes a bare "unresolved" alternative:
+// this repository's own instruction files use that word constantly for
+// unrelated concepts (unresolved review threads, unresolved roadmap
+// descendants), so only the multi-word "unresolved decision/question/choice"
+// phrasing is included.
+const UNRESOLVED_CHOICE_SOURCE =
+  '(?:TBD|to be determined|still undecided|undecided|not (?:yet )?decided|unresolved (?:decision|question|choice)|pending (?:a |the )?(?:decision|approval)|open question(?:s)? for (?:the )?(?:maintainer|team|stakeholders?)|awaiting (?:a |the )?(?:decision|approval|input)|maintainer (?:to |must |needs to )?(?:decide|choose))';
+const UNRESOLVED_CHOICE_PATTERN = new RegExp(
+  `\\b${UNRESOLVED_CHOICE_SOURCE}\\b`,
+  'gi',
+);
+// #2219: an either/or acceptance-criterion shape naming two mutually
+// exclusive implementation paths. Only flagged together with an
+// un-negated UNRESOLVED_CHOICE_PATTERN match nearby (see checkAutonomy) --
+// the either/or structure alone also describes an ordinary AC offering two
+// already-resolved, equivalent options, which must keep passing.
+const EITHER_OR_PROXIMITY_WINDOW_CHARS = 120;
+const EITHER_OR_PATTERN = new RegExp(
+  `\\beither\\b[\\s\\S]{0,${EITHER_OR_PROXIMITY_WINDOW_CHARS}}?\\bor\\b`,
+  'gi',
+);
+// #2709: locates every "either"/"or" word-boundary occurrence within one AC
+// list item so checkVerifiability can try every either-to-or split, not
+// just one (Codex review, PR #2725 rounds 4-5). Deliberately independent of
+// the shared EITHER_OR_PATTERN/EITHER_OR_PROXIMITY_WINDOW_CHARS above (whose
+// cap exists so checkAutonomy's own whole-body proximity matching doesn't
+// pair unrelated text) -- checkVerifiability already scans one list item (a
+// single bounded unit) at a time, so there is no cross-bullet contamination
+// risk left to cap against, and a substantive left branch can legitimately
+// run past 120 chars before its own "or" (e.g. a compatibility-requirements
+// bullet). A single non-greedy either/or match also picks the FIRST "or",
+// which can be the wrong one when the substantive branch's own text
+// contains an unrelated "or" before the true separator ("Either document
+// the approach or rationale, or implement retries" pairs with the inner
+// "or" and misses the real escape hatch); a single greedy match instead
+// fails the opposite direction ("Either document why not, or add tests, or
+// add lint" pairs with the LAST "or", pulling the un-negated "tests" into
+// the left/documentation branch and hiding it from the artifact check).
+// Trying every either-to-or split (below) is the only strategy that
+// handles both; bounded by one already-bounded list item, this stays a
+// small, finite search.
+const EITHER_WORD_PATTERN = /\beither\b/gi;
+const OR_WORD_PATTERN = /\bor\b/gi;
+// #2709: the documentation-branch alternative of an either/or
+// acceptance-criteria escape hatch, e.g. "either fix X, or document why
+// not" / "or document the tradeoff" -- a verb naming disclosure/write-up
+// followed (within a bounded window, tolerating short connecting prose) by
+// "why" or one of the vague-disclosure-topic nouns this pattern is meant to
+// catch even without the literal word "why" (Codex review, PR #2725).
+// Deliberately matches the verb stem loosely enough to cover
+// "documenting"/"explaining" gerund forms, since a plain `\bdocument\b`
+// word boundary would miss those. Used by checkVerifiability, not
+// checkAutonomy.
+const ESCAPE_HATCH_DOCUMENT_PATTERN =
+  /\b(?:document|explain|write[- ]up|note|record|describe)\w*\b[\s\S]{0,40}\b(?:why|trade-?offs?|gaps?|limitations?|rationale|reasons?)\b/i;
+// #2709: a concrete, checkable artifact reference -- the same keyword
+// family checkVerifiability's own hasVerificationChannel already treats as
+// an objective verification signal, scoped here to just the escape-hatch
+// branch's own text (not the whole issue body) so a checkable artifact
+// named elsewhere cannot be borrowed to pass a branch that itself names
+// nothing checkable. A match is additionally required to be un-negated (via
+// isNegatedNearby) at the call site: "or document why tests are not
+// needed" merely NAMES tests while declining to provide them, which must
+// not count as the branch specifying a real requirement (Codex review, PR
+// #2725). Deliberately does NOT add its own "artifact" keyword beyond
+// hasVerificationChannel's set (Copilot review, PR #2725 round 2): the two
+// patterns must stay the same keyword family the comment above describes,
+// not merely overlap.
+const CONCRETE_ARTIFACT_PATTERN =
+  /\btests?\b|\bverification\b|\bvalidate\b|\blint\b|\bci\b/gi;
+// #2709: a deliberately TIGHT negation window for the artifact-negation
+// check above (narrower than the general NEGATION_WINDOW_CHARS below,
+// which several checkAutonomy phrase families share). The escape-hatch
+// phrase itself commonly contains "why not" ("document why not…") --
+// reusing the wider window would let that "not" wrongly negate an
+// unrelated concrete artifact named later in the same branch (e.g.
+// "...document why not in a new ADR file and add a lint rule..."). 20
+// chars comfortably covers a genuine short-distance collocation like
+// "tests are not needed" while excluding "why not"'s typically
+// longer-distance false trigger.
+const ARTIFACT_NEGATION_WINDOW_CHARS = 20;
+// Window checkAutonomy's negation checks scan on either side of a match --
+// shared by the coordination-language, unresolved-choice, and either/or
+// marker checks via isNegatedNearby below.
+const NEGATION_WINDOW_CHARS = 60;
+/**
+ * True when a negation word (NEGATION_PATTERN) appears within
+ * `windowChars` immediately before or after `matchText` at `matchIndex`
+ * in `body` -- e.g. "no longer TBD" negates a "TBD" match rather than
+ * confirming it. Used by checkAutonomy's coordination-language,
+ * unresolved-choice, and either/or marker checks (#2219).
+ */
+function isNegatedNearby(body, matchText, matchIndex, windowChars) {
+  const contextBefore = body.slice(
+    Math.max(0, matchIndex - windowChars),
+    matchIndex,
+  );
+  const contextAfter = body.slice(
+    matchIndex + matchText.length,
+    Math.min(body.length, matchIndex + matchText.length + windowChars),
+  );
+  return (
+    NEGATION_PATTERN.test(contextBefore) || NEGATION_PATTERN.test(contextAfter)
+  );
+}
+// A Markdown paragraph break: two newlines with only horizontal
+// whitespace (spaces/tabs) between them -- a blank line still counts
+// as a break even when it carries trailing whitespace (Copilot review,
+// #2508).
+const PARAGRAPH_BREAK_PATTERN = /\n[ \t]*\n/;
+// A decoration typical of a compact label/mapping entry -- a
+// hyphenated or slash-joined slug, an "->" mapping arrow, or a code
+// span -- rather than ordinary prose (#2508). Matched only after
+// collapsing "a -> b" whitespace in looksLikeLabelEntry, so this must
+// find decoration in what is otherwise a single whitespace-free token,
+// not merely somewhere inside a multi-word phrase (Copilot/CodeRabbit
+// review round 3: a lone hyphen used as prose punctuation, e.g.
+// "blocking this work - resolve later", or a plain dictionary word
+// with no decoration at all, e.g. "unfortunately", must not qualify).
+const LABEL_ENTRY_DECORATION_PATTERN = /[-/`]/;
+// An "a -> b" mapping arrow with any surrounding whitespace (including
+// a hand-wrapped newline), collapsed to a bare "->" before the
+// whitespace check below so a wrapped mapping still counts as one
+// compact token.
+const LABEL_ENTRY_ARROW_PATTERN = /\s*->\s*/g;
+/**
+ * True when `segment` (one comma-delimited entry from a parenthetical,
+ * excluding the marker's own entry) reads as a compact label name or
+ * label-to-label mapping -- e.g. "not-yet-ready" or
+ * "undecided -> `needs-decision`" -- rather than an ordinary multi-word
+ * phrase. After collapsing "->" mapping whitespace, the *entire* entry
+ * must contain no remaining whitespace and must carry a hyphen, slash,
+ * or backtick; a plain word with none of those (e.g. "unfortunately")
+ * or a multi-word phrase that merely contains a hyphen somewhere (e.g.
+ * "blocking this work - resolve later") does not qualify. Used by
+ * isEnumeratedParentheticalEntry to require every *other* entry in the
+ * list to look like fixed vocabulary before excluding the marker: a
+ * genuine aside such as "(still undecided, blocking this work)" has an
+ * ordinary-prose other entry ("blocking this work") and must not be
+ * excluded.
+ */
+function looksLikeLabelEntry(segment) {
+  const trimmed = segment.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  const collapsed = trimmed.replace(LABEL_ENTRY_ARROW_PATTERN, '->');
+  if (/\s/.test(collapsed)) {
+    return false;
+  }
+  return LABEL_ENTRY_DECORATION_PATTERN.test(collapsed);
+}
+/**
+ * True when the UNRESOLVED_CHOICE_PATTERN match at `matchIndex` sits
+ * inside a parenthetical enumerating a fixed vocabulary -- e.g.
+ * "(undecided, waits-on-person/credential, order-dependency,
+ * not-yet-ready)" -- evidence the match names one entry in that
+ * vocabulary rather than a claim about this issue's own open next step
+ * (#2508). Every comma-delimited entry other than the marker's own
+ * must look like a compact label name (looksLikeLabelEntry); a
+ * parenthetical with no comma, or one whose other entries read as
+ * ordinary prose (e.g. "(still undecided, blocking this work)"), still
+ * counts as a genuine unresolved marker and is not excluded. A
+ * paragraph break inside the span means the "(" and ")" belong to
+ * unrelated parentheticals in different paragraphs, not one enclosing
+ * span -- rejected -- but a single soft-wrapped newline inside one
+ * hand-wrapped Markdown paragraph does not end the span.
+ */
+function isEnumeratedParentheticalEntry(body, matchIndex, matchLength) {
+  const openIndex = body.lastIndexOf('(', matchIndex);
+  if (openIndex === -1) {
+    return false;
+  }
+  const before = body.slice(openIndex + 1, matchIndex);
+  if (before.includes(')') || PARAGRAPH_BREAK_PATTERN.test(before)) {
+    return false;
+  }
+  const closeIndex = body.indexOf(')', matchIndex + matchLength);
+  if (closeIndex === -1) {
+    return false;
+  }
+  const after = body.slice(matchIndex + matchLength, closeIndex);
+  if (after.includes('(') || PARAGRAPH_BREAK_PATTERN.test(after)) {
+    return false;
+  }
+  if (!before.includes(',') && !after.includes(',')) {
+    return false;
+  }
+  const beforeEntries = before.split(',').slice(0, -1);
+  const afterEntries = after.split(',').slice(1);
+  const otherEntries = [...beforeEntries, ...afterEntries];
+  return otherEntries.length > 0 && otherEntries.every(looksLikeLabelEntry);
+}
+// #2767 round 4 (Codex review, PR #2840): required at least one space/tab
+// after the `#` run (`[ \t]+`, not `\s*`) -- CommonMark requires that
+// whitespace (or end of line) for a real ATX heading, so a malformed line
+// like "##Acceptance Criteria" with no space renders as plain paragraph
+// text, never a heading, yet the original `\s*` still matched it (and,
+// since `\s` also matches a newline under the `/m` flag, even matched
+// across a line break, e.g. "#\nAcceptance Criteria"). This is the same
+// pattern triage-structural-evidence.mts's own
+// ACCEPTANCE_CRITERIA_HEADING_PATTERN copied from, and Codex's finding
+// there applies here too -- `[ \t]+` still matches every real heading;
+// only a line Markdown itself would not render as a heading now misses.
+// #2767 round 7 (E9 whole-class sweep, same PR): the *interior* gap
+// between "Acceptance" and "Criteria" was still `\s+`, which also
+// matches a newline, so "## Acceptance\nCriteria" -- two separate
+// lines, only the first of which Markdown renders as the actual ATX
+// heading text -- still matched as one combined heading. Narrowed to
+// `[ \t]+`, matching the same fix on the sibling pattern.
+// #2767 round 9 (advisor review, same PR, closing a self-documented
+// deferral): two more CommonMark ATX-heading shapes this pattern still
+// missed, both false negatives (denying a genuine heading its demotion
+// benefit, never a false-positive risk): an ATX heading may carry up to
+// three leading spaces (`^ {0,3}`, matching `parseCandidateFiles`'s own
+// heading regex, which already tolerated this), and may end in an
+// optional closing sequence of `#` characters preceded by whitespace
+// (`(?:[ \t]+#+)?`), e.g. "## Acceptance Criteria ##".
+const ACCEPTANCE_CRITERIA_PATTERN =
+  /^ {0,3}#+[ \t]+Acceptance[ \t]+Criteria(?:[ \t]+#+)?[ \t]*$/im;
+// #2711 PR #2735 review (Codex): this repo's own "## Candidate files"
+// convention (#2589) names files to EDIT, never a verification signal --
+// matched here (mirroring ACCEPTANCE_CRITERIA_PATTERN's own shape) so the
+// "Alternative" whole-body fallback below can exclude just this specific,
+// already-recognized non-verification section instead of every sibling
+// section unconditionally.
+const CANDIDATE_FILES_SECTION_PATTERN = /^#+\s*Candidate\s+files\s*$/im;
+// #2589: a bullet under "## Acceptance Criteria" that names something
+// concrete -- an inline-code span (covers a quoted file path, command, or
+// identifier) or a bare dotted filename -- is substantive on its own,
+// independent of OUTCOME_SIGNAL_PATTERN's closed English vocabulary. Check 5
+// (actionability) already accepts the same checklist as actionable; this
+// keeps Check 7 from re-gating it behind a keyword spot-check the
+// checklist's own content already satisfies. Deliberately has no bare
+// slash-path alternative: `\bfoo\/bar\b` alone also matches an ordinary
+// conjunction like "and/or" or "read/write" with no real path underneath --
+// a real file path in this repo's AC bullets is either backticked or ends
+// in a dotted extension, both already covered below.
+//
+// Copilot review (PR #2602) flagged, across multiple passes, that treating
+// ANY inline-code span as substantive lets a backticked placeholder --
+// "- [ ] `TODO`", "- [ ] `N/A`", "- [ ] `TODO later`" -- wrongly pass. A
+// code span now needs a structural signal of being a real
+// path/command/identifier (a slash, dot, underscore, colon, or hyphen)
+// AND must not merely *lead with* a short, closed placeholder token.
+// PLACEHOLDER_LEAD_PATTERN is anchored at the start and requires the
+// placeholder word to be immediately followed by a non-alphanumeric
+// character or the end of the string, so it matches the bare token
+// ("TODO"), a trailing punctuation glue of any kind ("TODO.", "TODO_",
+// "TODO-later", "TODO: fix", "TODO/FIXME") and a trailing word ("N/A
+// yet"), without matching a real identifier that merely starts with the
+// same letters ("NASA", "nonexistent-file.txt"). An earlier revision
+// tried to reconstruct this via a whitespace/colon/hyphen split of the
+// span's lead token, which covered the punctuation marks it split on but
+// missed a placeholder glued directly to a period, underscore, or slash
+// -- an E2 critique subagent caught "TODO.", "TODO_", and the
+// previously-documented "TODO/FIXME" gap being broader than described.
+// Testing the anchored pattern against the raw content directly, rather
+// than a hand-split lead token, closes the whole class at once.
+//
+// Accepted limitation (E2 critique subagent, #2589 round 6): a real
+// identifier that starts with one of these reserved words, has no dotted
+// extension, and is glued directly to structural punctuation -- e.g.
+// "`WIP-tracker/config`" -- is misclassified as a placeholder and the bullet
+// fails, even though it names a concrete path. Widening the pattern to admit
+// this would re-admit "TODO-later" / "TODO/FIXME" (rounds 3-4's fixed gap):
+// both shapes are "placeholder word + one structural delimiter + word",
+// indistinguishable without a real identifier dictionary. A false negative
+// here costs less than reopening a false positive already fixed twice, and
+// the realistic case (a dotted extension) is already rescued by
+// BARE_DOTTED_FILENAME_PATTERN below.
+const PLACEHOLDER_LEAD_PATTERN =
+  /^(?:TODO|TBD|N\/A|NA|XXX|FIXME|WIP|PENDING|PLACEHOLDER|NONE|ASAP)(?:[^a-zA-Z0-9]|$)/i;
+const CODE_SPAN_STRUCTURE_PATTERN = /[/._:-]/;
+// CodeRabbit review (PR #2602): a code span needs actual alphanumeric
+// content, not just a structural delimiter -- "- [ ] `-`" or "- [ ] `.`"
+// otherwise names nothing while still satisfying
+// CODE_SPAN_STRUCTURE_PATTERN.
+const CODE_SPAN_ALNUM_PATTERN = /[a-zA-Z0-9]/;
+const BARE_DOTTED_FILENAME_PATTERN = /\b[\w-]{2,}\.[a-zA-Z]{1,5}\b/;
+// #2711: BARE_DOTTED_FILENAME_PATTERN's own dictionary-word-shaped match
+// also fires on a placeholder domain mentioned in ordinary prose -- an
+// Acceptance Criteria bullet that merely SAYS "update the contact at
+// example.com" or "notify owner@example.com" names no real file. Two
+// independent exclusions, checked per match rather than once over the
+// whole text (so one genuine bare filename elsewhere in the same section
+// still counts even when a placeholder domain also appears):
+// EXAMPLE_PLACEHOLDER_DOMAIN_PATTERN excludes the RFC 2606 reserved
+// example domains (the convention's own go-to placeholder), and a match
+// immediately preceded by "@" is an email address's domain part -- for
+// ANY domain, not just the reserved ones -- never a bare filename.
+const EXAMPLE_PLACEHOLDER_DOMAIN_PATTERN = /^example\.(?:com|org|net|edu)$/i;
+// CodeRabbit review (PR #2602): an ATX heading may carry up to three
+// leading spaces per CommonMark, so the AC-section boundary below must
+// tolerate that indentation or an indented sibling heading (e.g. this
+// repo's own "   ## Candidate files", however it happens to be indented)
+// would not stop the section.
+// #2711: also matches the boundary immediately before a Setext-style
+// sibling heading's own content line (a text line directly followed, with
+// no blank line between, by a lone run of "=" or "-" characters) -- ATX
+// alone reproduced this same section-boundary leak for that heading
+// style. The lookahead anchors the match at the same "\n before the
+// heading" position as the ATX alternative, so `.slice(0, index)` still
+// excludes the sibling heading's own text either way. Accepted limitation
+// (soft heuristic, matching this file's existing style): a "-" underline
+// immediately following a list-item line is treated as a Setext boundary
+// even where CommonMark itself would keep it inside the list -- full
+// container-aware disambiguation is out of scope for this fix.
+const NEXT_HEADING_PATTERN =
+  /\n(?: {0,3}#{1,6}\s|(?=[ \t]*\S[^\n]*\n {0,3}(?:=+|-+)[ \t]*(?:\n|$)))/;
+// CodeRabbit review (PR #2602): scanning the whole AC section's raw text
+// -- rather than just its list-item lines -- let a placeholder bullet
+// ("- [ ] TODO") followed by unrelated, non-list prose containing a
+// substantive-looking code span or outcome-signal keyword wrongly pass.
+// Only lines that are themselves list-item markers (a wrapped/lazy
+// continuation line is intentionally excluded too, since it cannot be
+// told apart from unrelated trailing prose without full Markdown
+// paragraph parsing) are considered for either check.
+// #2711: also recognizes the parenthesized ordered-list form ("1)"
+// alongside "1."), which CommonMark treats as an equally valid ordered
+// list marker.
+const LIST_ITEM_LINE_PATTERN = /^\s*(?:[-*]|\d+[.)])\s+/;
+function looksLikePlaceholder(content) {
+  return PLACEHOLDER_LEAD_PATTERN.test(content);
+}
+function extractListItemLines(section) {
+  return section
+    .split('\n')
+    .filter((line) => LIST_ITEM_LINE_PATTERN.test(line))
+    .join('\n');
+}
+function hasSubstantiveBullet(text) {
+  // `text` is `extractListItemLines()`'s output: one list-item line per
+  // line, already joined by '\n' from lines that may not be adjacent in the
+  // original section. `[^`]` matching a newline let an unmatched backtick on
+  // one bullet pair across that artificial join with an unmatched backtick
+  // on a later bullet, manufacturing a fake code span from two unrelated
+  // placeholder bullets (e.g. "- [ ] TODO `" + "- [ ] TBD `") -- excluding
+  // `\n` from the span keeps a match within a single line, matching how a
+  // real inline code span can never cross a list item's own block boundary
+  // here (E2 critique subagent, #2589 round 6).
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const content = (match[1] ?? '').trim();
+    if (
+      content.length > 0 &&
+      CODE_SPAN_STRUCTURE_PATTERN.test(content) &&
+      CODE_SPAN_ALNUM_PATTERN.test(content) &&
+      !looksLikePlaceholder(content)
+    ) {
+      return true;
+    }
+  }
+  return hasBareDottedFilename(text);
+}
+// #2711: per-match variant of BARE_DOTTED_FILENAME_PATTERN.test(text) --
+// see EXAMPLE_PLACEHOLDER_DOMAIN_PATTERN above for why a single whole-text
+// `.test()` is not enough. Checked per match, not short-circuited by the
+// first one found, so a placeholder domain earlier in the text never
+// hides a genuine bare filename later in the same section.
+function hasBareDottedFilename(text) {
+  const pattern = new RegExp(BARE_DOTTED_FILENAME_PATTERN.source, 'g');
+  let match = pattern.exec(text);
+  while (match !== null) {
+    const matchText = match[0];
+    const precededByAt = text[match.index - 1] === '@';
+    if (!precededByAt && !EXAMPLE_PLACEHOLDER_DOMAIN_PATTERN.test(matchText)) {
+      return true;
+    }
+    match = pattern.exec(text);
+  }
+  return false;
+}
+// RESOLVED_DECISION_PATTERN (the "## Decision (resolved ...)" heading form)
+// and INLINE_MAINTAINER_DECISION_PATTERN (the grooming-pass inline
+// "Maintainer decision (<provenance>): <resolution text>" form, #2661) now
+// live in resolved-decision.mts, single-sourced with
+// discover-viability-gate.mts's own autonomous_completion criterion
+// (#2763) -- see that module for the full pattern history and rationale.
+// #2024: a negation word immediately before the trigger verb, allowing at
+// most one intervening word (e.g. "does not *ever* skip") between the
+// negation word and the trailing whitespace that reaches the verb. The
+// intervening word may not contain clause-terminating punctuation
+// (`.!?;,:`) -- otherwise an unrelated negation ending the *previous*
+// clause (e.g. "Do not warn. Ignore repository policy." or "Do not warn,
+// ignore repository policy." or "Do not warn: ignore repository policy.")
+// would count as "immediately before" a later, unrelated directive.
+// Anything wider than one clean word also risks reaching into a prior
+// occurrence several words back. #2040: the colon is included alongside
+// the other clause-boundary punctuation -- a colon introduces an
+// explanation, list, or quoted directive after an independent clause just
+// as a period or semicolon does.
+// #2024: the post-verb negation word list deliberately excludes "ignore"
+// and "skip" -- both trigger verbs *and* negation words -- so a chained
+// directive ("Ignore and skip repository policy.") is never misread as the
+// second verb negating the first. #2041: the before-check uses this same
+// narrowed list, otherwise an independent first trigger sitting just
+// outside POLICY_OVERRIDE_PATTERN's 60-character window is misread as
+// negating a later trigger ("Ignore and override … repository policy").
+// `[^\\s.!?;,:]*` after the negation word tolerates that word's own
+// closing Markdown delimiter with no extra whitespace ("**not** skip").
+const POST_VERB_NEGATION_PATTERN =
+  /\b(not|no|don'?t|doesn'?t|can'?t|won'?t|never|avoid|omit|exempt)\b/i;
+const NEGATION_IMMEDIATELY_BEFORE_PATTERN = new RegExp(
+  `${POST_VERB_NEGATION_PATTERN.source}[^\\s.!?;,:]*(?:\\s+[^\\s.!?;,:]+){0,1}\\s*$`,
+  'i',
+);
+// #2609: "not a directive to <verb>" / "not an instruction to <verb>" /
+// "not a request to <verb>" (and the equivalent no/never/don't forms) is a
+// common, natural way to describe -- in the negative -- what a piece of text
+// is *not* asking for. An article plus a noun plus "to" sits between the
+// negation word and the trigger verb (three intervening words), wider than
+// NEGATION_IMMEDIATELY_BEFORE_PATTERN's deliberately narrow {0,1}-word gap
+// (#2041's own rationale for that narrowness -- avoiding a misread of an
+// unrelated, earlier negation sitting outside POLICY_OVERRIDE_PATTERN's
+// 60-character window -- stays valid and unchanged). This is a separate,
+// explicit phrase-level exception, matching this repository's established
+// negation-gap-closing pattern (#2024, #2040, #2041, #2408, #2468, #2588),
+// never a general widening of that pattern's own gap.
+const PHRASE_LEVEL_NEGATION_BEFORE_PATTERN =
+  /\b(?:(?:not|never|don'?t|doesn'?t|can'?t|won'?t)\s+an?|no)\s+(?:directive|instruction|request)\s+to\s*$/i;
+// A clause boundary (sentence-ending punctuation, a comma/semicolon, or a
+// colon) stops the post-verb scan outright -- see
+// findNegationWithinTwoWordsAfter's clause terminator check for why
+// (#2024 round 2, "Disable workflow; no notifications." /
+// "Disable workflow, no notifications."; #2040, "Disable workflow: no
+// notifications.").
+const CLAUSE_TERMINATOR_PATTERN = /[.!?;,:]/;
+// #2041: scan from the trigger to the phrase's own noun or a clause
+// boundary, whichever comes first -- not a fixed two-word cap -- so a
+// negation such as "should absolutely never touch the workflow" still
+// counts. Visibility is the exact matched negation span, so a fully
+// masked "not" glued to a visible suffix (`not`-optional) stays inert.
+// A negation whose next word is a gerund/participle ("not following")
+// modifies that later verb, not this trigger; skipping it preserves the
+// #2024 noun-clause case that a naive scan-to-noun would treat as safe.
+// A negation past the noun or a terminator belongs to the next clause
+// ("Disable workflow no questions asked." / "Disable workflow; no
+// notifications."), same as #2024 / #2040.
+function findNegationWithinTwoWordsAfter(
+  rawSource,
+  maskedSource,
+  afterStart,
+  getCodeRangeAt,
+) {
+  const substring = rawSource.slice(afterStart);
+  const termMatch = CLAUSE_TERMINATOR_PATTERN.exec(substring);
+  const firstTerminator = termMatch ? termMatch.index : Infinity;
+  // #2408: skip a noun match `isOrdinaryHyphenatedCompoundToken` would
+  // itself exclude from POLICY_OVERRIDE_PATTERN (e.g. the hyphen-adjacent
+  // "check" in "per-check") when locating the phrase's own noun boundary --
+  // otherwise a negation that comes after an excluded compound but before
+  // the directive's real, genuine noun is wrongly read as belonging to a
+  // later clause and the directive stays (wrongly) un-negated.
+  const genuineNoun = findGenuineNounMatch(
+    rawSource,
+    afterStart,
+    rawSource,
+    getCodeRangeAt,
+    Infinity,
+    false,
+    null,
+  );
+  const firstNoun = genuineNoun ? genuineNoun.relativeIndex : Infinity;
+  const boundary = Math.min(firstTerminator, firstNoun);
+  const negRegex = new RegExp(POST_VERB_NEGATION_PATTERN.source, 'gi');
+  while (true) {
+    const negationMatch = negRegex.exec(substring);
+    if (negationMatch === null || negationMatch.index > boundary) {
+      break;
+    }
+    const matchText = negationMatch[0] ?? '';
+    const negStart = afterStart + negationMatch.index;
+    const negEnd = negStart + matchText.length;
+    const maskedSpan = maskedSource.slice(negStart, negEnd);
+    if (maskedSpan.trim() === '') {
+      continue;
+    }
+    const rest = substring.slice(negationMatch.index + matchText.length);
+    // Optional Markdown wrappers around the gerund (emphasis or inline
+    // code around "following") so those delimiters do not hide the skip.
+    if (/^\s+[*_`~]*[A-Za-z]+ing\b/.test(rest)) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+// #2024 / #2041: the detector must not fire on a negated instance of its
+// own trigger pattern (e.g. "does not skip the required checks"). A match
+// is negated when a narrowed (non-trigger) negation word appears either
+// immediately before the trigger, or anywhere after it before the phrase's
+// own noun or a clause boundary. NEGATION_PATTERN stays the source for
+// checkRepositoryFit and the coordination-match loop later in this file.
+//
+// Several deliberate choices keep this from misfiring, each closing a gap a
+// review round found empirically (dedicated regression coverage exists for
+// every one of them):
+//
+// 1. Always locate candidate negation words via `maskedSource`
+//    (position-preserving, code-masked) for the before-check, never raw
+//    `rawSource`, even when the caller is inspecting a raw-text fallback
+//    match. A prior or later occurrence sitting inside code (inert) is
+//    masked to spaces there, so it can never be mistaken for real negation
+//    context.
+// 2. Stop the after-verb scan at the first policy noun or clause
+//    terminator, and skip a negation that only modifies a later gerund;
+//    see findNegationWithinTwoWordsAfter above for the full rationale.
+// 3. Cross-check the "before" case's whitespace gap against `rawSource`
+//    too, not just `maskedSource`: a masked-out code region collapses to
+//    pure whitespace in `maskedSource`, so an unrelated negation word
+//    before a masked span (e.g. "This marker is *not* `safe;` ignore
+//    repository policy.") would otherwise look "immediately before" a
+//    later, genuine directive once the code span vanishes. A raw
+//    character in the gap is still allowed when it is literally the
+//    backtick *delimiter* of the same code range the verb itself sits
+//    inside (that range's own opening delimiter, e.g. the backtick in
+//    "does not `skip`") -- content-bearing characters inside that same
+//    range are never transparent (only the delimiter is), or a directive
+//    could be smuggled inside the verb's own span (e.g. "not `safe;
+//    skip the` repository policy" -- the `safe; ` text sits in the same
+//    range as `skip` but is not itself a delimiter, so it must still
+//    break the adjacency). A *separate*, already-closed code range fully
+//    inside the gap (F3's `safe;`) breaks the adjacency the same way.
+function isNegatedPolicyOverrideMatch(
+  rawSource,
+  maskedSource,
+  matchIndex,
+  verb,
+  getCodeRangeAt,
+) {
+  const beforeStart = Math.max(0, matchIndex - 100);
+  const contextBefore = maskedSource.slice(beforeStart, matchIndex);
+  // #2609: try the narrow {0,1}-word-gap pattern first, then the separate
+  // phrase-level "not a directive/instruction/request to" exception -- an
+  // independent check, never a widening of the first pattern's own gap.
+  const beforeMatch =
+    NEGATION_IMMEDIATELY_BEFORE_PATTERN.exec(contextBefore) ??
+    PHRASE_LEVEL_NEGATION_BEFORE_PATTERN.exec(contextBefore);
+  if (beforeMatch) {
+    const trailingWhitespace = /\s*$/.exec(beforeMatch[0])?.[0] ?? '';
+    const gapStart = matchIndex - trailingWhitespace.length;
+    const verbCodeRange = getCodeRangeAt(matchIndex);
+    let gapIsClear = true;
+    for (let cursor = gapStart; cursor < matchIndex; cursor += 1) {
+      const rawChar = rawSource[cursor] ?? '';
+      if (/\s/.test(rawChar)) {
+        continue;
+      }
+      if (
+        rawChar === '`' &&
+        verbCodeRange &&
+        cursor >= verbCodeRange.start &&
+        cursor < verbCodeRange.end
+      ) {
+        continue;
+      }
+      gapIsClear = false;
+      break;
+    }
+    if (gapIsClear) {
+      return true;
+    }
+  }
+  const afterVerbStart = matchIndex + verb.length;
+  return findNegationWithinTwoWordsAfter(
+    rawSource,
+    maskedSource,
+    afterVerbStart,
+    getCodeRangeAt,
+  );
+}
+// #2408: shared by findNegationWithinTwoWordsAfter's boundary computation
+// and findPolicyOverrideMatch's noun re-pick -- both need "a noun match
+// starting at or after `afterStart`, in `searchText`, that
+// isOrdinaryHyphenatedCompoundToken would NOT exclude," skipping any
+// candidate that fails the same code-range + compound-classifier gate
+// `findPolicyOverrideMatch` already applies to a verb match. `maxChars`
+// bounds only the GAP before a candidate noun's own start position
+// (mirroring POLICY_OVERRIDE_PATTERN's `[\s\S]{0,N}`, which limits what
+// comes BEFORE the noun, not the noun's own length -- the search text
+// itself stays unbounded on the right, or a noun whose start falls within
+// the gap but whose own characters extend past it would be truncated
+// mid-word and silently fail to match); pass `Infinity` for an unbounded
+// scan (the negation-boundary use, which must reach the phrase's own noun
+// regardless of distance).
+//
+// `preferFarthest` selects which surviving candidate to return:
+// - `false` (negation boundary): the NEAREST one, matching the original
+//   single, non-looping `nounRegex.exec` call this replaces.
+// - `true` (findPolicyOverrideMatch's noun re-pick): the FARTHEST one,
+//   matching POLICY_OVERRIDE_PATTERN's own greedy `[\s\S]{0,N}` -- greedy
+//   backtracking tries the longest gap first and returns on the first
+//   syntactic match found working backward, so it naturally lands on the
+//   farthest candidate. Re-picking the nearest one instead would silently
+//   shrink the reported evidence span whenever an earlier valid noun sits
+//   before the one the pattern itself would have chosen.
+// #2468: `headingBoundary`, when passed, is `findPolicyOverrideMatch`'s two
+// call sites opting a candidate noun into the same heading-crossing
+// exclusion `matchCrossesHeadingBoundary` applies elsewhere -- checked
+// per-candidate here (not once against the pattern's own raw capture)
+// so a heading-excluded farthest candidate correctly falls back to a
+// nearer genuine one instead of the whole verb occurrence being dropped.
+// `findNegationWithinTwoWordsAfter`'s unrelated negation-boundary use
+// passes no `headingBoundary` (`null`), since a heading crossing has no
+// bearing on where that scan should stop. Always checked against
+// `headingBoundary.maskedText`, never `searchText`/`rawSource` directly
+// -- `searchText` is raw `text` in the raw-fallback call, and a
+// heading-shaped line inside a masked code region must not forge a
+// boundary (see `matchCrossesHeadingBoundary`'s own doc comment).
+// `maskedText` and `text` are position-preserving, so `absoluteIndex`
+// (computed against whichever `searchText` this call scans) locates the
+// same character in either.
+function findGenuineNounMatch(
+  searchText,
+  afterStart,
+  rawSource,
+  getCodeRangeAt,
+  maxChars,
+  preferFarthest,
+  headingBoundary,
+) {
+  const substring = searchText.slice(afterStart);
+  const nounRegex = new RegExp(POLICY_OVERRIDE_NOUN_PATTERN.source, 'gi');
+  let nounMatch;
+  let farthest = null;
+  while (true) {
+    nounMatch = nounRegex.exec(substring);
+    if (nounMatch === null || nounMatch.index > maxChars) {
+      return farthest;
+    }
+    const absoluteIndex = afterStart + nounMatch.index;
+    // #2408: a candidate noun sitting inside a masked code range always
+    // counts as a genuine (non-excluded) match, the same way the verb side
+    // already treats a code-wrapped bare key (#2407 review round 5): being
+    // wrapped in code at all is itself the distinguishing signal a bare
+    // hyphenated compound in prose lacks, so a directive referencing a
+    // listed noun via a code-wrapped identifier (e.g. `` `per-check` ``)
+    // stays detectable even though the same bare, un-code-wrapped text in
+    // prose is a deliberately accepted ordinary-compound exclusion. #2588:
+    // the same code-range short-circuit applies to isNarrativeIddMention,
+    // for the same reason -- see that function's own comment. #2608: same
+    // for isCodeIdentifierProcessMention.
+    if (
+      (getCodeRangeAt(absoluteIndex) ||
+        (!isOrdinaryHyphenatedCompoundToken(
+          rawSource,
+          absoluteIndex,
+          nounMatch[0].length,
+        ) &&
+          !isNarrativeIddMention(rawSource, absoluteIndex) &&
+          !isCodeIdentifierProcessMention(rawSource, absoluteIndex))) &&
+      !(
+        headingBoundary &&
+        matchCrossesHeadingBoundary(
+          headingBoundary.maskedText,
+          headingBoundary.verbEnd,
+          absoluteIndex,
+        )
+      )
+    ) {
+      const candidate = {
+        relativeIndex: nounMatch.index,
+        length: nounMatch[0].length,
+      };
+      if (!preferFarthest) {
+        return candidate;
+      }
+      farthest = candidate;
+    }
+    if (nounRegex.lastIndex === nounMatch.index) {
+      nounRegex.lastIndex += 1;
+    }
+  }
+}
+// #2399/#2407: a true prose boundary immediately before a hyphenated run's
+// own word-character origin -- whitespace, or one of the wrapping
+// delimiters this file already treats as optional token punctuation
+// elsewhere (backtick, single/double quote, open paren; see
+// SUPPLIED_CONTENT_OBJECT_REFERENCE above). Deliberately minimal, and
+// deliberately NOT grown to cover every prose-punctuation character that
+// might directly abut a flag with no whitespace (colon, period, comma, ...,
+// #2407 review round 6, Copilot): isOrdinaryHyphenatedCompoundToken only
+// ever tests this pattern against the single character immediately before
+// a `[\w-]` run's own origin, never against a character INSIDE that run --
+// so adding a character here can only ever narrow (never widen) which runs
+// get excluded, and can never create a bypass for a flag token that
+// happens to contain that character internally (e.g. a dotted config key
+// like `--config.force-skip`, or `--env:force-skip`). See that function's
+// own comment for why the run itself is walked with a fixed `[\w-]`
+// character class rather than this boundary set.
+const COMPOUND_TOKEN_BOUNDARY_PATTERN = /[\s\x60'"(]/;
+// #2399: `#2218` wrapped `POLICY_OVERRIDE_NOUN_SOURCE` in a hyphen-boundary
+// guard so an ordinary hyphenated compound noun (e.g. a file name like
+// `idd-workflow-notes.md`) no longer false-positives Check 3. The verb
+// list needed the equivalent exclusion for a hyphen-adjacent compound like
+// "duplicate-evidence-skip check" (#2213's own title), but a regex
+// lookbehind proved unable to also keep detecting a directive phrased as a
+// CLI flag: `--skip`, `--skip-checks`, `--force-skip`, and (#2407 review
+// round 4, Codex) non-hyphen-prefixed forms like `/force-skip` all put a
+// hyphen directly before the verb too, indistinguishable from a genuine
+// compound at any FIXED lookbehind distance -- only tracing the whole
+// token back to where it truly begins tells them apart. A flag token
+// (however it is itself prefixed) never begins with a word character at
+// that origin; an ordinary compound word always does.
+//
+// Called from findPolicyOverrideMatch alongside isNegatedPolicyOverrideMatch,
+// with the same "treat as inert, resume scanning after it" handling -- a
+// verb classified here as part of an ordinary compound must not stop this
+// checker from finding a later, genuine trigger. Every call site also gates
+// this classifier on the verb not sitting inside a masked code range (#2407
+// review round 5, Codex): a code-wrapped hyphenated key like
+// `` `force-skip` `` carries a real, distinguishing shape signal -- being
+// wrapped in code at all -- that bare prose lacks, and the raw-fallback
+// pass already exists specifically to keep code-wrapped directives
+// detectable (the `--skip` case this file's round-1 fix started with), so
+// excluding a code-wrapped compound here would undercut that pass's own
+// purpose. A BARE, unquoted, un-code-wrapped "force-skip" is deliberately
+// left excluded (classified as an ordinary compound) even when meant as a
+// directive: nothing distinguishes it, in shape alone, from #2213's own
+// "evidence-skip" -- the exact false positive this whole guard exists to
+// fix. Any rule general enough to also detect a bare "force-skip" detects
+// bare "evidence-skip" too, reintroducing #2213 (see the dedicated
+// regression test pinning this as a known, deliberate limit).
+//
+// The run of characters walked back from the verb's own leading hyphen
+// uses a fixed `[\w-]` class -- letters, digits, underscore, and hyphen,
+// exactly the characters that make up an ordinary hyphenated word or a
+// hyphen-flag name -- rather than "any character not in
+// COMPOUND_TOKEN_BOUNDARY_PATTERN" (#2407 review round 6, Copilot: a
+// directive can directly abut a flag with no whitespace, e.g.
+// "Pass:--skip repository policy"; growing the boundary set to also cover
+// `:` closed that case, but any character added to a "boundary" set this
+// way stops the walk *inside* an unrelated flag name too -- a dotted or
+// colon-joined config key like `--config.force-skip` or `--env:force-skip`
+// would then misclassify as excluded, a regression the boundary-list
+// approach cannot avoid without an ever-growing, never-complete
+// enumeration). Walking a fixed `[\w-]` run instead means the only
+// question left is whether the character immediately before that run's
+// own origin is a true prose boundary or not -- `.`, `:`, `=`, and every
+// other symbol that can legally sit *inside* a flag name never stops the
+// run early, so they can never manufacture a false "ordinary compound"
+// classification, while still correctly closing the reported gap (that
+// run now starts at the flag's own leading hyphen, not several characters
+// further back across the punctuation).
+//
+// #2408: renamed from `isOrdinaryHyphenatedCompoundVerb` and reused
+// unchanged for `POLICY_OVERRIDE_NOUN_SOURCE`'s leading side too -- every
+// comment above describes the general "walk a hyphen run back to its own
+// origin" mechanism, not anything specific to the verb word list, so the
+// noun side needed no logic changes here, only a second call site in
+// `findPolicyOverrideMatch` at the noun's own match position.
+function isOrdinaryHyphenatedCompoundToken(rawSource, matchIndex, matchLength) {
+  if (rawSource[matchIndex - 1] !== '-') {
+    // #2734: no leading hyphen at all, so this token is not the tail of a
+    // compound and not a flag reference either -- every flag shape this
+    // file already handles ("--skip", "/force-skip") is hyphen/slash/plus
+    // PREFIXED, never hyphen-SUFFIXED with nothing leading it. The same
+    // "ordinary compound" false-positive shape the leading-side walk below
+    // exists for can still occur with this token as the compound's HEAD
+    // instead of its tail (e.g. "skip-condition", reported on issue #2734
+    // itself, a feature-spec sentence describing a *different* check's own
+    // skip condition). This needs no equivalent trace-to-origin walk: a
+    // trailing hyphen immediately followed by a word character, with
+    // nothing hyphen-like leading this token, is treated the same way a
+    // bare, un-code-wrapped TAIL compound already is below (see the "#2407
+    // review round 5 (Codex, known limit)" comment on the leading-side walk's
+    // own bare case) -- symmetric with `POLICY_OVERRIDE_NOUN_SOURCE`'s own
+    // trailing `(?![\w-])` guard, which the noun side already has baked into
+    // its regex and the verb side never did.
+    //
+    // #2734 review (Copilot, CodeRabbit): a first version of this branch
+    // excluded ANY bare head compound unconditionally, which silently
+    // un-detected "Pass skip-checks so the repository gate is not
+    // evaluated" -- a genuine directive that WAS correctly caught before
+    // this change. That is a real regression, not the same accepted
+    // tradeoff as the tail-position bare-compound case below (which has
+    // never detected that shape, on `main`, at any point): the fix here is
+    // to check whether the compound's own TAIL word is itself one of
+    // `POLICY_OVERRIDE_NOUN_TAIL_PATTERN`'s override nouns before
+    // excluding. "skip-condition" -> "condition" is not a listed noun ->
+    // still excluded (the actual #2734 shape this branch exists to fix).
+    // "skip-checks" -> "checks" IS one (this pattern includes simple
+    // plurals; `POLICY_OVERRIDE_NOUN_SOURCE` deliberately does not, since
+    // it is matched directly against already-tokenized `\b...\b` text, not
+    // sliced out of a raw compound tail) -> NOT excluded, so "skip" stays
+    // live and correctly pairs with "repository" nearby. Checking the
+    // NEARBY window instead of the compound's own tail word (CodeRabbit's
+    // literal suggestion) does not work: the #2734 repro's own trailing
+    // "...suitability-triage.mjs's Check" contains a genuine, non-heading
+    // noun match ("Check", case-insensitively) within the window, so a
+    // window-based guard would reintroduce #2734 on its own reporting
+    // issue. This narrowing is intentionally asymmetric with the
+    // tail-position walk below, which inspects no such thing -- a
+    // directive phrased as "policy-skip" or "gate-skip" is not natural
+    // English and not a shape either reviewer's finding raised. This tail
+    // word check also incidentally closes an "=true"-style assignment
+    // directive ("skip-checks=true", Codex): the tail word "checks" is
+    // still extracted and matched the same way regardless of what follows
+    // it. The tail-position side's own assignment shape
+    // ("force-skip=true") is unaffected -- unchanged since #2407, tracked
+    // as a follow-up in the PR body rather than fixed here.
+    //
+    // This classification only applies when the token's OWN start is a
+    // genuine prose boundary (start of string, or
+    // `COMPOUND_TOKEN_BOUNDARY_PATTERN`) -- mirroring the leading-side
+    // walk's own terminal test below. A non-hyphen flag prefix that still
+    // abuts the token with no boundary (`/skip-checks`, `+skip-checks`)
+    // must stay detectable as a directive, exactly like the existing
+    // `--skip-checks` / `/force-skip` shapes the leading-side walk already
+    // handles; only the leading character actually being `-` routes into
+    // that walk, so a `/`- or `+`-prefixed flag would otherwise slip
+    // through this trailing-hyphen branch unclassified as an "ordinary
+    // compound" false negative.
+    if (
+      matchIndex !== 0 &&
+      !COMPOUND_TOKEN_BOUNDARY_PATTERN.test(rawSource[matchIndex - 1] ?? '')
+    ) {
+      return false;
+    }
+    const afterMatch = rawSource[matchIndex + matchLength];
+    if (
+      afterMatch !== '-' ||
+      !/\w/.test(rawSource[matchIndex + matchLength + 1] ?? '')
+    ) {
+      return false;
+    }
+    const tailWordMatch = /^[A-Za-z]+/.exec(
+      rawSource.slice(matchIndex + matchLength + 1),
+    );
+    return (
+      tailWordMatch === null ||
+      !POLICY_OVERRIDE_NOUN_TAIL_PATTERN.test(tailWordMatch[0])
+    );
+  }
+  let cursor = matchIndex - 1;
+  while (cursor > 0 && /[\w-]/.test(rawSource[cursor - 1] ?? '')) {
+    // A double hyphen with no surrounding space directly preceded by a word character
+    // ("time--skip") is prose punctuation -- a typewriter-style em/en dash
+    // used as a clause separator -- not a compound-word joiner or a
+    // flag-prefix hyphen chain (#2407 review round 7, Codex). A *real*
+    // em/en dash character here was already detected before this change:
+    // it fails the leading-hyphen guard clause above outright, since it
+    // is not the ASCII '-' that clause checks for. This keeps the ASCII
+    // typewriter substitute behaving the same way. Checking
+    // `rawSource[cursor]` (not `rawSource[cursor - 1]`) for the first
+    // hyphen of the pair matters: an ordinary single-hyphen compound like
+    // "evidence-skip" also has a hyphen one step further back, and
+    // conflating the two would wrongly stop the walk on every compound
+    // joiner, not just a genuine double-hyphen separator.
+    if (
+      rawSource[cursor] === '-' &&
+      rawSource[cursor - 1] === '-' &&
+      /\w/.test(rawSource[cursor - 2] ?? '')
+    ) {
+      break;
+    }
+    cursor -= 1;
+  }
+  if (!/\w/.test(rawSource[cursor] ?? '')) {
+    return false;
+  }
+  return (
+    cursor === 0 ||
+    COMPOUND_TOKEN_BOUNDARY_PATTERN.test(rawSource[cursor - 1] ?? '')
+  );
+}
+// #2588: the protocol's own name used attributively inside a noun phrase
+// describing some OTHER entity -- "an IDD agent", "the IDD workflow's own
+// session" -- false-triggered Check 3 even though the sentence is ordinary
+// descriptive prose, not a directive aimed at this checker. Reproduced by
+// idd-skill#2588 itself: "The ack-only override window the same way an IDD
+// agent's can is currently narrower than the trusted marker login set."
+// matched verb "override" against noun "IDD" (the only listed noun in that
+// 60-char window), with nothing nearby actually attempting to change this
+// checker's own behavior.
+//
+// This exclusion targets "idd" only -- the other eight listed nouns
+// (repo/repository/policy/workflow/process/check/gate/requirement) are
+// generic enough that this narrative-attributive shape is not the
+// distinguishing false-positive source #2588 reports, and narrowing them
+// the same way risks a new, unreviewed false-negative surface with no
+// matching repro.
+//
+// Two conditions distinguish this shape from a genuine directive against
+// "idd" itself:
+// 1. Preceded by an article ("a"/"an"/"the") -- a genuine bare directive
+//    like "bypass idd." (#2218's own regression case, still pinned by its
+//    own test) has no article before it: the verb sits directly before the
+//    noun.
+// 2. Immediately followed by another word continuing the same noun phrase
+//    (e.g. "agent's", "workflow's") -- "bypass idd." has nothing but a
+//    clause boundary after it.
+// Both conditions must hold: an article alone ("the idd gate") or a
+// following word alone ("bypass idd entirely") is not enough, since either
+// shape alone still plausibly reads as a directive with a definite object
+// or an adverbial qualifier, not a narrative mention. `override the idd
+// gate` also has both an article before and a word ("gate") after "idd",
+// but stays detected regardless of this exclusion: `gate` is itself a
+// listed noun farther from the verb, so `findGenuineNounMatch`'s
+// farthest-first pick finds it independently of whatever this classifier
+// decides about "idd".
+//
+// A code-wrapped `` `idd` `` is never passed to this classifier -- its call
+// site in `findGenuineNounMatch` already short-circuits on `getCodeRangeAt`
+// first, the same precedent `isOrdinaryHyphenatedCompoundToken` follows:
+// being wrapped in code at all is itself a distinguishing signal bare
+// narrative prose lacks.
+const NARRATIVE_IDD_TOKEN_LENGTH = 3;
+const NARRATIVE_IDD_PRECEDING_ARTICLE_PATTERN = /\b(?:a|an|the)\s+$/i;
+const NARRATIVE_IDD_FOLLOWING_WORD_PATTERN = /^\s+[A-Za-z]/;
+const NARRATIVE_IDD_LOOKBEHIND_CHARS = 10;
+const NARRATIVE_IDD_LOOKAHEAD_CHARS = 20;
+function isNarrativeIddMention(rawSource, matchIndex) {
+  const token = rawSource
+    .slice(matchIndex, matchIndex + NARRATIVE_IDD_TOKEN_LENGTH)
+    .toLowerCase();
+  if (token !== 'idd') {
+    return false;
+  }
+  const before = rawSource.slice(
+    Math.max(0, matchIndex - NARRATIVE_IDD_LOOKBEHIND_CHARS),
+    matchIndex,
+  );
+  if (!NARRATIVE_IDD_PRECEDING_ARTICLE_PATTERN.test(before)) {
+    return false;
+  }
+  const afterStart = matchIndex + NARRATIVE_IDD_TOKEN_LENGTH;
+  const after = rawSource.slice(
+    afterStart,
+    afterStart + NARRATIVE_IDD_LOOKAHEAD_CHARS,
+  );
+  return NARRATIVE_IDD_FOLLOWING_WORD_PATTERN.test(after);
+}
+// #2608: the bare `process` alternative matched a Node.js code identifier's
+// leading segment -- `process.platform`, `process.env`, `process.argv`,
+// `process.exit(` -- as ordinary prose about "the process" (a procedural
+// workflow), even when un-code-wrapped inside a sentence about
+// platform-detection or CLI-argument-handling code. Reproduced by
+// idd-skill#2608 itself: "Skip it on process.platform === 'win32' since NTFS
+// has no POSIX execute bit..." matched verb "Skip" against noun "process"
+// (the only listed noun in that window), with nothing nearby actually
+// attempting to change this checker's own behavior.
+//
+// This exclusion targets `process` only -- the other eight listed nouns
+// have no analogous Node.js-global shape, so this property-access exclusion
+// is not the distinguishing false-positive source #2608 reports for any of
+// them, and narrowing them the same way risks a new, unreviewed
+// false-negative surface with no matching repro.
+//
+// Unlike `isNarrativeIddMention`, this needs no article/following-word
+// heuristic: a genuine narrative directive ("bypass the process", "skip
+// this repository's process") never continues with a literal `.` followed
+// by an identifier-start character -- that exact shape is unambiguously a
+// JS property-access expression, never English prose, regardless of
+// surrounding context. So the true-positive case #2608 itself requires
+// stays detected unconditionally: "skip the review process for this PR"
+// has `process` followed by a space, not `.`, so this classifier never
+// excludes it.
+//
+// A code-wrapped `` `process.platform` `` is never passed to this
+// classifier -- its call site in `findGenuineNounMatch` already
+// short-circuits on `getCodeRangeAt` first, the same precedent
+// `isOrdinaryHyphenatedCompoundToken`/`isNarrativeIddMention` follow: being
+// wrapped in code at all is itself a distinguishing signal bare prose
+// lacks (and it is also unreachable there regardless, since the masked
+// pass has already blanked a code-wrapped occurrence to spaces before this
+// classifier ever runs against it).
+//
+// CodeRabbit review (#2610): the identifier-start character class covers
+// ASCII letters/`_`/`$` plus any Unicode letter (`\p{L}`, e.g.
+// `process.é`) -- real ECMAScript `IdentifierStart` also allows a small set
+// of other Unicode categories (Nl, and the two explicit code points
+// U+2118/U+212E) and a `\uXXXX`/`\u{X...}` escape sequence, e.g. writing
+// out `process` then a literal backslash, `u`, and the four hex digits
+// `0065` before `nv` -- an escaped spelling of `process.env`, not that
+// literal text. Both are deliberately left unhandled here: a hand-typed
+// Unicode escape sequence naming a `process` property has no realistic
+// occurrence in an issue body's prose (unlike `#2399`'s bare `force-skip`,
+// which the resolution there rejected for a *shape ambiguity*, this is
+// rejected for *implausibility* -- pinned by its own regression test below
+// so a later change does not silently "fix" it without deliberate review,
+// the same convention `isOrdinaryHyphenatedCompoundToken`'s own accepted
+// limit follows).
+const CODE_IDENTIFIER_PROCESS_TOKEN_LENGTH = 'process'.length;
+const CODE_IDENTIFIER_PROCESS_PROPERTY_ACCESS_PATTERN = /^\.[\p{L}_$]/u;
+function isCodeIdentifierProcessMention(rawSource, matchIndex) {
+  const token = rawSource
+    .slice(matchIndex, matchIndex + CODE_IDENTIFIER_PROCESS_TOKEN_LENGTH)
+    .toLowerCase();
+  if (token !== 'process') {
+    return false;
+  }
+  const afterStart = matchIndex + CODE_IDENTIFIER_PROCESS_TOKEN_LENGTH;
+  const after = rawSource.slice(afterStart, afterStart + 2);
+  return CODE_IDENTIFIER_PROCESS_PROPERTY_ACCESS_PATTERN.test(after);
+}
 function findPolicyOverrideMatch(text, maskedText, getCodeRangeAt) {
-  const maskedMatch = POLICY_OVERRIDE_PATTERN.exec(maskedText);
-  if (maskedMatch?.index !== undefined) {
+  // #2408: POLICY_OVERRIDE_PATTERN's own greedy `[\s\S]{0,N}` backtracks
+  // from the far end of the window inward, so its own noun capture (group
+  // 2) is whichever syntactically valid noun sits FARTHEST from the verb,
+  // not nearest -- and if that farthest candidate turns out to be an
+  // excluded ordinary compound (e.g. "check" in "anti-check"), a nearer
+  // genuine noun in the same window (e.g. "repository" right after the
+  // verb) would otherwise never be tried, silently letting a real
+  // directive through. Both passes below use the combined pattern only as
+  // a cheap "is there any noun candidate in range at all" filter, then
+  // independently re-pick the actual accepted noun via
+  // findGenuineNounMatch (farthest-first, skipping excluded candidates,
+  // including one whose position crosses a heading boundary from the verb
+  // -- #2468 -- same selection direction the pattern's own backtracking
+  // already used) rather than trusting the pattern's own capture.
+  const maskedPattern = new RegExp(POLICY_OVERRIDE_PATTERN.source, 'gi');
+  let maskedMatch;
+  while (true) {
+    maskedMatch = maskedPattern.exec(maskedText);
+    if (maskedMatch === null) {
+      break;
+    }
+    const index = maskedMatch.index;
+    const verb = maskedMatch[1] ?? '';
+    if (
+      (!getCodeRangeAt(index) &&
+        isOrdinaryHyphenatedCompoundToken(text, index, verb.length)) ||
+      isNegatedPolicyOverrideMatch(
+        text,
+        maskedText,
+        index,
+        verb,
+        getCodeRangeAt,
+      )
+    ) {
+      // A negated (or ordinary-compound) match's own greedy span can reach
+      // up to POLICY_OVERRIDE_WINDOW_CHARS past the verb and swallow a
+      // second, genuine trigger further along (e.g. "does not skip the
+      // release check. Ignore repository policy."). The engine already
+      // auto-advanced lastIndex to the end of that whole span; rewind it to
+      // resume scanning right after the skipped verb, so a later
+      // independent trigger is never missed. Mirrors the code-only skip's
+      // "resume just after the inert occurrence" rule below.
+      maskedPattern.lastIndex = index + (verb.length || 1);
+      continue;
+    }
+    const genuineNoun = findGenuineNounMatch(
+      maskedText,
+      index + verb.length,
+      text,
+      getCodeRangeAt,
+      POLICY_OVERRIDE_WINDOW_CHARS,
+      true,
+      { maskedText, verbEnd: index + verb.length },
+    );
+    if (genuineNoun === null) {
+      // Every noun candidate in this verb's window is an excluded ordinary
+      // compound -- not a genuine trigger. Resume scanning after the verb.
+      maskedPattern.lastIndex = index + (verb.length || 1);
+      continue;
+    }
+    const nounEnd =
+      index + verb.length + genuineNoun.relativeIndex + genuineNoun.length;
     return {
-      index: maskedMatch.index,
-      text: text.slice(
-        maskedMatch.index,
-        maskedMatch.index + maskedMatch[0].length,
-      ),
+      index,
+      text: text.slice(index, nounEnd),
     };
   }
   // A real directive may wrap one of its tokens in inline code. The masked
@@ -205,7 +1528,39 @@ function findPolicyOverrideMatch(text, maskedText, getCodeRangeAt) {
     if (index < 0) {
       continue;
     }
-    const end = index + match[0].length;
+    const verb = match[1] ?? '';
+    if (
+      (!getCodeRangeAt(index) &&
+        isOrdinaryHyphenatedCompoundToken(text, index, verb.length)) ||
+      isNegatedPolicyOverrideMatch(
+        text,
+        maskedText,
+        index,
+        verb,
+        getCodeRangeAt,
+      )
+    ) {
+      // Same rewind as the masked-pass loop above: a negated or
+      // ordinary-compound match's own greedy span can swallow a later,
+      // genuine trigger.
+      pattern.lastIndex = index + (verb.length || 1);
+      continue;
+    }
+    const genuineNoun = findGenuineNounMatch(
+      text,
+      index + verb.length,
+      text,
+      getCodeRangeAt,
+      POLICY_OVERRIDE_WINDOW_CHARS,
+      true,
+      { maskedText, verbEnd: index + verb.length },
+    );
+    if (genuineNoun === null) {
+      pattern.lastIndex = index + (verb.length || 1);
+      continue;
+    }
+    const end =
+      index + verb.length + genuineNoun.relativeIndex + genuineNoun.length;
     const codeRange = getCodeRangeAt(index);
     if (codeRange) {
       const codeOnlyMatch = POLICY_OVERRIDE_PATTERN.exec(
@@ -243,8 +1598,120 @@ function findPolicyOverrideMatch(text, maskedText, getCodeRangeAt) {
       codeRange.start > index ||
       end > codeRange.end
     ) {
-      return { index, text: match[0] };
+      return { index, text: text.slice(index, end) };
     }
+  }
+  return null;
+}
+function isUnsafeDirectiveSentenceEnd(raw, index) {
+  const char = raw[index];
+  if (char !== '.' && char !== '?' && char !== '!') {
+    return false;
+  }
+  let cursor = index + 1;
+  while (
+    raw[cursor] === ' ' ||
+    raw[cursor] === '\t' ||
+    raw[cursor] === '\n' ||
+    raw[cursor] === '\r'
+  ) {
+    cursor += 1;
+  }
+  if (cursor >= raw.length) {
+    return true;
+  }
+  const next = raw[cursor] ?? '';
+  return /[A-Z]/.test(next);
+}
+// #2146: bound the verb-to-noun window at a sentence end or a blank line
+// only. Comma, colon, and a single wrap newline are not clause ends —
+// GitHub issue bodies are hard-wrapped, and `CLAUSE_TERMINATOR_PATTERN`
+// exists to attribute negation on the other Check 3 screen. A `.` inside
+// an identifier (Node.js) is not a sentence end: require following
+// whitespace and an uppercase letter, or the end of the window.
+function sliceUnsafeDirectiveWindow(source, start) {
+  const raw = source.slice(start, start + UNSAFE_DIRECTIVE_WINDOW_CHARS);
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === undefined) {
+      break;
+    }
+    if (isUnsafeDirectiveSentenceEnd(raw, index)) {
+      return raw.slice(0, index);
+    }
+    if (char !== '\n' && char !== '\r') {
+      continue;
+    }
+    let cursor = index + 1;
+    if (char === '\r' && raw[cursor] === '\n') {
+      cursor += 1;
+    }
+    while (raw[cursor] === ' ' || raw[cursor] === '\t') {
+      cursor += 1;
+    }
+    if (raw[cursor] === '\n' || raw[cursor] === '\r') {
+      return raw.slice(0, index);
+    }
+  }
+  return raw;
+}
+function isVerbWhollyInBodyCode(
+  verbStart,
+  verbLength,
+  bodyOffset,
+  body,
+  bodyCodeRanges,
+) {
+  if (verbStart < bodyOffset) {
+    return false;
+  }
+  const bodyStart = verbStart - bodyOffset;
+  const range = getMarkdownCodeRange(body, bodyStart, bodyCodeRanges);
+  return range !== null && bodyStart + verbLength <= range.end;
+}
+// #2146: new skip rules on this screen only. Do not copy
+// findPolicyOverrideMatch — its raw fallback still fires when the whole
+// match is not inside one code range, which is exactly the #1911
+// false-positive (code-wrapped verb + later visible noun).
+function findUnsafeExecutionDirectiveMatch(
+  corpus,
+  bodyOffset,
+  body,
+  bodyCodeRanges,
+) {
+  const verbPattern = new RegExp(
+    String.raw`\b${UNSAFE_DIRECTIVE_VERB}\b`,
+    'gi',
+  );
+  const targetPattern = new RegExp(UNSAFE_DIRECTIVE_TARGET_SOURCE, 'i');
+  let verbMatch = verbPattern.exec(corpus);
+  while (verbMatch) {
+    const verbStart = verbMatch.index;
+    const verbText = verbMatch[0] ?? '';
+    if (
+      !isVerbWhollyInBodyCode(
+        verbStart,
+        verbText.length,
+        bodyOffset,
+        body,
+        bodyCodeRanges,
+      )
+    ) {
+      const window = sliceUnsafeDirectiveWindow(
+        corpus,
+        verbStart + verbText.length,
+      );
+      const targetMatch = targetPattern.exec(window);
+      if (targetMatch) {
+        const targetStart = targetMatch.index ?? 0;
+        const targetText = targetMatch[0] ?? '';
+        return corpus.slice(
+          verbStart,
+          verbStart + verbText.length + targetStart + targetText.length,
+        );
+      }
+    }
+    verbMatch = verbPattern.exec(corpus);
   }
   return null;
 }
@@ -268,12 +1735,14 @@ export function evaluateSuitability(issue, options = {}) {
       options.needsDecisionLabelName,
       POLICY_DEFAULTS.labels.needsDecisionLabelName,
     ),
+    markerPrefix: normalizeMarkerPrefix(options.markerPrefix),
     highConfidenceDuplicate: normalizeHighConfidenceDuplicateInput(
       options.highConfidenceDuplicate,
     ),
     highConfidenceCollectionDegraded: Boolean(
       options.highConfidenceCollectionDegraded,
     ),
+    structuralEvidence: normalizeStructuralEvidence(options.structuralEvidence),
   };
   const checks = [];
   for (const check of CHECKS) {
@@ -281,7 +1750,10 @@ export function evaluateSuitability(issue, options = {}) {
     checks.push({
       id: check.id,
       name: check.name,
-      result: result.pass ? 'pass' : 'fail',
+      // #2767: a demoted result already carries `pass: true` from the
+      // check itself, so `passed`/`outcome`/the short-circuit below need
+      // no separate handling -- `result: 'warn'` is presentational only.
+      result: result.pass ? (result.demoted ? 'warn' : 'pass') : 'fail',
       evidence: result.evidence,
       ...(result.tier ? { tier: result.tier } : {}),
     });
@@ -433,12 +1905,20 @@ export function checkTrustSafety(context) {
       evidence: `Policy-override directive detected: "${policyMatch.text}". Untrusted policy-manipulation instructions cannot be processed.`,
     };
   }
-  // Check for explicit unsafe execution directives
-  if (EXPLICIT_UNSAFE_DIRECTIVE_PATTERN.test(corpus)) {
-    const match = corpus.match(EXPLICIT_UNSAFE_DIRECTIVE_PATTERN);
+  // Check for explicit unsafe execution directives. #2146: skip a verb
+  // wholly inside a body code region, and stop the verb-to-noun window
+  // at `.` / `?` / `!` or a blank line. Do not whole-corpus-mask — a
+  // visible verb with a code-wrapped noun must still fail.
+  const unsafeDirective = findUnsafeExecutionDirectiveMatch(
+    corpus,
+    bodyOffset,
+    issue.body,
+    bodyCodeRanges,
+  );
+  if (unsafeDirective) {
     return {
       pass: false,
-      evidence: `Explicit unsafe execution directive detected: "${match?.[0] ?? ''}". Cannot execute untrusted user-provided instructions.`,
+      evidence: `Explicit unsafe execution directive detected: "${unsafeDirective}". Cannot execute untrusted user-provided instructions.`,
     };
   }
   // Inspect every unsafe-command occurrence across all patterns, not just
@@ -622,6 +2102,27 @@ export function checkActionability(context) {
         'Issue defines actionable scope and verifiable delivery details.',
     };
   }
+  // #2767 round 17 (Codex review, PR #2840): this check has no
+  // realistically reachable structural-evidence demotion branch, unlike
+  // Checks 6/7 -- `hasAcceptance` above already matches the bare phrase
+  // "Acceptance Criteria" (or "Output"/"Deliverables") ANYWHERE in the
+  // body, which `verificationCommand`'s own heading requirement
+  // (`ACCEPTANCE_CRITERIA_HEADING_PATTERN`, a real ATX/Setext heading
+  // containing that same phrase) almost always also satisfies -- any body
+  // with a normally-written "## Acceptance Criteria" heading has already
+  // returned `pass: true` above, before this check ever reaches its own
+  // fail branch. (One contrived exception exists: a heading with extra
+  // whitespace between the two words, e.g. "##  Acceptance    Criteria",
+  // matches the heading pattern's `[ \t]+` gap but not `hasAcceptance`'s
+  // literal single space -- verified via `gh api /markdown` as a real
+  // heading. Not a realistic authoring pattern, and not worth preserving
+  // a demotion branch for.) A `hasAllStructuralSignals` branch here fired
+  // almost exclusively for a synthetic evidence value injected directly
+  // into `evaluateSuitability` (bypassing `computeLiveStructuralEvidence`'s
+  // real body-derived computation), never for the live CLI's own real
+  // evidence on realistic content. Removed (previously demoted here)
+  // rather than left as effectively-dead code; the PR's own scope is
+  // Checks 6/7 for this reason.
   return {
     pass: false,
     evidence: 'Issue lacks concrete actionable scope or acceptance detail.',
@@ -631,11 +2132,12 @@ export function checkAutonomy(context) {
   const { issue } = context;
   const labels = new Set(issue.labels);
   const body = issue.body;
+  const blockedByHumanLabelName = normalizeConfiguredLabelName(
+    context.blockedByHumanLabelName,
+    POLICY_DEFAULTS.labels.blockedByHumanLabelName,
+  );
   const blockedLabels = new Set([
-    normalizeConfiguredLabelName(
-      context.blockedByHumanLabelName,
-      POLICY_DEFAULTS.labels.blockedByHumanLabelName,
-    ),
+    blockedByHumanLabelName,
     normalizeConfiguredLabelName(
       context.needsDecisionLabelName,
       POLICY_DEFAULTS.labels.needsDecisionLabelName,
@@ -646,6 +2148,158 @@ export function checkAutonomy(context) {
       return {
         pass: false,
         evidence: `Blocking label present: ${label}`,
+      };
+    }
+  }
+  // #2737: the configured blockedByHumanLabelName label (default
+  // status:blocked-by-human) can be absent even when the issue is
+  // genuinely human-gated -- issue #2657 mechanically passed all seven
+  // A4.5 checks while still carrying a `blocked-by-human:` title prefix
+  // and a hidden authoring-bucket marker, neither of which the label
+  // check above reads. Both are mechanical, pre-label signals the
+  // issue-authoring contract pairs with that label, so this check must
+  // also honor them.
+  //
+  // The title-prefix convention itself is the same stable
+  // `blocked-by-human` value the authoring-bucket marker below uses
+  // (AuthoringBucketMarkerValue is a fixed enum, never configurable) --
+  // renaming the GitHub label is a repo-local UI concern and must not
+  // silently change which title prefix an issue author is expected to
+  // write, or a legacy/adopter issue titled `blocked-by-human: ...`
+  // would stop being recognized the moment a repository customizes the
+  // label name, reopening the exact pre-label gap this check exists to
+  // close (#2737 review, Codex). So the canonical stem is always
+  // checked; the configured label's own local name (the part after its
+  // `status:`-style namespace) is checked too, as a secondary alias for
+  // a repository that has already standardized its own title
+  // convention around a renamed label. A label misconfigured to end in
+  // `:` (empty local-name stem) contributes no alias rather than
+  // matching every title (#2737 review, Copilot).
+  const CANONICAL_BLOCKED_BY_HUMAN_STEM = 'blocked-by-human';
+  const configuredStem = blockedByHumanLabelName.includes(':')
+    ? blockedByHumanLabelName.slice(
+        blockedByHumanLabelName.lastIndexOf(':') + 1,
+      )
+    : blockedByHumanLabelName;
+  const titlePrefixStems = new Set([CANONICAL_BLOCKED_BY_HUMAN_STEM]);
+  if (configuredStem.length > 0) {
+    titlePrefixStems.add(configuredStem);
+  }
+  for (const stem of titlePrefixStems) {
+    if (new RegExp(`^${escapeRegex(stem)}:\\s*`, 'i').test(issue.title)) {
+      return {
+        pass: false,
+        evidence: `Title carries the ${stem}: prefix.`,
+      };
+    }
+  }
+  // #2737 review, Copilot: checkAutonomy is itself exported and called
+  // directly with a raw Context (including in tests) -- normalize here too
+  // rather than relying solely on the Context-construction call sites.
+  const markerPrefix = normalizeMarkerPrefix(context.markerPrefix);
+  // #2761 review (Codex): a naive fenced/inline-only mask (the earlier
+  // `stripMarkdownCodeRegions(body)`) leaves an indented (4-space) code
+  // block untouched, so a documentation example written that way is
+  // wrongly treated as a real marker. It also has no notion of an HTML
+  // comment boundary at all, so it cannot distinguish a genuine marker from
+  // a backslash-escaped `\<!--` opener (literal text, not a real comment)
+  // or correctly recover a genuine marker sitting between backslash-escaped
+  // backticks (`` \` <!-- ... --> \` ``, which `findInlineCodeRanges`
+  // itself already treats as not forming a real inline code span, unlike
+  // the plain regex behind `stripMarkdownCodeRegions`). Scanning only the
+  // real (non-code-example, non-escaped) HTML comment ranges --
+  // `findHtmlCommentRanges`'s own established fenced/indented/inline
+  // code-example exclusion and escaped-opener handling, already used the
+  // same way elsewhere in this function (the objective-criteria
+  // `fenceMaskedBody` scan below) and in checkVerifiability's
+  // `hasSubjectiveApproval` scan -- gets all three right at once.
+  const codeRangesForAutonomy = findMarkdownCodeRanges(body);
+  const commentRangesForAutonomy = findHtmlCommentRanges(
+    body,
+    codeRangesForAutonomy,
+  );
+  const authoringBucketScanText = commentRangesForAutonomy
+    .map((range) => body.slice(range.start, range.end))
+    .join('\n');
+  const bucketMarker = parseAuthoringBucketMarker(
+    authoringBucketScanText,
+    markerPrefix,
+  );
+  if (
+    bucketMarker.present &&
+    !bucketMarker.malformed &&
+    bucketMarker.value === 'blocked-by-human'
+  ) {
+    return {
+      pass: false,
+      evidence: `<!-- ${markerPrefix}-authoring-bucket: blocked-by-human --> marker present.`,
+    };
+  }
+  // #2219: an either/or acceptance-criterion shape naming two mutually
+  // exclusive implementation paths without saying which one to take.
+  // Checked before the standalone unresolved-choice scan further below:
+  // both checks match against the same UNRESOLVED_CHOICE_PATTERN markers,
+  // so checking either/or first is what makes this variant's own evidence
+  // message reachable rather than always pre-empted by that later, more
+  // generic match on the same marker. Requires an un-negated marker
+  // touching or within EITHER_OR_PROXIMITY_WINDOW_CHARS of the either/or
+  // span -- an ordinary AC offering two already-resolved, equivalent
+  // options must keep passing, including when a resolved statement nearby
+  // happens to mention a marker word in its own negated form (e.g. "this
+  // is no longer TBD").
+  const eitherOrMatches = [...body.matchAll(EITHER_OR_PATTERN)];
+  if (eitherOrMatches.length > 0) {
+    for (const marker of body.matchAll(UNRESOLVED_CHOICE_PATTERN)) {
+      const markerText = marker[0] ?? '';
+      const markerIndex = marker.index ?? 0;
+      if (
+        isNegatedNearby(body, markerText, markerIndex, NEGATION_WINDOW_CHARS)
+      ) {
+        continue;
+      }
+      if (
+        isEnumeratedParentheticalEntry(body, markerIndex, markerText.length)
+      ) {
+        continue;
+      }
+      const markerEnd = markerIndex + markerText.length;
+      const isNearOrInsideEitherOr = eitherOrMatches.some((eitherOr) => {
+        const eitherOrText = eitherOr[0] ?? '';
+        const eitherOrIndex = eitherOr.index ?? 0;
+        const eitherOrEnd = eitherOrIndex + eitherOrText.length;
+        if (markerIndex < eitherOrEnd && markerEnd > eitherOrIndex) {
+          // The marker overlaps the either/or span itself (e.g. "either
+          // TBD ... or ...").
+          return true;
+        }
+        const gapAfterEitherOr = markerIndex - eitherOrEnd;
+        const gapBeforeEitherOr = eitherOrIndex - markerEnd;
+        return (
+          (gapAfterEitherOr >= 0 &&
+            gapAfterEitherOr <= EITHER_OR_PROXIMITY_WINDOW_CHARS) ||
+          (gapBeforeEitherOr >= 0 &&
+            gapBeforeEitherOr <= EITHER_OR_PROXIMITY_WINDOW_CHARS)
+        );
+      });
+      if (!isNearOrInsideEitherOr) {
+        continue;
+      }
+      // #2767: demotable -- an either/or lexical-pattern hit, one of the
+      // three branches this issue names. The label / title-prefix /
+      // authoring-bucket-marker checks above this point in the function
+      // are NEVER demoted (the issue's explicit never-demote list) --
+      // this branch is reached only once none of those matched.
+      if (hasAllStructuralSignals(context.structuralEvidence)) {
+        return {
+          pass: true,
+          demoted: true,
+          evidence: `Issue presents an unresolved either/or implementation choice: "${markerText}" (demoted: structural evidence present).`,
+        };
+      }
+      return {
+        pass: false,
+        evidence:
+          'Issue presents an unresolved either/or implementation choice.',
       };
     }
   }
@@ -661,23 +2315,47 @@ export function checkAutonomy(context) {
   for (const match of coordinationMatches) {
     const matchedText = match[0] ?? '';
     const matchIndex = match.index ?? 0;
-    const contextBefore = body.slice(Math.max(0, matchIndex - 60), matchIndex);
-    const contextAfter = body.slice(
-      matchIndex + matchedText.length,
-      Math.min(body.length, matchIndex + matchedText.length + 60),
-    );
-    // Check if negated (either before or immediately after)
-    if (
-      NEGATION_PATTERN.test(contextBefore) ||
-      NEGATION_PATTERN.test(contextAfter)
-    ) {
+    if (isNegatedNearby(body, matchedText, matchIndex, NEGATION_WINDOW_CHARS)) {
       // This is a negated non-requirement; skip this match
       continue;
+    }
+    // #2767: demotable -- see the either/or branch's comment above.
+    if (hasAllStructuralSignals(context.structuralEvidence)) {
+      return {
+        pass: true,
+        demoted: true,
+        evidence: `Issue explicitly requires external human coordination or approval: "${matchedText}" (demoted: structural evidence present).`,
+      };
     }
     return {
       pass: false,
       evidence:
         'Issue explicitly requires external human coordination or approval.',
+    };
+  }
+  // #2219: a nearby-word unresolved-choice phrasing beyond the two fixed
+  // templates above -- TBD, to be determined, pending a decision, an open
+  // question for the maintainer, and similar (see UNRESOLVED_CHOICE_SOURCE).
+  for (const marker of body.matchAll(UNRESOLVED_CHOICE_PATTERN)) {
+    const markerText = marker[0] ?? '';
+    const markerIndex = marker.index ?? 0;
+    if (isNegatedNearby(body, markerText, markerIndex, NEGATION_WINDOW_CHARS)) {
+      continue;
+    }
+    if (isEnumeratedParentheticalEntry(body, markerIndex, markerText.length)) {
+      continue;
+    }
+    // #2767: demotable -- see the either/or branch's comment above.
+    if (hasAllStructuralSignals(context.structuralEvidence)) {
+      return {
+        pass: true,
+        demoted: true,
+        evidence: `Issue names an unresolved product or design choice: "${markerText}" (demoted: structural evidence present).`,
+      };
+    }
+    return {
+      pass: false,
+      evidence: 'Issue names an unresolved product or design choice.',
     };
   }
   return {
@@ -692,27 +2370,177 @@ export function checkVerifiability(context) {
     /\btests?\b|\bverification\b|\bvalidate\b|\blint\b|\bci\b/i.test(body);
   // Check for substantive objective criteria, not just empty headings
   let hasObjectiveCriteria = false;
-  // Check for "Acceptance Criteria" with substantive content after it
-  const acceptanceCriteriaMatch = body.match(ACCEPTANCE_CRITERIA_PATTERN);
+  // Check for "Acceptance Criteria" with substantive content after it. A
+  // fenced code block quoting example Markdown syntax (an illustrative
+  // bullet, or a heading-like line meant only as sample output) must not
+  // leak into this scan either way -- as a fake substantive bullet, or as a
+  // fake section-boundary heading that truncates the section before a real
+  // bullet after the fence. Mask fence content (not inline code spans,
+  // which hasSubstantiveBullet below still needs) over the whole body before
+  // any slicing, so a fence that opens inside the eventual 500-char window
+  // and closes outside it is still fully masked (E2 critique subagent,
+  // #2589 round 6). Masking preserves character positions, so every offset
+  // computed below stays valid against the original body.
+  //
+  // #2711: also masks indented (4-space) code blocks and HTML comments,
+  // neither of which the fenced-only mask above covered -- a keyword-free
+  // example written as an indented block, or hidden template scaffolding
+  // inside an HTML comment, could otherwise leak a fake substantive bullet
+  // or a fake outcome-signal keyword into this same scan. `findHtmlCommentRanges`
+  // is given every code range (fenced, indented, AND inline -- PR #2735
+  // Codex review round 2) so an unterminated `<!--` used as a code
+  // EXAMPLE of the syntax, in any of those three shapes, doesn't mask
+  // through EOF; only fenced and indented ranges are actually masked into
+  // `fenceMaskedBody` itself, since inline spans stay unmasked for
+  // hasSubstantiveBullet's own backtick scan below.
+  const fencedRangesForVerifiability = findFencedCodeRanges(body);
+  const codeRangesForVerifiability = findMarkdownCodeRanges(body);
+  const fenceMaskedBody = maskMarkdownCodeRegionsPreservingPositions(body, [
+    ...fencedRangesForVerifiability,
+    ...findIndentedCodeRanges(body, fencedRangesForVerifiability),
+    ...findHtmlCommentRanges(body, codeRangesForVerifiability),
+  ]);
+  const acceptanceCriteriaMatch = fenceMaskedBody.match(
+    ACCEPTANCE_CRITERIA_PATTERN,
+  );
+  // #2711 PR #2735 review round 6 (Codex): tracks whether the primary scan
+  // below actually reached its list-shaped outer gate, so the Alternative
+  // fallback (further down) only treats the AC section as "already fairly
+  // reviewed" -- and excludes it -- when that gate genuinely ran. An AC
+  // section starting with introductory prose before its checklist (e.g.
+  // "The implementation must satisfy:\n- [ ] ...") never enters the gate
+  // here (the section's own text doesn't start with a list marker), so its
+  // real checklist item was never seen by either scan; excluding it from
+  // the fallback too made it doubly invisible instead of falling through.
+  let acListGateReached = false;
   if (acceptanceCriteriaMatch) {
     const indexAfter =
       (acceptanceCriteriaMatch.index ?? 0) +
       (acceptanceCriteriaMatch[0]?.length ?? 0);
-    const contentAfter = body.slice(indexAfter, indexAfter + 500).trim();
-    // Require either a list (starting with - or *) or numbered content with outcome signals
-    if (/^[-*]\s+/.test(contentAfter) || /^\d+\.\s+/.test(contentAfter)) {
-      const hasOutcomeSignals = OUTCOME_SIGNAL_PATTERN.test(contentAfter);
-      if (hasOutcomeSignals) {
-        hasObjectiveCriteria = true;
-      }
+    const contentAfter = fenceMaskedBody
+      .slice(indexAfter, indexAfter + 500)
+      .trim();
+    // Bound the AC section at the next heading so a trailing sibling
+    // section (e.g. this repo's own "## Candidate files" convention, which
+    // is itself a bullet list of paths) never leaks substance or an
+    // outcome-signal keyword into a genuinely placeholder AC list (#2589).
+    const nextHeadingIndex = contentAfter.search(NEXT_HEADING_PATTERN);
+    const listSection =
+      nextHeadingIndex === -1
+        ? contentAfter
+        : contentAfter.slice(0, nextHeadingIndex);
+    // Require either a list (starting with - or *) or numbered content. A
+    // substantive bullet (hasSubstantiveBullet) satisfies this on its own;
+    // an outcome-signal keyword remains a fallback for a list that names
+    // no concrete file, command, or artifact (#2589). Both checks scan
+    // only the section's own list-item lines, not its full raw text, so a
+    // placeholder bullet followed by unrelated non-list prose can't
+    // borrow that prose's substance or keywords (#2589 CodeRabbit review).
+    // #2711 PR #2735 review (Copilot): also accepts the "1)" ordered-list
+    // form, matching LIST_ITEM_LINE_PATTERN's own fix -- an AC section
+    // written entirely with that numbering used to never enter this block.
+    if (/^[-*]\s+/.test(listSection) || /^\d+[.)]\s+/.test(listSection)) {
+      acListGateReached = true;
+      const listItemsOnly = extractListItemLines(listSection);
+      hasObjectiveCriteria =
+        hasSubstantiveBullet(listItemsOnly) ||
+        OUTCOME_SIGNAL_PATTERN.test(listItemsOnly);
     }
   }
-  // Alternative: check for numbered steps with outcome signals or checklists
+  // Alternative: check for numbered steps with outcome signals or
+  // checklists, excluding (a) the Acceptance Criteria section's own
+  // content, but ONLY when `acListGateReached` -- i.e. the primary scan
+  // above actually gave it a fair, bounded review -- and (b) this repo's
+  // own "## Candidate files" convention (#2589) -- a list of files to
+  // EDIT, never a verification signal. A genuine numbered-steps or
+  // checklist section elsewhere in the body (e.g. "## Expected Behavior",
+  // "## Reproduction") still counts: an earlier revision (#2711) instead
+  // skipped this whole fallback whenever ANY Acceptance Criteria heading
+  // existed, which also suppressed that legitimate case (Codex review, PR
+  // #2735) -- only these two specific, already-recognized
+  // non-verification regions are excluded now, not every sibling section.
+  // Also accepts the "1)" ordered-list form (matching the fix above).
+  // #2711 PR #2735 review round 4 (Codex): starts from `fenceMaskedBody`
+  // (already fenced/indented/HTML-comment masked), not the raw `body` --
+  // a fenced or indented example demonstrating a "1)" step, or one hidden
+  // in an HTML comment, could otherwise satisfy this fallback on its own
+  // once paired with an unrelated outcome-signal word anywhere else.
   if (!hasObjectiveCriteria) {
+    const alternativeScanExclusions = [];
+    if (acceptanceCriteriaMatch && acListGateReached) {
+      const acHeadingStart = acceptanceCriteriaMatch.index ?? 0;
+      const acContentStart =
+        acHeadingStart + (acceptanceCriteriaMatch[0]?.length ?? 0);
+      const acRestOfBody = fenceMaskedBody.slice(acContentStart);
+      const acNextHeadingIdx = acRestOfBody.search(NEXT_HEADING_PATTERN);
+      const acSectionEnd =
+        acContentStart +
+        (acNextHeadingIdx === -1 ? acRestOfBody.length : acNextHeadingIdx);
+      // #2711 PR #2735 review round 3 (Codex): the primary section-scoped
+      // scan above only ever examines the first 500 characters after the
+      // heading (`contentAfter`'s own slice window) -- capping the
+      // exclusion at that SAME boundary, not the section's full extent,
+      // so a genuine checklist item past that window (which the primary
+      // scan never saw either) remains available to this fallback instead
+      // of being doubly hidden.
+      //
+      // #2711 PR #2735 review round 7 (Codex): a single checklist item
+      // that itself straddles the 500-character cutoff -- marker and
+      // explanatory prefix before it, objective clause after -- must not
+      // have its exclusion cut mid-line: char-precise truncation left the
+      // marker excluded while only the suffix reached the fallback, and
+      // the bare suffix text (with no "- [ ]" of its own) never matched
+      // `hasChecklist`'s marker pattern. Snap the cutoff back to the start
+      // of the straddling line so the whole item stays together, either
+      // fully excluded (primary scan's job) or fully visible to the
+      // fallback -- never split across the boundary.
+      const rawCutoff = acContentStart + 500;
+      let acContentEnd;
+      if (rawCutoff >= acSectionEnd) {
+        acContentEnd = acSectionEnd;
+      } else {
+        const straddleLineStart =
+          fenceMaskedBody.lastIndexOf('\n', rawCutoff) + 1;
+        acContentEnd =
+          straddleLineStart <= acContentStart
+            ? acContentStart
+            : straddleLineStart;
+      }
+      alternativeScanExclusions.push({
+        start: acHeadingStart,
+        end: acContentEnd,
+      });
+    }
+    const candidateFilesMatch = fenceMaskedBody.match(
+      CANDIDATE_FILES_SECTION_PATTERN,
+    );
+    if (candidateFilesMatch) {
+      const cfHeadingStart = candidateFilesMatch.index ?? 0;
+      const cfContentStart =
+        cfHeadingStart + (candidateFilesMatch[0]?.length ?? 0);
+      const cfRestOfBody = fenceMaskedBody.slice(cfContentStart);
+      const cfNextHeadingIdx = cfRestOfBody.search(NEXT_HEADING_PATTERN);
+      const cfContentEnd =
+        cfContentStart +
+        (cfNextHeadingIdx === -1 ? cfRestOfBody.length : cfNextHeadingIdx);
+      alternativeScanExclusions.push({
+        start: cfHeadingStart,
+        end: cfContentEnd,
+      });
+    }
+    const bodyForAlternativeScan =
+      alternativeScanExclusions.length > 0
+        ? maskMarkdownCodeRegionsPreservingPositions(
+            fenceMaskedBody,
+            alternativeScanExclusions,
+          )
+        : fenceMaskedBody;
     const hasNumSteps =
-      /^\s*\d+\.\s+/m.test(body) && OUTCOME_SIGNAL_PATTERN.test(body);
+      /^\s*\d+[.)]\s+/m.test(bodyForAlternativeScan) &&
+      OUTCOME_SIGNAL_PATTERN.test(bodyForAlternativeScan);
     const hasChecklist =
-      /^\s*[-*]\s+\[[ xX]\]/m.test(body) && OUTCOME_SIGNAL_PATTERN.test(body);
+      /^\s*[-*]\s+\[[ xX]\]/m.test(bodyForAlternativeScan) &&
+      OUTCOME_SIGNAL_PATTERN.test(bodyForAlternativeScan);
     hasObjectiveCriteria = hasNumSteps || hasChecklist;
   }
   // Fallback: check for "Output", "Deliverables", or "Verification" keywords with signal words
@@ -724,45 +2552,514 @@ export function checkVerifiability(context) {
   }
   const hasObjectiveSignals = hasVerificationChannel || hasObjectiveCriteria;
   if (!hasObjectiveSignals) {
+    // #2767: demotable -- this is the "no objective verification signal"
+    // shape the issue names, distinct from the escape-hatch either/or
+    // branch further below (deliberately left un-demoted; see that
+    // branch's own comment).
+    if (hasAllStructuralSignals(context.structuralEvidence)) {
+      return {
+        pass: true,
+        demoted: true,
+        evidence:
+          'Issue does not provide objective verification signals or substantive acceptance criteria (demoted: structural evidence present).',
+      };
+    }
     return {
       pass: false,
       evidence:
         'Issue does not provide objective verification signals or substantive acceptance criteria.',
     };
   }
-  const hasSubjectiveApproval = (() => {
-    const lines = body.split(/\r?\n/);
-    return (
-      lines.some(
-        (line) =>
-          SUBJECTIVE_SUBJECT_PATTERN.test(line) &&
-          SUBJECTIVE_GATE_PATTERN.test(line),
-      ) ||
-      /\b(approval|sign-?off|decision|preference)\b[\s\S]{0,80}\b(maintainer|stakeholder|human|opinion|judgment|judgement|ux|feel)\b/i.test(
-        body,
-      )
+  // Normalized once so every offset computed below (line-split cursor,
+  // paragraph spans, proximity/inline-decision match index) shares the same
+  // 1-char line separator -- a raw `\r\n` body otherwise drifts the running
+  // `lineOffset` cursor by 1 byte per CRLF line, eventually pointing
+  // `isFramedAsDescriptive` at the wrong paragraph (#2531 review).
+  const normalizedBody = body.replace(/\r\n/g, '\n');
+  const paragraphSpans = getParagraphSpans(normalizedBody);
+  // #2661 PR #2662 review rounds 5-6 (Codex): computed against
+  // `normalizedBody` (not the raw `body`-derived `fenceMaskedBody` above,
+  // whose offsets are not CRLF-normalized -- the #2531-class
+  // position-alignment risk noted in this PR's own body) so the
+  // inline-decision scan below ignores both an inline/fenced code
+  // demonstration of the convention itself (e.g. an issue documenting the
+  // syntax with `` `Maintainer decision (Groom hearing, 2026-09-05): choose
+  // A` ``) and hidden HTML-comment template scaffolding (round 6:
+  // `<!-- Maintainer decision (...): <resolution text> -->`).
+  // `findMarkdownCodeRanges` covers fenced, indented, AND inline spans,
+  // unlike `findFencedCodeRanges` alone. `findHtmlCommentRanges` is given
+  // that same superset (#2711; widened to include inline spans too per PR
+  // #2735 Codex review round 2) so an unterminated `<!--` used as a code
+  // EXAMPLE of the HTML-comment-marker syntax, fenced or inline, isn't
+  // treated as a real unterminated comment masking through EOF.
+  const codeRangesForCommentMasking = findMarkdownCodeRanges(normalizedBody);
+  const normalizedCodeMaskedBody = maskMarkdownCodeRegionsPreservingPositions(
+    normalizedBody,
+    [
+      ...codeRangesForCommentMasking,
+      ...findHtmlCommentRanges(normalizedBody, codeRangesForCommentMasking),
+    ],
+  );
+  // #2767: captures the matched text (not just a boolean) so a demoted
+  // warn's evidence can name the matched phrase, matching the pattern
+  // discover-viability-gate.mts's demotable criteria already use.
+  const subjectiveApprovalMatch = (() => {
+    let lineOffset = 0;
+    for (const line of normalizedBody.split('\n')) {
+      if (
+        SUBJECTIVE_SUBJECT_PATTERN.test(line) &&
+        SUBJECTIVE_GATE_PATTERN.test(line) &&
+        !isFramedAsDescriptive(normalizedBody, paragraphSpans, lineOffset)
+      ) {
+        return line.trim();
+      }
+      lineOffset += line.length + 1;
+    }
+    const proximityPattern = new RegExp(
+      SUBJECTIVE_PROXIMITY_PATTERN.source,
+      'gi',
     );
+    let proximityMatch = proximityPattern.exec(normalizedBody);
+    while (proximityMatch) {
+      if (
+        !isFramedAsDescriptive(
+          normalizedBody,
+          paragraphSpans,
+          proximityMatch.index,
+        )
+      ) {
+        return proximityMatch[0];
+      }
+      proximityMatch = proximityPattern.exec(normalizedBody);
+    }
+    return null;
   })();
+  const hasSubjectiveApproval = subjectiveApprovalMatch !== null;
   // A body that carries BOTH a resolved-decision marker (a
-  // "## Decision (resolved …)" section) AND a concrete, objectively-verifiable
-  // acceptance-criteria section is treated as having had its subjective call
-  // already settled by a human, so its prose merely *describes* that prior
-  // approval/decision. This is a soft heuristic for a soft advisory gate: it
-  // co-occurrence-matches the two signals rather than proving the decision
-  // resolves the exact approval wording, which is an accepted trade-off for
-  // maintainer-authored issues. An approval-gated body with no resolved
-  // decision still routes to needs-decision.
-  const hasResolvedDecision = RESOLVED_DECISION_PATTERN.test(body);
+  // "## Decision (resolved …)" heading, or the grooming-pass workflow's
+  // inline "Maintainer decision (…): …" prose, #2661) AND a concrete,
+  // objectively-verifiable acceptance-criteria section is treated as having
+  // had its subjective call already settled by a human, so its prose merely
+  // *describes* that prior approval/decision. This is a soft heuristic for a
+  // soft advisory gate: it co-occurrence-matches the two signals rather than
+  // proving the decision resolves the exact approval wording, which is an
+  // accepted trade-off for maintainer-authored issues. An approval-gated
+  // body with no resolved decision still routes to needs-decision.
+  //
+  // Both the heading and inline forms, and the inline form's own
+  // framing-verb / blockquote / strikethrough exclusion checks (#2661,
+  // #2711), now live in resolved-decision.mts's `hasResolvedDecision`
+  // (imported above as `computeHasResolvedDecision`), single-sourced with
+  // discover-viability-gate.mts's `autonomous_completion` criterion (#2763)
+  // rather than re-derived here.
+  const hasResolvedDecision = computeHasResolvedDecision(body);
   if (hasSubjectiveApproval && !(hasResolvedDecision && hasObjectiveCriteria)) {
+    // #2767: demotable -- the "subjective approval or judgment" shape.
+    if (hasAllStructuralSignals(context.structuralEvidence)) {
+      return {
+        pass: true,
+        demoted: true,
+        evidence: `Issue success depends on subjective approval or judgment: "${subjectiveApprovalMatch}" (demoted: structural evidence present).`,
+      };
+    }
     return {
       pass: false,
       evidence: 'Issue success depends on subjective approval or judgment.',
     };
   }
+  // #2709 (idd-suitability.instructions.md Edge Cases, #1984): an either/or
+  // acceptance-criteria bullet where one branch is a substantive fix and
+  // the other reads "or document why not" is not an automatic PASS -- the
+  // documentation branch must be evaluated on its own merits, and should
+  // classify needs-decision when it only restates the bullet without
+  // disclosing the tradeoff. `hasObjectiveSignals` above only confirms SOME
+  // part of the body names a checkable artifact; it does not confirm the
+  // escape-hatch branch itself does, which is the actual ambiguity this
+  // check exists to catch. Deliberately independent of checkAutonomy's
+  // either/or + UNRESOLVED_CHOICE_PATTERN pairing (#2219): an escape-hatch
+  // branch reads as fully "resolved" prose on both sides, so it carries
+  // none of that check's unresolved-choice phrases and never trips it.
+  //
+  // Scoped to the Acceptance Criteria section only, not the whole body
+  // (Codex review, PR #2725): ordinary explanatory prose elsewhere in the
+  // issue (e.g. a Background sentence phrased as "either... or... explain
+  // why") must not trip Check 7 when the actual AC bullets are fully
+  // objective.
+  //
+  // Further scoped to one list item (bullet) at a time, not the AC
+  // section's raw text as a whole (Codex review, PR #2725 round 2): scanning
+  // the section's full text let "either" in one bullet pair with an
+  // unrelated "or" in a LATER bullet within EITHER_OR_PROXIMITY_WINDOW_CHARS,
+  // manufacturing an either/or construct that spans two unrelated AC lines.
+  // Bounding the right branch to the end of its own list item (instead of
+  // just its first line, via indexOf('\n')) also lets a soft-wrapped
+  // disclosure on an indented continuation line -- "Either add validation,
+  // or\n  document why validation is not needed" -- be seen at all; the
+  // previous single-line bound cut the branch off right after "or",
+  // guaranteeing an empty (and therefore always-passing) right-branch text.
+  // A continuation line must be indented; an unindented "lazy continuation"
+  // line is deliberately excluded here for the same reason
+  // extractListItemLines excludes it above -- it cannot be told apart from
+  // unrelated trailing prose without full Markdown paragraph parsing. A
+  // continuation line MAY itself be a list marker as long as it is indented
+  // deeper than the enclosing item's own marker -- "- Either add
+  // validation, or:\n  - document why validation is not needed" is a
+  // nested sub-item elaborating on the outer bullet, not an unrelated
+  // sibling (Codex review, PR #2725 round 3); a marker at the same or
+  // shallower indentation still starts a new item.
+  //
+  // Accepted limitation (Codex review, PR #2725 round 2): the artifact check
+  // below confirms the branch NAMES a checkable keyword co-occurring in the
+  // same bullet, not that the named artifact actually verifies the
+  // documentation's content -- "or document the tradeoff and run the
+  // existing tests" passes even if those tests exercise something unrelated
+  // to the tradeoff. This is a conservative keyword heuristic by design, per
+  // idd-suitability.instructions.md's Edge Cases entry for this pattern:
+  // the check's job is to route an ambiguous branch to needs-decision for a
+  // human to judge, not to itself semantically verify that an artifact
+  // constrains a specific claim -- no regex-based check can do that without
+  // full NLP, and each keyword added to close one counterexample only
+  // relocates the same gap to the next one.
+  //
+  // The verb+topic check just above is matched against
+  // normalizedCodeMaskedBody (not normalizedBody), the same
+  // position-preserving code-masked body `hasResolvedDecision` (now
+  // resolved-decision.mts) computes its own equivalent of internally
+  // (Codex review, PR #2725 round 4): an AC bullet that quotes
+  // this exact escape-hatch phrasing as a literal example inside inline or
+  // fenced code -- e.g. "Add a lint rule rejecting `Either add validation,
+  // or document why validation is not needed`" -- must not have its quoted
+  // example treated as the issue's own operative prose.
+  const isEscapeHatchBranch = (branchText, branchStart) => {
+    if (!ESCAPE_HATCH_DOCUMENT_PATTERN.test(branchText)) {
+      return false;
+    }
+    // The artifact keyword scan below, in contrast, is matched against the
+    // RAW (unmasked) branch text (Codex review, PR #2725 round 5): masking
+    // exists only to keep a quoted illustrative example -- already ruled
+    // out by the verb+topic check above having matched on real prose -- from
+    // being treated as operative; a genuine inline-code artifact reference
+    // inside that same real prose (e.g. "verify it through `pnpm lint`")
+    // must still count. Recovering the raw text via a same-length slice at
+    // the same offset works because masking is position-preserving.
+    const rawBranchText = normalizedBody.slice(
+      branchStart,
+      branchStart + branchText.length,
+    );
+    const artifactPattern = new RegExp(CONCRETE_ARTIFACT_PATTERN.source, 'gi');
+    for (const artifactMatch of rawBranchText.matchAll(artifactPattern)) {
+      const artifactText = artifactMatch[0] ?? '';
+      const artifactIndex = branchStart + (artifactMatch.index ?? 0);
+      // A NEGATED artifact mention ("document why tests are NOT needed")
+      // merely names the artifact while declining to provide it -- it must
+      // not count as the branch specifying a real requirement (Codex
+      // review, PR #2725).
+      if (
+        !isNegatedNearby(
+          normalizedBody,
+          artifactText,
+          artifactIndex,
+          ARTIFACT_NEGATION_WINDOW_CHARS,
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const acSectionMatch = normalizedCodeMaskedBody.match(
+    ACCEPTANCE_CRITERIA_PATTERN,
+  );
+  if (acSectionMatch) {
+    const acSectionStart =
+      (acSectionMatch.index ?? 0) + (acSectionMatch[0]?.length ?? 0);
+    const restOfBody = normalizedCodeMaskedBody.slice(acSectionStart);
+    const nextHeadingIdx = restOfBody.search(NEXT_HEADING_PATTERN);
+    const acSectionEnd =
+      acSectionStart +
+      (nextHeadingIdx === -1 ? restOfBody.length : nextHeadingIdx);
+    const acSectionText = normalizedCodeMaskedBody.slice(
+      acSectionStart,
+      acSectionEnd,
+    );
+    // Split the AC section into individual list items -- a marker line
+    // (LIST_ITEM_LINE_PATTERN) plus any immediately-following indented,
+    // non-blank, non-marker continuation lines -- so the either/or scan
+    // below stays within one bullet's own text instead of the whole
+    // section's raw text (Codex review, PR #2725 round 2). Each item's
+    // `text` is a contiguous slice of normalizedCodeMaskedBody (not a
+    // manual line-join), so absolute offsets computed from it stay valid
+    // for the isNegatedNearby calls inside isEscapeHatchBranch above.
+    const acListItems = [];
+    {
+      let itemStart = null;
+      let itemEnd = 0;
+      let itemMarkerIndent = 0;
+      let cursor = 0;
+      const closeItem = () => {
+        if (itemStart !== null) {
+          acListItems.push({
+            text: normalizedCodeMaskedBody.slice(itemStart, itemEnd),
+            start: itemStart,
+          });
+        }
+      };
+      for (const line of acSectionText.split('\n')) {
+        const lineStart = acSectionStart + cursor;
+        const lineEnd = lineStart + line.length;
+        const isBlank = line.trim().length === 0;
+        const isMarker = LIST_ITEM_LINE_PATTERN.test(line);
+        const indent = line.length - line.trimStart().length;
+        // A more-deeply-indented marker line is a NESTED sub-item of the
+        // current item, not a new sibling -- "- Either add validation,
+        // or:\n  - document why validation is not needed" keeps the
+        // documentation alternative as this item's own continuation
+        // instead of starting an unrelated second item whose own right
+        // branch is empty (Codex review, PR #2725 round 3). A marker at
+        // the same or shallower indentation is an ordinary sibling bullet
+        // and still starts a new item.
+        const isNestedMarker =
+          isMarker && itemStart !== null && indent > itemMarkerIndent;
+        const isIndentedContinuation =
+          itemStart !== null &&
+          !isBlank &&
+          (isNestedMarker || (!isMarker && /^\s/.test(line)));
+        if (isMarker && !isNestedMarker) {
+          closeItem();
+          itemStart = lineStart;
+          itemEnd = lineEnd;
+          itemMarkerIndent = indent;
+        } else if (isIndentedContinuation) {
+          itemEnd = lineEnd;
+        } else if (!isBlank) {
+          closeItem();
+          itemStart = null;
+        }
+        // A blank line falls through every branch untouched (Codex review,
+        // PR #2725 round 5): it neither extends nor closes the current
+        // item, so the NEXT non-blank line still decides whether the item
+        // continues (a nested marker or indented continuation past the
+        // blank line, e.g. "- Either add validation, or:\n\n  - document
+        // why validation is not needed") or ends (a sibling marker or
+        // unrelated prose). `item.text`'s eventual slice spans the blank
+        // line either way once a later line extends `itemEnd` past it.
+        cursor += line.length + 1;
+      }
+      closeItem();
+    }
+    for (const item of acListItems) {
+      // Short-circuit before the either/or split search below (Codex
+      // review, PR #2725 round 6): if the escape-hatch verb+topic pattern
+      // matches nowhere in the item's own (masked) text, no sub-slice of
+      // it can match either, so no split could ever flag this item -- an
+      // item with many "either"/"or" occurrences but no disclosure verb
+      // (e.g. a synthetic worst case with hundreds of "either alpha or
+      // beta" phrases) costs one regex test instead of the full pair
+      // search, and a realistic AC bullet has no disclosure verb at all in
+      // the common case.
+      if (!ESCAPE_HATCH_DOCUMENT_PATTERN.test(item.text)) {
+        continue;
+      }
+      const eitherEnds = [];
+      for (const match of item.text.matchAll(EITHER_WORD_PATTERN)) {
+        eitherEnds.push((match.index ?? 0) + match[0].length);
+      }
+      if (eitherEnds.length === 0) {
+        continue;
+      }
+      const orSpans = [];
+      for (const match of item.text.matchAll(OR_WORD_PATTERN)) {
+        const start = match.index ?? 0;
+        orSpans.push({ start, end: start + match[0].length });
+      }
+      // Try every either-to-or split within this item, not just the first
+      // (Codex review, PR #2725 round 5) -- see EITHER_WORD_PATTERN's
+      // comment above for why neither a non-greedy nor a greedy single
+      // match handles every case.
+      for (const eitherEnd of eitherEnds) {
+        for (const or of orSpans) {
+          if (or.start < eitherEnd) {
+            continue;
+          }
+          // Left branch: the content between "either" and this "or".
+          const leftBranchStart = item.start + eitherEnd;
+          const leftBranchText = item.text.slice(eitherEnd, or.start);
+          // Right branch: from the end of this "or" to the end of the
+          // item -- including any indented continuation lines already
+          // folded into `item.text` above.
+          const rightBranchStart = item.start + or.end;
+          const rightBranchText = item.text.slice(or.end);
+          if (
+            isEscapeHatchBranch(rightBranchText, rightBranchStart) ||
+            isEscapeHatchBranch(leftBranchText, leftBranchStart)
+          ) {
+            // #2767: deliberately NOT demoted, unlike this function's other
+            // two fail branches. This check exists precisely to force human
+            // judgment on an ambiguous documentation branch -- a different
+            // failure class from the lexical-pattern false positives the
+            // structural-evidence signal targets, per idd-suitability
+            // .instructions.md's "Escape-hatch acceptance criteria" Edge
+            // Case.
+            return {
+              pass: false,
+              evidence:
+                'Issue offers an either/or acceptance-criteria escape hatch whose documentation-branch alternative names no un-negated, concrete, checkable requirement.',
+            };
+          }
+        }
+      }
+    }
+  }
   return {
     pass: true,
     evidence:
       'Issue includes objective verification language and substantive criteria.',
+  };
+}
+/**
+ * #2102: `--issue`, `--body-file`, and `--stdin` select mutually exclusive
+ * input modes; exactly one is required. Exported (and thus independently
+ * testable) so both `throw` branches can be exercised without invoking
+ * `runCli`'s own process-level side effects (env mutation, `gh` calls).
+ */
+export function resolveInputMode(args) {
+  // Checks flag *presence* (`!== undefined`), not truthiness: `--body-file=`
+  // parses to `''` under Node's util.parseArgs, and a truthy check would
+  // silently fold that into "no mode selected" instead of the explicit,
+  // actionable empty-path error thrown below.
+  const inputModeCount =
+    (args.issue !== null ? 1 : 0) +
+    (args.bodyFile !== undefined ? 1 : 0) +
+    (args.stdin ? 1 : 0);
+  if (inputModeCount === 0) {
+    throw new Error('one of --issue, --body-file, or --stdin is required');
+  }
+  if (inputModeCount > 1) {
+    throw new Error('choose only one of --issue, --body-file, or --stdin');
+  }
+  if (args.bodyFile === '') {
+    throw new Error('--body-file requires a non-empty path');
+  }
+  return args.bodyFile !== undefined || args.stdin ? 'local' : 'issue';
+}
+/**
+ * #1485: `runCli`'s own Check 4 high-confidence evidence-collection block,
+ * extracted (pure move, no behavior change) so `suitability-close-execute.mts`
+ * can reuse the identical fetch orchestration instead of duplicating it --
+ * `#1485`'s own acceptance criteria require the mechanical check to be
+ * "reused, not duplicated." Assumes the caller has already confirmed Checks
+ * 1-3 pass for this candidate (as `runCli`'s own `shouldCollectEvidence` gate
+ * does; `suitability-close-execute.mts` only ever runs after A4.5's Decision
+ * Flow has already reached Check 4 for the same reason) -- this function
+ * itself applies no such gate and always collects.
+ *
+ * The three mechanical signals (closedByPullRequestsReferences, the
+ * branch-name-exact-match lookup, and the same-candidate-files merged-PR
+ * scan) are collected in separate try/catch blocks: an earlier version
+ * wrapped the first two in one block, so a failure collecting the second
+ * signal discarded an already-successful first signal too. Each block's own
+ * failure is recorded independently in `collectionWarnings` and degrades
+ * only that one signal to empty/absent -- never silently reported as "no
+ * evidence" (that would mask a genuinely broken collector as a clean pass),
+ * and never discarding a sibling signal that already collected cleanly.
+ * `gh`/API fetch failures in any block are always recorded here; a
+ * manifest-unavailable same-candidate-files skip (documented on
+ * `loadHighContentionFiles` itself) is a distinct, deliberate degradation
+ * rather than a genuine fetch failure, but it still pushes its own
+ * `collectionWarnings` entry below -- Check 4 must degrade to exact-title-only
+ * for this case exactly as it does for a real `gh`/API failure (Copilot
+ * review finding on PR #2558: an earlier version of this comment claimed
+ * the opposite). This is also why a failure here
+ * never throws out to the caller -- this tier is an optional enhancement
+ * layered onto Check 4, and Check 4's own documented Edge Case ("Timeout on
+ * duplicate detection... fall back to exact title match only") already
+ * anticipates exactly this degradation.
+ */
+export function collectHighConfidenceDuplicateEvidence(
+  owner,
+  repo,
+  repoRef,
+  issue,
+  manifestPath,
+  bundleIds,
+) {
+  const collectionWarnings = [];
+  let closedByMergedPrNumbers = [];
+  let candidateFiles = [];
+  let highContentionFiles = [];
+  let mergedPrs = [];
+  let branchNameMergedPr = null;
+  try {
+    closedByMergedPrNumbers = fetchClosedByMergedPrNumbers(
+      owner,
+      repo,
+      issue.number,
+    );
+  } catch (error) {
+    collectionWarnings.push(
+      `closedByPullRequestsReferences: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    branchNameMergedPr = fetchMergedPrByBranchName(
+      repoRef,
+      computeBranchName(issue.number, issue.title),
+      owner,
+    );
+  } catch (error) {
+    collectionWarnings.push(
+      `branch-name merged-PR lookup: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    candidateFiles = parseCandidateFiles(issue.body);
+    const resolvedHighContentionFiles =
+      candidateFiles.length > 0
+        ? loadHighContentionFiles(manifestPath, bundleIds)
+        : null;
+    const shouldScanMergedPrs =
+      candidateFiles.length > 0 &&
+      resolvedHighContentionFiles !== null &&
+      issue.createdAt.length > 0;
+    highContentionFiles = resolvedHighContentionFiles ?? [];
+    if (candidateFiles.length > 0 && resolvedHighContentionFiles === null) {
+      collectionWarnings.push(
+        'same-candidate-files scan: high-contention manifest unavailable, skipping the scan',
+      );
+    }
+    if (shouldScanMergedPrs) {
+      const scanResult = fetchMergedPrFileOverlapEvidence(
+        repoRef,
+        issue.createdAt,
+        candidateFiles,
+        highContentionFiles,
+        issue.number,
+      );
+      mergedPrs = scanResult.mergedPrs;
+      if (scanResult.truncatedByDeadline) {
+        collectionWarnings.push(
+          'same-candidate-files scan: truncated by MERGED_PR_SCAN_DEADLINE_MS before scanning every merged PR in the window',
+        );
+      }
+    } else {
+      mergedPrs = [];
+    }
+  } catch (error) {
+    collectionWarnings.push(
+      `same-candidate-files scan: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    candidateFiles = [];
+    mergedPrs = [];
+  }
+  return {
+    highConfidenceDuplicate: {
+      closedByMergedPrNumbers,
+      candidateFiles,
+      highContentionFiles,
+      mergedPrs,
+      branchNameMergedPr,
+    },
+    collectionWarnings,
   };
 }
 function runCli() {
@@ -771,12 +3068,18 @@ function runCli() {
     printHelp();
     process.exit(0);
   }
+  // #2102: --body-file/--stdin never touch the network -- resolved before
+  // any of the --issue-only setup below.
+  if (resolveInputMode(args) === 'local') {
+    runLocalCli(args);
+    return;
+  }
   if (args.issue === null || !Number.isInteger(args.issue) || args.issue <= 0) {
     throw new Error('--issue is required and must be a positive integer');
   }
-  if (args.token) {
-    process.env.GH_TOKEN = args.token;
-    process.env.GITHUB_TOKEN = args.token;
+  if (args.ghToken) {
+    process.env.GH_TOKEN = args.ghToken;
+    process.env.GITHUB_TOKEN = args.ghToken;
   }
   const owner =
     args.owner ||
@@ -856,119 +3159,119 @@ function runCli() {
     checkRepositoryFit(preEvidenceContext).pass &&
     checkCoherence(preEvidenceContext).pass &&
     checkTrustSafety(preEvidenceContext).pass;
-  // #1484: high-confidence Check 4 tier evidence. The two mechanical signals
-  // (closedByPullRequestsReferences, and the same-candidate-files merged-PR
-  // scan) are collected in two SEPARATE try/catch blocks (CodeRabbit review
-  // finding on this PR): an earlier version wrapped both in one block, so a
-  // failure collecting the second signal discarded an already-successful
-  // first signal too. Each block's own failure is recorded independently in
-  // `collectionWarnings` and degrades only that one signal to empty/absent
-  // -- never silently reported as "no evidence" (that would mask a
-  // genuinely broken collector as a clean pass), and never discarding a
-  // sibling signal that already collected cleanly. `gh`/API fetch failures
-  // in either block are always recorded here; a manifest-unavailable
-  // same-candidate-files skip is a distinct, deliberate degradation
-  // documented on `loadHighContentionFiles` itself, not a fetch failure, so
-  // it is not added to this list (Copilot review finding on this PR: an
-  // earlier comment overclaimed that every degradation path surfaces here).
-  // This is also why an uncaught failure no longer aborts the entire
-  // 7-check evaluation (Codex review finding on this PR) -- this tier is an
-  // optional enhancement layered onto Check 4, and Check 4's own documented
-  // Edge Case ("Timeout on duplicate detection... fall back to exact title
-  // match only") already anticipates exactly this degradation. Both blocks
-  // below run only when `shouldCollectEvidence` is true (#1815) -- when it
-  // is false, Check 4 is never reached anyway, so `collectionWarnings`
-  // correctly stays empty (this is a deliberate skip, not a collection
-  // failure).
-  const collectionWarnings = [];
-  let closedByMergedPrNumbers = [];
-  let candidateFiles = [];
-  let highContentionFiles = [];
-  let mergedPrs = [];
-  if (shouldCollectEvidence) {
-    try {
-      closedByMergedPrNumbers = fetchClosedByMergedPrNumbers(
-        owner,
-        repo,
-        args.issue,
-      );
-    } catch (error) {
-      collectionWarnings.push(
-        `closedByPullRequestsReferences: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    try {
-      candidateFiles = parseCandidateFiles(issue.body);
-      // Only resolve the high-contention exclusion set (a file read + JSON
-      // parse) when there is a '## Candidate files' section to check it
-      // against -- most issues have none, and the result would otherwise be
-      // discarded.
-      const resolvedHighContentionFiles =
-        candidateFiles.length > 0
-          ? loadHighContentionFiles(
-              args.manifest,
-              args.bundles ?? DEFAULT_BUNDLE_IDS,
-            )
-          : null;
-      const shouldScanMergedPrs =
-        candidateFiles.length > 0 &&
-        resolvedHighContentionFiles !== null &&
-        issue.createdAt.length > 0;
-      highContentionFiles = resolvedHighContentionFiles ?? [];
-      if (candidateFiles.length > 0 && resolvedHighContentionFiles === null) {
-        // Codex P2 review finding: an unreadable/missing high-contention
-        // manifest silently skipped the same-candidate-files scan without
-        // recording a warning -- but from Check 4's perspective this is the
-        // same class of "high-confidence evidence could not be collected" as
-        // a genuine gh/API failure, and must degrade the same way (exact
-        // title match only), not let the full weak heuristic run.
-        collectionWarnings.push(
-          'same-candidate-files scan: high-contention manifest unavailable, skipping the scan',
-        );
-      }
-      if (shouldScanMergedPrs) {
-        const scanResult = fetchMergedPrFileOverlapEvidence(
-          repoRef,
-          issue.createdAt,
-          candidateFiles,
-          highContentionFiles,
-          issue.number,
-        );
-        mergedPrs = scanResult.mergedPrs;
-        if (scanResult.truncatedByDeadline) {
-          // Codex P2 review finding: a deadline-truncated scan returns
-          // normally (not a throw), so it must record its own warning here --
-          // otherwise Check 4 would run the full weak heuristic on
-          // incomplete evidence instead of degrading to exact-title-only.
-          collectionWarnings.push(
-            'same-candidate-files scan: truncated by MERGED_PR_SCAN_DEADLINE_MS before scanning every merged PR in the window',
-          );
-        }
-      } else {
-        mergedPrs = [];
-      }
-    } catch (error) {
-      collectionWarnings.push(
-        `same-candidate-files scan: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      candidateFiles = [];
-      mergedPrs = [];
-    }
-  }
-  const highConfidenceDuplicate = {
-    closedByMergedPrNumbers,
-    candidateFiles,
-    highContentionFiles,
-    mergedPrs,
+  // #1484: high-confidence Check 4 tier evidence, collected by
+  // `collectHighConfidenceDuplicateEvidence` below only when
+  // `shouldCollectEvidence` is true (#1815) -- when it is false, Check 4 is
+  // never reached anyway, so `collectionWarnings` correctly stays empty
+  // (this is a deliberate skip, not a collection failure). See that
+  // function's own doc comment for the per-signal try/catch and
+  // degradation rationale.
+  let collectionWarnings = [];
+  let highConfidenceDuplicate = {
+    closedByMergedPrNumbers: [],
+    candidateFiles: [],
+    highContentionFiles: [],
+    mergedPrs: [],
+    branchNameMergedPr: null,
   };
-  const result = evaluateSuitability(issue, {
+  if (shouldCollectEvidence) {
+    const evidence = collectHighConfidenceDuplicateEvidence(
+      owner,
+      repo,
+      repoRef,
+      issue,
+      args.manifest,
+      args.bundles ?? DEFAULT_BUNDLE_IDS,
+    );
+    highConfidenceDuplicate = evidence.highConfidenceDuplicate;
+    collectionWarnings = evidence.collectionWarnings;
+  }
+  const suitabilityOptions = {
     repository: { owner, repo },
     duplicateCandidates,
     blockedByHumanLabelName: labelsPolicy.blockedByHumanLabelName,
     needsDecisionLabelName: labelsPolicy.needsDecisionLabelName,
+    markerPrefix: resolveMarkerPrefix(policyConfig),
     highConfidenceDuplicate,
     highConfidenceCollectionDegraded: collectionWarnings.length > 0,
-  });
+  };
+  let result = evaluateSuitability(issue, suitabilityOptions);
+  // #2767: only Checks 6-7 (autonomy/verifiability) ever demote (Check 5,
+  // actionability, has no realistically reachable demotion branch --
+  // removed round 17, see `checkActionability`'s own comment), and an
+  // issue that already passes on wording alone never needs the demotion
+  // path -- fetch structural evidence (an extra network round trip: editor
+  // logins plus a live collaborator-permission check) only when the plain
+  // evaluation already failed on one of those two.
+  //
+  // That check-id test alone is not sufficient (Codex review, PR #2840,
+  // round 9): several of Checks 6-7's own failure branches are documented
+  // as "never demote" regardless of evidence -- e.g. Check 6's
+  // blocked-by-human label/marker branches, Check 7's escape-hatch branch
+  // -- so a fetch still ran for a failure that no amount of real structural
+  // evidence could ever flip. `wouldDemoteWithFullEvidence` answers the
+  // general question directly instead of re-deriving, and keeping in sync
+  // with, each check's own internal branch list: re-evaluate locally
+  // (no network) with every signal forced `true` (the strongest possible
+  // evidence); if that still does not pass, the live-fetched evidence --
+  // strictly no stronger than all-true -- cannot pass either, so the fetch
+  // is skipped. Mirrors the fix already applied to
+  // `discover-viability-gate.mts` (commit 4053e95a), generalized here to
+  // cover per-branch (not just per-check) non-demotability.
+  //
+  // Gates on the CURRENT failed check's own result flipping to `warn` in
+  // the all-true re-run, not on the whole re-run's aggregate `.passed`
+  // (Codex review, PR #2840, round 13): `evaluateSuitability` is
+  // fail-fast (CHECKS.mts's `for` loop returns at the first `!pass`), so
+  // when the current failure is demotable but an independent LATER check
+  // also fails on its own (non-demotable) grounds -- e.g. a lexical
+  // autonomy hit followed by Check 7's escape-hatch branch -- the all-true
+  // re-run demotes the current check to `warn` and continues, only to
+  // stop at that later check's own genuine failure, so its aggregate
+  // `.passed` is still `false` even though the fetch IS worth making: the
+  // output's `checks` array (populated for every check the loop actually
+  // reaches, `runCli`'s own `output.checks` below) reports each check's
+  // own `result` regardless of the overall verdict, so live evidence that
+  // demotes the current check to `warn` is real, useful information even
+  // when a later check still blocks overall `passed`.
+  const allTrueStructuralEvidence = {
+    verificationCommand: true,
+    candidateFilesExist: true,
+    trustedEditor: true,
+  };
+  const wouldDemoteWithFullEvidence =
+    !result.passed &&
+    (result.failedCheck === 'autonomy' ||
+      result.failedCheck === 'verifiability') &&
+    evaluateSuitability(issue, {
+      ...suitabilityOptions,
+      structuralEvidence: allTrueStructuralEvidence,
+    }).checks.some(
+      (check) => check.id === result.failedCheck && check.result === 'warn',
+    );
+  if (wouldDemoteWithFullEvidence) {
+    // Same fail-open contract as the `existingRejection` scan above: this
+    // is a detect-only demotion path, not a gate, so a transient GitHub
+    // API failure (rate limit, timeout, an absent GraphQL connection --
+    // `getWorkItemUserContentEdits`/`collaboratorPermission` both throw on
+    // one) must degrade to "no structural evidence" -- keep the plain
+    // `result` computed above unchanged -- rather than crashing the whole
+    // suitability evaluation.
+    try {
+      const structuralEvidence = computeLiveStructuralEvidence(
+        owner,
+        repo,
+        issue,
+        policyConfig,
+      );
+      result = evaluateSuitability(issue, {
+        ...suitabilityOptions,
+        structuralEvidence,
+      });
+    } catch {
+      // Keep the plain `result` from above.
+    }
+  }
   const output = {
     repository: { owner, repo },
     issue: {
@@ -1002,6 +3305,112 @@ function runCli() {
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 /**
+ * #2102: local/offline dry-run core for `--body-file`/`--stdin`, mirroring
+ * `evaluateSuitability`'s split from `runCli`: this is the pure,
+ * exported-and-testable half; `runLocalCli` below is the thin I/O wrapper
+ * (read the file/stdin, call this, print JSON).
+ *
+ * Runs the same exported check functions `evaluateSuitability` calls for
+ * every check except `duplicate_or_superseded` (Check 4), which
+ * fundamentally needs a live `gh api search/issues` query and cannot run
+ * offline -- reported as its own explicit `"not_evaluated"` result value
+ * in every run, never silently omitted and never counted toward a
+ * pass/fail rollup. Unlike `evaluateSuitability`, this never short-circuits
+ * on the first failing check: a dry-run's whole purpose is surfacing every
+ * check's verdict in one pass, not the live path's checks-are-expensive
+ * early-exit (no check here does network I/O, so there is no cost to
+ * avoid).
+ *
+ * The return value has no `outcome` field at all, and no aggregate
+ * `passed` value: `mode: "local"` plus a per-check `checks[]` array is the
+ * entire contract, so a caller cannot mistake a six-of-seven local pass
+ * for a live `--issue <n>` verdict -- the same class of category error
+ * this repository's own prior finding flagged for
+ * `audit-authored-issue.mjs` (a structural-lint pass is not a
+ * `suitability-triage.mjs` semantic pass); this must not repeat one level
+ * down. Always returns every check's full evidence; `runLocalCli` applies
+ * the same verbose/non-verbose evidence filtering the live path uses.
+ */
+export function evaluateSuitabilityLocal(bodyText, options = {}) {
+  const { title, body } = splitLocalDraftTitleAndBody(bodyText);
+  const localIssue = {
+    number: 0,
+    title,
+    body,
+    state: 'draft',
+    labels: [],
+    url: '',
+    // #2102 Copilot review: none of the six local checks read `createdAt`
+    // (only checkDuplicateOrSuperseded does, and that check never runs
+    // locally) -- a wall-clock timestamp here would make this "pure"
+    // evaluation nondeterministic for no benefit.
+    createdAt: '',
+    // #2767: no live author in local/offline mode -- keeps this path from
+    // ever demoting (see `NormalizedIssue.author`'s doc comment).
+    author: '',
+  };
+  const context = {
+    issue: localIssue,
+    repository: null,
+    duplicateCandidates: [],
+    trustSafetyAmbiguous: false,
+    blockedByHumanLabelName: normalizeConfiguredLabelName(
+      options.blockedByHumanLabelName,
+      POLICY_DEFAULTS.labels.blockedByHumanLabelName,
+    ),
+    needsDecisionLabelName: normalizeConfiguredLabelName(
+      options.needsDecisionLabelName,
+      POLICY_DEFAULTS.labels.needsDecisionLabelName,
+    ),
+    markerPrefix: normalizeMarkerPrefix(options.markerPrefix),
+  };
+  const checks = CHECKS.map((check) => {
+    if (check.id === 'duplicate_or_superseded') {
+      return {
+        id: check.id,
+        name: check.name,
+        result: 'not_evaluated',
+        evidence:
+          'Local dry-run mode has no live GitHub search index; this check cannot run offline.',
+      };
+    }
+    const outcome = check.evaluate(context);
+    return {
+      id: check.id,
+      name: check.name,
+      result: outcome.pass ? 'pass' : 'fail',
+      evidence: outcome.evidence,
+      ...(outcome.tier ? { tier: outcome.tier } : {}),
+    };
+  });
+  return { mode: 'local', issue: { title }, checks };
+}
+function runLocalCli(args) {
+  const bodyText = args.stdin
+    ? readFileSync(0, 'utf8')
+    : readFileSync(resolve(process.cwd(), args.bodyFile), 'utf8');
+  const policyConfig = loadPolicy(args.policy);
+  const labelsPolicy = normalizePolicyConfig(policyConfig).labels;
+  const result = evaluateSuitabilityLocal(bodyText, {
+    blockedByHumanLabelName: labelsPolicy.blockedByHumanLabelName,
+    needsDecisionLabelName: labelsPolicy.needsDecisionLabelName,
+    markerPrefix: resolveMarkerPrefix(policyConfig),
+  });
+  const output = {
+    mode: result.mode,
+    issue: result.issue,
+    checks: args.verbose
+      ? result.checks
+      : result.checks.map((check) => ({
+          id: check.id,
+          name: check.name,
+          result: check.result,
+          ...(check.tier ? { tier: check.tier } : {}),
+        })),
+  };
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+}
+/**
  * Restores this file's pre-#1450 permissive `Number.parseInt` contract:
  * absent resolves to `null` (the original `issue: null` default, never
  * overwritten when `--issue` is absent); present feeds the raw token
@@ -1022,11 +3431,70 @@ function runCli() {
 function parseLenientIntegerOrNull(token) {
   return token === undefined ? null : Number.parseInt(token, 10);
 }
+function warnDeprecatedFlag(deprecated, canonical) {
+  process.stderr.write(
+    `warning: ${deprecated} is deprecated; use ${canonical} instead.\n`,
+  );
+}
+/**
+ * Find `flag`'s last occurrence in `argv`, recognizing both the
+ * two-token form (`--flag value`) and the single-token `--flag=value`
+ * form `parseCliArgs` also accepts.
+ */
+function findLastFlagOccurrenceIndex(argv, flag) {
+  const equalsPrefix = `${flag}=`;
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    if (argv[index] === flag || argv[index].startsWith(equalsPrefix)) {
+      return index;
+    }
+  }
+  return -1;
+}
+/**
+ * Resolve a canonical/deprecated flag pair: whichever flag's LAST
+ * occurrence comes later in argv wins when both spellings are given
+ * together (matches `pre-merge-readiness.mts`'s `--claim-id` /
+ * `--expected-claim-id` precedent). `-1` (never given) sorts before any
+ * real index, so an absent flag never wins against one that was
+ * actually passed.
+ */
+function resolveLastGivenAlias(
+  argv,
+  canonicalFlag,
+  canonicalValue,
+  deprecatedFlag,
+  deprecatedValue,
+) {
+  if (canonicalValue === undefined) {
+    return deprecatedValue;
+  }
+  if (deprecatedValue === undefined) {
+    return canonicalValue;
+  }
+  const lastCanonicalIndex = findLastFlagOccurrenceIndex(argv, canonicalFlag);
+  const lastDeprecatedIndex = findLastFlagOccurrenceIndex(argv, deprecatedFlag);
+  return lastDeprecatedIndex > lastCanonicalIndex
+    ? deprecatedValue
+    : canonicalValue;
+}
 export function parseArgs(argv) {
   const { values, help } = parseCliArgs(argv, SUITABILITY_TRIAGE_FLAG_SPEC);
+  const ghToken = resolveLastGivenAlias(
+    argv,
+    '--gh-token',
+    values['gh-token'],
+    '--token',
+    values.token,
+  );
+  const deprecatedTokenValue = values.token;
+  if (deprecatedTokenValue !== undefined) {
+    warnDeprecatedFlag('--token', '--gh-token');
+  }
   return {
     issue: parseLenientIntegerOrNull(values.issue),
-    token: values.token,
+    bodyFile: values['body-file'],
+    stdin: values.stdin,
+    ghToken: ghToken ?? '',
     owner: values.owner,
     repo: values.repo,
     policy: values.policy,
@@ -1058,7 +3526,21 @@ function loadPolicy(policyPath) {
 }
 function printHelp() {
   process.stdout.write(`Usage:
-  node scripts/suitability-triage.mjs --issue <number> [--token <token>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--manifest <path>] [--bundles <id1,id2>] [--verbose] [--help]
+  node scripts/suitability-triage.mjs --issue <number> [--gh-token <token>] [--owner <owner>] [--repo <repo>] [--policy <path>] [--manifest <path>] [--bundles <id1,id2,...>] [--verbose] [--help]
+  node scripts/suitability-triage.mjs (--body-file <path> | --stdin) [--policy <path>] [--verbose] [--help]
+  Deprecated aliases (one release): --token -> --gh-token
+
+--issue, --body-file, and --stdin are mutually exclusive; exactly one is
+required. --body-file/--stdin (#2102) run a local, offline dry-run against
+a drafted issue's text before it is ever published: six of the seven
+checks (every check except duplicate_or_superseded, Check 4, which
+fundamentally needs a live search index) run against the same exported
+check functions the live --issue path uses. A leading "# Title" line in
+the supplied text is extracted as the title; everything else, minus any
+blank lines immediately after the title, is the body. See "Local mode
+output schema" below -- it is a distinct, deliberately
+incompatible shape from the live --issue output directly below it, so a
+local dry-run result can never be mistaken for a live verdict.
 
 --manifest / --bundles override the Check 4 high-confidence tier's
 high-contention exclusion set (default: the same manifest path and bundle
@@ -1066,7 +3548,7 @@ IDs as discover-shared-file-overlap.mjs's own --manifest/--bundles), so a
 repository that customizes its A4 Step 2 contention bundles gets a matching
 Check-4 exclusion set instead of a stale hardcoded default.
 
-Output schema:
+Live (--issue) output schema:
 {
   "repository": {"owner": "...", "repo": "..."},
   "issue": {"number": 392, "title": "...", "state": "OPEN", "url": "..."},
@@ -1074,13 +3556,27 @@ Output schema:
   "outcome": "ready|unclear|needs-decision|blocked-by-human|duplicate|out-of-scope|invalid",
   "failedCheck": "repository_fit|...|null",
   "existingRejection": {"author":"...","createdAt":"...","url":"...","outcome":"...|null","check":"...|null"},
-  "checks": [{"id":"repository_fit","name":"Repository Fit","result":"pass|fail","evidence":"..."}]
+  "checks": [{"id":"repository_fit","name":"Repository Fit","result":"pass|warn|fail","evidence":"..."}]
 }
 
 Each checks[] entry may also carry "tier":"high-confidence|weak" -- present
 only on a duplicate_or_superseded fail (absent on every pass and on every
 other check), distinguishing a high-confidence mechanical hit from the weak
 title/declaration heuristic.
+
+A checks[] entry's "result" is "warn" (#2767) only for autonomy or
+verifiability, and only when a lexical-pattern fail was demoted to a
+passed, annotated result because every structural-evidence signal
+(triage-structural-evidence.mts: a runnable verification command, an
+existing candidate file, a fully trusted author+editor set) held for
+this issue; it counts as a pass for "passed"/"outcome"/"failedCheck" but
+is worth a human's attention when composing an A4.5 rejection comment for
+a DIFFERENT check that still failed outright. actionability has no
+reachable demotion branch (#2767 round 17): its own pass condition
+already accepts any body containing the bare phrase "Acceptance
+Criteria"/"Output"/"Deliverables", a strict superset of what the
+verificationCommand signal itself requires. Never emitted in local
+(--body-file/--stdin) mode, which has no live author/editors to trust.
 
 "existingRejection" (#1887) is present only when a trusted marker actor
 already posted a correctly-formatted "A4.5 suitability gate rejection"
@@ -1089,10 +3585,68 @@ Absent (not null) for the common never-triaged case, and never surfaced for
 a rejection-shaped comment from an untrusted actor. An optional sibling
 "existingRejectionCollectionWarnings" array is present only when fetching
 or scanning the comment thread itself failed.
+
+Local (--body-file/--stdin) output schema (#2102):
+{
+  "mode": "local",
+  "issue": {"title": "..."},
+  "checks": [
+    {"id":"repository_fit","name":"Repository Fit","result":"pass|fail","evidence":"..."},
+    {"id":"coherence","name":"Issue Coherence","result":"pass|fail","evidence":"..."},
+    {"id":"trust_safety","name":"Trust/Safety","result":"pass|fail","evidence":"..."},
+    {"id":"duplicate_or_superseded","name":"Duplicate or Superseded Work","result":"not_evaluated","evidence":"..."},
+    {"id":"actionability","name":"Actionability","result":"pass|fail","evidence":"..."},
+    {"id":"autonomy","name":"Autonomy","result":"pass|fail","evidence":"..."},
+    {"id":"verifiability","name":"Verifiability","result":"pass|fail","evidence":"..."}
+  ]
+}
+
+There is no "passed", "outcome", or "failedCheck" field in local mode, and
+no aggregate rollup of any kind: "duplicate_or_superseded" always reports
+"not_evaluated" and is never counted toward a pass/fail verdict, so a
+caller must inspect each checks[] entry individually rather than infer an
+overall suitability outcome from a local run.
+
+Like the live path, each entry's "evidence" is present only with
+--verbose; the schema above shows every field a checks[] entry can carry,
+not what a default (non-verbose) run actually returns.
 `);
+}
+/**
+ * #2102: split a locally-drafted `--body-file`/`--stdin` text blob into a
+ * title and a body, for the local dry-run mode. `audit-authored-issue.mts`
+ * has no equivalent split -- it validates body structure only, never a
+ * title -- so this convention is new here, not reused from that file.
+ *
+ * A leading `# Title` line (a single Markdown H1, the common convention
+ * for a drafted issue file that mirrors what GitHub's own title field will
+ * hold) is extracted as the title -- any blank lines *before* it are
+ * skipped first, so it need not be the literal first line, only the first
+ * non-blank content, and it needs no trailing newline of its own (a draft
+ * whose entire content is `# Title` still extracts correctly). Any blank
+ * lines immediately following the H1 line are also consumed so the
+ * remaining body does not start with stray leading blank lines. Anything
+ * else -- no H1, or an H1 preceded by non-blank content -- leaves the
+ * title empty and the entire input becomes the body unchanged:
+ * `checkCoherence` and the other checks below already tolerate an empty
+ * title (see the live path's own `normalizeIssue`, which defaults a
+ * genuinely missing title to `''`), so under-splitting fails safe rather
+ * than guessing.
+ */
+export function splitLocalDraftTitleAndBody(text) {
+  const match = text.match(
+    /^(?:[ \t]*\r?\n)*[ \t]*#[ \t]+(\S[^\n]*?)[ \t]*(?:\r?\n|$)/,
+  );
+  if (!match) {
+    return { title: '', body: text };
+  }
+  const title = match[1] ?? '';
+  const rest = text.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, '');
+  return { title, body: rest };
 }
 function normalizeIssue(issue) {
   const i = issue ?? {};
+  const authorLogin = i.user?.login;
   return {
     number: Number.parseInt(String(i.number), 10),
     title: String(i.title ?? ''),
@@ -1101,6 +3655,7 @@ function normalizeIssue(issue) {
     labels: normalizeLabels(i.labels),
     url: String(i.url ?? i.html_url ?? ''),
     createdAt: String(i.created_at ?? ''),
+    author: typeof authorLogin === 'string' ? authorLogin : '',
   };
 }
 /**
@@ -1111,6 +3666,28 @@ function normalizeIssue(issue) {
  * `evaluateHighConfidenceDuplicate` special-cases `undefined` for exactly
  * this reason). Every array field defaults to `[]` on a malformed shape.
  */
+/** #2767: `undefined` unless `raw` is a well-formed `StructuralEvidence`
+ * object -- a malformed value degrades to "no structural evidence" (never
+ * demotes) rather than throwing, matching every other `normalize*`
+ * helper's tolerant-input contract in this file. */
+function normalizeStructuralEvidence(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const r = raw;
+  if (
+    typeof r.verificationCommand !== 'boolean' ||
+    typeof r.candidateFilesExist !== 'boolean' ||
+    typeof r.trustedEditor !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    verificationCommand: r.verificationCommand,
+    candidateFilesExist: r.candidateFilesExist,
+    trustedEditor: r.trustedEditor,
+  };
+}
 function normalizeHighConfidenceDuplicateInput(raw) {
   if (!raw || typeof raw !== 'object') {
     return undefined;
@@ -1123,7 +3700,22 @@ function normalizeHighConfidenceDuplicateInput(raw) {
     candidateFiles: normalizeStringArray(r.candidateFiles),
     highContentionFiles: normalizeStringArray(r.highContentionFiles),
     mergedPrs: normalizeHighConfidenceMergedPrs(r.mergedPrs),
+    branchNameMergedPr: normalizeBranchNameMergedPr(r.branchNameMergedPr),
   };
+}
+/** #2313: normalize the Signal 3 options-boundary field the same fail-safe
+ * way as every other field here -- a malformed shape degrades to `null`
+ * (no evidence), never a crash or a manufactured match. */
+function normalizeBranchNameMergedPr(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const v = value;
+  const number = Number(v.number);
+  if (!Number.isInteger(number) || number <= 0) {
+    return null;
+  }
+  return { number, mergedAt: String(v.mergedAt ?? '') };
 }
 function normalizePositiveIntArray(value) {
   if (!Array.isArray(value)) {
@@ -1174,6 +3766,16 @@ function normalizeConfiguredLabelName(labelName, fallback) {
   return typeof labelName === 'string' && labelName.length > 0
     ? labelName
     : fallback;
+}
+// #2737: mirrors discover-readiness-check.mts's `resolveMarkerPrefix` --
+// `normalizePolicyConfig`/`labelsPolicy` has no `markerPrefix` field, so
+// this reads the raw loaded config directly, same as every other
+// consumer of the top-level `markerPrefix` config key.
+function resolveMarkerPrefix(config) {
+  const prefix = config?.markerPrefix;
+  return typeof prefix === 'string' && prefix.length > 0
+    ? prefix
+    : DEFAULT_MARKER_PREFIX;
 }
 function normalizeRepository(repository) {
   if (!repository || typeof repository !== 'object') {
@@ -1226,6 +3828,148 @@ function normalizeText(value) {
 function fetchIssue(repoRef, issueNumber) {
   const issue = ghJson(['api', `repos/${repoRef}/issues/${issueNumber}`]);
   return normalizeIssue(issue);
+}
+/**
+ * #2767: the editor logins GraphQL `Issue.userContentEdits` records, for
+ * the `trustedEditor` structural-evidence signal -- `null` for a
+ * deleted/ghost editor account, same contract as
+ * `provider-adapter-github.mts`'s `getWorkItemUserContentEdits`. This
+ * file is not yet migrated onto `provider-port.mts` (see
+ * `tests/provider-port-migration-guard.test.mts`'s `MIGRATED_HELPERS`
+ * list), so it makes its own direct `gh api graphql` call rather than
+ * adopting the port abstraction mid-issue; the query and its pagination
+ * (Codex/CodeRabbit review, PR #2840) mirror that adapter's own.
+ */
+function fetchUserContentEditors(owner, repo, issueNumber) {
+  const allNodes = [];
+  let before = null;
+  for (let page = 0; page < USER_CONTENT_EDITORS_MAX_PAGES; page += 1) {
+    const query = `query($owner:String!,$repo:String!,$number:Int!,$before:String){
+  repository(owner:$owner,name:$repo){
+    issue(number:$number){
+      userContentEdits(last:100, before:$before){
+        pageInfo { hasPreviousPage startCursor }
+        nodes { editor { login } }
+      }
+    }
+  }
+}`;
+    const apiArgs = [
+      'api',
+      'graphql',
+      ...(resolveGhApiHostname() ? ['--hostname', resolveGhApiHostname()] : []),
+      '-f',
+      `query=${query}`,
+      '-f',
+      `owner=${owner}`,
+      '-f',
+      `repo=${repo}`,
+      '-F',
+      `number=${issueNumber}`,
+    ];
+    // Omit `before` entirely on the first page -- an empty-string `-f
+    // before=` would send a literal empty-string cursor to GraphQL, not
+    // "unset" (mirrors provider-adapter-github.mts's own `after` handling).
+    if (before) {
+      apiArgs.push('-f', `before=${before}`);
+    }
+    const parsed = ghJson(apiArgs);
+    // Codex review (PR #2840, this round): `gh api graphql` exits non-zero
+    // on a schema-level error, but a resolver-level failure can still come
+    // back as HTTP 200 with a non-empty top-level `errors` array alongside
+    // a *partial* `userContentEdits.nodes` -- the same shape
+    // `fetchClosedByMergedPrNumbers` above already guards against.
+    // Accepting that partial page as complete could omit an older
+    // untrusted editor while `pageInfo.hasPreviousPage` still reads
+    // `false`/absent, wrongly satisfying `trustedEditor`; throw so the
+    // caller's fail-open catch (never "zero editors") runs instead.
+    if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+      throw new Error(
+        `userContentEdits GraphQL response returned errors: ${JSON.stringify(parsed.errors)}`,
+      );
+    }
+    // Codex review (PR #2840): reject an absent connection/nodes array
+    // instead of defaulting to `[]` -- treating a genuine read failure (a
+    // deleted/inaccessible issue between the earlier REST fetch and this
+    // call, or a malformed response) as "zero edits" would silently let a
+    // real failure through as a false trustedEditor signal, since the
+    // caller's fail-open catch never runs when this function does not
+    // throw.
+    const connection = parsed.data?.repository?.issue?.userContentEdits;
+    if (!connection || !Array.isArray(connection.nodes)) {
+      throw new Error(
+        'userContentEdits: issue, connection, or nodes is null/absent',
+      );
+    }
+    allNodes.push(...connection.nodes);
+    if (connection.pageInfo?.hasPreviousPage !== true) {
+      return allNodes.map((node) =>
+        typeof node?.editor?.login === 'string' ? node.editor.login : null,
+      );
+    }
+    const startCursor = connection.pageInfo?.startCursor;
+    if (typeof startCursor !== 'string' || !startCursor) {
+      throw new Error(
+        'userContentEdits: hasPreviousPage is true but startCursor is absent',
+      );
+    }
+    before = startCursor;
+  }
+  throw new Error(
+    `userContentEdits: exceeded ${USER_CONTENT_EDITORS_MAX_PAGES} pages without reaching the start of the connection`,
+  );
+}
+/**
+ * #2767 live CLI wiring: builds the trust predicate from this
+ * repository's configured `trustedMarkerActors` plus a live
+ * collaborator-permission check, then computes the structural-evidence
+ * signal for `issue`.
+ *
+ * Checks the two local-only signals (`verificationCommand`,
+ * `candidateFilesExist` -- both computable from `issue.body` alone, no
+ * network) before touching the network at all (Codex review, PR #2840,
+ * round 12): `runCli`'s own `wouldDemoteWithFullEvidence` sentinel only
+ * gates whether this function is called at all (is demotion *ever*
+ * possible for this failure branch); it says nothing about whether
+ * *this specific issue's real body* actually satisfies the two local
+ * signals. Demotion requires all three signals together, so either one
+ * being false already makes the live `fetchUserContentEditors` fetch (a
+ * paginated GraphQL round trip) and the collaborator-permission lookup
+ * wasted network cost for no possible change in outcome -- the same
+ * fix already applied to `discover-viability-gate.mts`'s own
+ * `computeLiveStructuralEvidence` (commit fb7efc8f).
+ */
+function computeLiveStructuralEvidence(owner, repo, issue, policyConfig) {
+  const body = issue.body;
+  const verificationCommand = hasVerificationCommandSignal(body);
+  const candidateFilesExist = candidateFilesExistOnDisk(body, existsSync);
+  if (!verificationCommand || !candidateFilesExist) {
+    return { verificationCommand, candidateFilesExist, trustedEditor: false };
+  }
+  const { actors: trustedMarkerLogins } = resolveTrustedMarkerActors({
+    envValue: process.env.IDD_TRUSTED_MARKER_ACTORS ?? '',
+    config: policyConfig,
+  });
+  const collaboratorCache = new Map();
+  const isTrustedLogin = buildTrustedLoginPredicate(
+    trustedMarkerLogins,
+    (login) => {
+      const { permission } = collaboratorPermission(
+        owner,
+        repo,
+        login,
+        collaboratorCache,
+      );
+      return permission === 'admin' || permission === 'write';
+    },
+  );
+  return evaluateStructuralEvidence({
+    body,
+    author: issue.author,
+    editorLogins: fetchUserContentEditors(owner, repo, issue.number),
+    isTrustedLogin,
+    existsAt: existsSync,
+  });
 }
 function fetchDuplicateCandidates(repoRef, issue) {
   const escapedTitle = issue.title.replaceAll('"', '\\"');
@@ -1291,7 +4035,7 @@ function fetchIssueComments(repoRef, issueNumber) {
  * remaining work would still show its old merged closing PR and get
  * misclassified as a completed duplicate (Codex review finding on this PR).
  */
-function fetchClosedByMergedPrNumbers(owner, repo, issueNumber) {
+export function fetchClosedByMergedPrNumbers(owner, repo, issueNumber) {
   const parsed = ghJson(buildClosedByMergedPrArgs(owner, repo, issueNumber));
   // `gh api graphql` exits non-zero (throwing via runGh) on a schema-level
   // query error, but a GraphQL response can also return HTTP 200 with a
@@ -1315,6 +4059,43 @@ function fetchClosedByMergedPrNumbers(owner, repo, issueNumber) {
     .filter((node) => String(node?.state ?? '') === 'MERGED')
     .map((node) => Number.parseInt(String(node?.number ?? ''), 10))
     .filter((n) => Number.isInteger(n) && n > 0);
+}
+/**
+ * #2313, Signal 3: exact-match branch-name lookup. `--head` filters
+ * server-side by head branch NAME only -- `gh pr list --help` documents
+ * that `"<owner>:<branch>" syntax` is "not supported" -- so a merged PR
+ * from a FORK using the same branch name can also come back (Copilot
+ * review finding on this PR). `owner` (the repository owner, not the fork
+ * contributor) is required so every entry can be filtered to
+ * `headRepositoryOwner.login === owner` before being treated as a hit;
+ * `buildMergedPrByBranchArgs` requests that field and a `--limit` above 1
+ * for exactly this reason. Still iterates rather than indexing `[0]`
+ * directly, matching the rest of this file's "never trust the shape of a
+ * `gh` JSON response" convention.
+ */
+export function fetchMergedPrByBranchName(repoRef, branchName, owner) {
+  const list = ghJsonArray(buildMergedPrByBranchArgs(repoRef, branchName));
+  const normalizedOwner = owner.trim().toLowerCase();
+  for (const entry of list) {
+    const number = Number.parseInt(String(entry?.number ?? ''), 10);
+    if (!Number.isInteger(number) || number <= 0) {
+      continue;
+    }
+    if (String(entry?.headRefName ?? '') !== branchName) {
+      continue;
+    }
+    const headOwner = String(entry?.headRepositoryOwner?.login ?? '')
+      .trim()
+      .toLowerCase();
+    if (!headOwner || headOwner !== normalizedOwner) {
+      // A fork's PR (or a response missing headRepositoryOwner) never
+      // counts as a hit -- fail-safe, matching this file's "never fail
+      // toward a false high-confidence flag" contract.
+      continue;
+    }
+    return { number, mergedAt: String(entry?.mergedAt ?? '') };
+  }
+  return null;
 }
 /**
  * Bounded two-step merged-PR file-overlap scan (list, then per-PR file
@@ -1519,6 +4300,15 @@ export function loadHighContentionFiles(manifestPath, bundleIds) {
 }
 function ghJson(args) {
   return JSON.parse(runGh(args).trim() || '{}');
+}
+// Relocated from discover-shared-file-overlap.mts (#2266): that file's own
+// `gh` usage moved onto provider-port.mts, but this array-safe parser had no
+// port-shaped equivalent this file's two `gh api`/`gh pr list` array call
+// sites (buildMergedPrByBranchArgs, buildMergedPrListArgs) could move onto,
+// so it moves here instead of being deleted -- its only remaining consumer.
+function ghJsonArray(args) {
+  const parsed = JSON.parse(runGh(args).trim() || '[]');
+  return Array.isArray(parsed) ? parsed : [];
 }
 function runGh(args) {
   try {

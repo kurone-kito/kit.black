@@ -10,17 +10,12 @@ import {
   normalizeAutopilotSuitabilityFloor,
   parseAutopilotSuitability,
 } from './autopilot-suitability.mjs';
+import { stripLeadingArgumentSeparator } from './cli-args.mjs';
 import {
   buildRoadmapMarkerResolver,
   evaluateDiscoverReadiness,
 } from './discover-readiness-check.mjs';
 import { effortOrdinal, parseEffort } from './effort.mjs';
-import {
-  GH_TEXT_LOOP_OPTIONS,
-  ghText,
-  ghTextAsync,
-  withBoundedRetry,
-} from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
 import { stripMarkdownCodeRegions } from './markdown-code.mjs';
 import {
@@ -33,6 +28,10 @@ import {
   resolveActiveClaim,
   resolveTrustedMarkerActors,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // GitHub's search API returns at most 1000 results for a single query. The
@@ -46,38 +45,6 @@ const GH_SEARCH_RESULT_CAP = 1000;
 // (or the `concurrency` option) tunes it, and `1` runs the fetches serially
 // (one in flight at a time).
 const DEFAULT_TRAVERSAL_CONCURRENCY = 8;
-// #1449: explicit above the promisified execFile's 1 MiB default. Applied
-// PER STREAM (confirmed empirically: a 6 MiB stdout plus a 6 MiB stderr,
-// 12 MiB combined, succeeds under this 10 MiB value) — worst-case buffered
-// memory is up to ~2x this bound (stdout and stderr each maxed
-// independently), not this value as a combined total. The two hot-path
-// callers (a single GitHub issue's REST JSON — body capped at 64 KiB by
-// GitHub — and a paginated 100-node sub-issue GraphQL page) stay far below
-// this on either stream; 10 MiB per stream is a generous ceiling that
-// still bounds worst-case memory instead of accepting the old
-// accumulation's unbounded growth (Copilot review, #1463).
-const GH_ASYNC_MAX_BUFFER = 10 * 1024 * 1024;
-/**
- * Async `gh` invocation used ONLY by the traversal hot-path loaders
- * (`buildIssueLoader` / `buildSubIssueLoader`). Unlike the blocking sync
- * runner — which serializes even concurrent `await`s because it holds the
- * event loop — {@link ghTextAsync} lets multiple `gh` subprocesses run in
- * parallel; the actual in-flight bound is enforced by the prefetch crawl's
- * `mapPool` using the resolved `concurrency` (default
- * {@link DEFAULT_TRAVERSAL_CONCURRENCY}). The non-hot-path callers (owner/repo
- * resolution, claim-state comments, `--all-roadmaps` search) keep the sync
- * runner, so their behavior is byte-unchanged.
- *
- * #1675: delegates to gh-exec.mts's shared `ghTextAsync` (extracted from
- * this function's own #1449 `promisify(execFile)` implementation) instead
- * of spawning `gh` directly, so this hot path also gets the shared default
- * timeout. `.trim()`ed stdout is a behavior-preserving change here: every
- * caller of `runGhCapture` already trims (or `JSON.parse`s, which ignores
- * surrounding whitespace) its result.
- */
-function runGhCapture(args) {
-  return ghTextAsync(args, { maxBuffer: GH_ASYNC_MAX_BUFFER });
-}
 // Policy default claim stale age (`claimTiming.staleAge`, `PT24H`). Mirrors
 // the default baked into protocol-helpers' `isStaleAt`, so when the configured
 // stale age equals this default the shared `isStaleAt` path is
@@ -90,26 +57,101 @@ const DEFAULT_CLAIM_HEARTBEAT_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const INACCESSIBLE_ISSUE_SENTINEL = Object.freeze({
   __iddLookupStatus: 'inaccessible',
 });
-const INACCESSIBLE_HTTP_STATUSES = new Set([403, 410, 451]);
+// #1964/#1968: `(?<!-)` rejects a keyword immediately after a hyphen (e.g.
+// "auto-close", "re-close") rather than trying to make negation detection
+// cross the hyphen boundary — GitHub itself does not recognize a compound
+// hyphenated word as a closing keyword, so this also matches real close
+// semantics, not just this repo's own heuristic.
 const KEYWORD_REFERENCE_REGEX =
-  /\b(Closes|Close|Closed|Fixes|Fixed|Fix|Resolves|Resolved|Resolve|Refs|Ref|Depends on|Blocked by|Sub-issue|Sub issue)\b/giu;
-const SUB_ISSUES_QUERY = `
-query($owner:String!, $repo:String!, $number:Int!, $after:String) {
-  repository(owner:$owner, name:$repo) {
-    issue(number:$number) {
-      subIssues(first:100, after:$after) {
-        nodes {
-          number
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  }
-}
-`;
+  /(?<!-)\b(Closes|Close|Closed|Fixes|Fixed|Fix|Resolves|Resolved|Resolve|Refs|Ref|Depends on|Blocked by|Sub-issue|Sub issue)\b/giu;
+// #1964: a recognized closing/dependency/sub-issue keyword sitting next to a
+// `#N` reference inside a negation clause (e.g. issue 1931's own merged
+// body — a field-report narrative about an unrelated already-closed
+// roadmap, not a real relationship) must not become a graph edge.
+// Reclassifying alone is not enough: `visitIssue` below traverses every
+// edge's target regardless of `relationship`, so the target would still
+// enter the graph as a node and still trip `idd-roadmap-audit-execute`'s
+// nested-roadmap blocker. The match is instead dropped entirely — see the
+// `isNegatedKeywordMatch` call site.
+//
+// This is a bounded lexical heuristic over clause-local negation, not a
+// grammar parser: it recognizes a fixed set of negation terms and
+// contractions in a short end-anchored token window, not arbitrary English
+// negation syntax. New negation phrasings this window doesn't cover are a
+// documented scope boundary, not an open-ended obligation to keep chasing
+// (see issue 1968's own review history: `not`/`never`/`cannot`/`no
+// longer`/modal contractions, hyphenated compounds, and clause-boundary
+// conjunctions are the covered set; matching this pattern is deliberately
+// not the standard this codebase holds itself to for its own review
+// process, "cite the observed incident" style — it holds itself to
+// covering only what's been empirically demonstrated).
+//
+// Deliberately end-anchored (`\s+(?:tok\s+){0,2}$`, at most two intervening
+// word tokens, no intervening punctuation) rather than "negation anywhere in
+// a fixed-size window" like suitability-triage.mts's looser `NEGATION_PATTERN`
+// / `DUPLICATE_NEGATION_PATTERN` (which have their own known false-positive
+// history in this repo): a loose match would also swallow a genuine close,
+// e.g. "The workaround did not work; closes #42" — the semicolon breaks the
+// required unbroken token chain, so that case still keeps its real edge
+// regardless of how much text precedes it. Bounded structurally by token
+// count (at most 3 total: the negation term plus up to two intervening word
+// tokens) rather than by a character-count slice — an earlier revision used a
+// fixed 30-char slice, which silently dropped the negation term itself for
+// long intervening words ("would not unconditionally automatically close" —
+// "not" fell outside the slice — recreating the exact false-positive edge
+// this fix exists to prevent).
+//
+// Each intervening token is itself excluded from matching a contrastive
+// conjunction (`but`/`however`/`yet`): without this, "This never closes but
+// refs #44" would count "closes" and "but" as the two allowed intervening
+// words and wrongly treat the following `refs` as negated too — a
+// conjunction ends the negation's clause instead of participating in it.
+//
+// The `(?!\s+(?:only|merely|just|simply)\b)` guard is attached to the whole
+// negation-term alternation (bare `not` and every contraction alike, not
+// just bare `not`) so it excludes "not only …", "doesn't just …", "not
+// merely …", and "not simply …" but-also-style additive correlative
+// constructions uniformly — none of those is a real negation, e.g. "This
+// doesn't just fix #42 but also resolves #43" must keep the edge to #42
+// regardless of which negation form introduces the clause.
+//
+// #1970: the token-count bound above also lets `isNegatedKeywordMatch` test a
+// small, fixed-size *token* window instead of rescanning the whole line
+// prefix per match (the prior approach was quadratic — see that function's
+// doc comment). This is NOT the same class of bug as the 30-char fixed
+// *character* slice mentioned above: the earlier bug truncated by byte
+// count, which can slice through the middle of a long word; the windowing
+// here is bounded by whitespace-delimited *token count* (at most 4: the
+// negation term — up to 2 tokens for "no longer" — plus up to 2 intervening
+// tokens), so it always keeps whole tokens intact regardless of their
+// length.
+const KEYWORD_NEGATION_PATTERN =
+  /\b(?:not|never|cannot|no longer|(?:has|have|had|ca|do|does|did|is|was|are|were|wo|would|should|could|must|might|sha)n['’]t)(?!\s+(?:only|merely|just|simply)\b)\s+(?:(?!(?:but|however|yet)\b)\w+\s+){0,2}$/iu;
+// #1970: KEYWORD_NEGATION_PATTERN's own grammar (above) bounds any match to
+// at most 4 whitespace-delimited tokens before the matched keyword — the
+// negation term is at most 2 tokens ("no longer"; every other alternative is
+// 1 token, though it may sit glued to preceding punctuation within its own
+// token, e.g. "note,not"), plus at most 2 intervening tokens (`{0,2}`), and
+// the pattern's own `\s+` requirement means a match always ends at a token
+// boundary. 6 gives 2 tokens of margin over that proven bound, so slicing
+// from the start of the token 6 positions back (instead of from line start)
+// can never change whether `KEYWORD_NEGATION_PATTERN` matches — see
+// `isNegatedKeywordMatch`'s doc comment for the full argument.
+const NEGATION_LOOKBACK_TOKENS = 6;
+// #2236: a `Refs #NNN (non-blocking)` segment is a deliberately
+// informational reference -- distinct from a plain `Refs #NNN`, whose
+// target still enters the graph as a traversed node today (A2's own
+// documented traversal sources list "Closes #NNN, Refs #NNN, explicit
+// sub-issue lines" as equally allowed, with no relationship-based
+// exemption). Scoped to the keyword-matched *segment* (the text between
+// this keyword match and the next), not the whole line, so a line mixing
+// a blocking keyword and a non-blocking `Refs` mention (e.g. "Blocked by
+// #100. Also refs #101 (non-blocking).") only marks the `Refs` segment's
+// own targets non-blocking -- see the `classifyKeywordRelationship` call
+// site below, which applies this only when the keyword itself already
+// classified as 'reference' (Refs/Ref), never to Blocked-by/Depends-on/
+// Closes/Sub-issue.
+const NON_BLOCKING_ANNOTATION_PATTERN = /\(non-blocking\)/i;
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const hasIssue = Number.isInteger(args.issue) && args.issue > 0;
@@ -124,18 +166,11 @@ if (import.meta.main) {
       'missing required --issue <number> (or pass --all-roadmaps)',
     );
   }
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
   const policy = loadPolicy(args.policy);
   // The claim-state annotation is strictly opt-in: only when --with-claim-state
   // is passed do we build the comment loader (the sole new GitHub API surface)
@@ -143,7 +178,7 @@ if (import.meta.main) {
   // `claimState` undefined, so no extra fetch is made and the output is
   // byte-stable.
   const claimState = args.withClaimState
-    ? buildClaimStateResolution(owner, repo, policy, args.currentClaimId)
+    ? buildClaimStateResolution(port, policy, args.currentClaimId)
     : undefined;
   // The readiness annotation is strictly opt-in: only when --with-readiness is
   // passed do we build the marker / label-event loaders and resolve the
@@ -157,10 +192,11 @@ if (import.meta.main) {
         markerPrefix: policy.markerPrefix,
         roadmapLabelName: policy.labels?.roadmapLabelName,
         floor: policy.autopilotSuitability?.floor,
+        milestoneScope: policy.discover?.milestoneScope,
         owner,
         repo,
-        loadIssue: buildIssueLoader(owner, repo),
-        loadSubIssues: buildSubIssueLoader(owner, repo),
+        loadIssue: buildIssueLoader(port),
+        loadSubIssues: buildSubIssueLoader(port),
         loadOpenRoadmapRoots: buildOpenRoadmapRootsLoader(
           owner,
           repo,
@@ -178,8 +214,8 @@ if (import.meta.main) {
         roadmapLabelName: policy.labels?.roadmapLabelName,
         owner,
         repo,
-        loadIssue: buildIssueLoader(owner, repo),
-        loadSubIssues: buildSubIssueLoader(owner, repo),
+        loadIssue: buildIssueLoader(port),
+        loadSubIssues: buildSubIssueLoader(port),
         claimState,
         readiness,
         concurrency: args.concurrency,
@@ -291,6 +327,7 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
       roadmapMarkerId: node.roadmapMarkerId,
       autopilotSuitability: node.autopilotSuitability ?? null,
       effort: node.effort ?? null,
+      milestone: node.milestone ?? null,
       depth: node.depth,
     }))
     .sort(compareByNumber);
@@ -399,8 +436,12 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
     visitedIssuePaths.add(visitKey);
     recordNode(issue, path);
     const references = await getReferences(issue);
-    const seenSourceTargets = new Set();
-    const seenSourceEdgeKeys = new Set();
+    // Per visit, not graph-global: the same issue can be visited again on
+    // another provenance path. A later same-triple mention in this body
+    // (prose + standalone `Blocked by #N`, or two identical task-list
+    // lines) collapses to the first edge (#2799). A remaining
+    // same-source different-relationship pair is still a duplicate.
+    const seenSourceTriples = new Set();
     const firstReferenceBySourceTarget = new Map();
     for (const reference of references) {
       const edge = {
@@ -409,23 +450,16 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
         relationship: reference.relationship,
         evidence: reference.evidence,
       };
-      const edgeKey = buildEdgeKey(edge);
-      if (seenSourceEdgeKeys.has(edgeKey)) {
-        recordDuplicateReference(edge, edge);
+      const tripleKey = `${edge.source}:${edge.target}:${edge.relationship}`;
+      if (seenSourceTriples.has(tripleKey)) {
         continue;
       }
-      seenSourceEdgeKeys.add(edgeKey);
+      seenSourceTriples.add(tripleKey);
+      const edgeKey = buildEdgeKey(edge);
       if (!edgeKeys.has(edgeKey)) {
         edgeKeys.add(edgeKey);
         edges.push(edge);
         const sourceTargetKey = `${edge.source}:${edge.target}`;
-        if (seenSourceTargets.has(sourceTargetKey)) {
-          recordDuplicateReference(
-            edge,
-            firstReferenceBySourceTarget.get(sourceTargetKey) ?? edge,
-          );
-        }
-        seenSourceTargets.add(sourceTargetKey);
         const firstReference =
           firstReferenceBySourceTarget.get(sourceTargetKey);
         if (firstReference) {
@@ -433,6 +467,19 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
         } else {
           firstReferenceBySourceTarget.set(sourceTargetKey, edge);
         }
+      }
+      // #2236: a `non-blocking-reference` edge is deliberately informational
+      // -- it is recorded above (so it is visible in the graph output and
+      // participates in duplicate-reference bookkeeping like any other
+      // edge), but its target is never visited, never recorded as a node,
+      // and never checked for a cycle. Because `executionCandidates` below
+      // is built purely from recorded nodes, a target reachable only via
+      // this relationship can never become an A1.5 `open-child` blocker --
+      // unless some OTHER, still-blocking edge elsewhere in the graph also
+      // reaches it, in which case it correctly still blocks through that
+      // other path.
+      if (edge.relationship === 'non-blocking-reference') {
+        continue;
       }
       if (path.includes(edge.target)) {
         // #1278: a plain `Refs` back-reference from a CLOSED non-roadmap leaf
@@ -512,7 +559,7 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
         ? []
         : normalizeSubIssueReferences(await loadSubIssues(issue.number));
     const references = [
-      ...extractTaskListReferences(issue.body),
+      ...extractTaskListReferences(issue.body, { currentRepoRef }),
       ...extractKeywordReferences(issue.body, { currentRepoRef }),
       ...nativeSubIssues,
     ];
@@ -550,13 +597,23 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
   // Fetch one node and return its reference targets for the next BFS frontier.
   // Mirrors the DFS expansion guard: only accessible, non-PR issues are
   // expanded (PRs / inaccessible / not-found contribute no children), so the
-  // crawl's reachable set equals the DFS's.
+  // crawl's reachable set equals the DFS's. #2236: a `non-blocking-reference`
+  // target is also excluded here, mirroring `visitIssue`'s own early
+  // `continue` for that relationship -- without this, the prefetch crawl
+  // would still fetch (and transitively expand) a target `visitIssue` itself
+  // never visits, needlessly spending GitHub requests and rate-limit budget
+  // on a subgraph the real traversal was designed to skip entirely
+  // (CodeRabbit, PR #2381).
   async function expandForPrefetch(issueNumber) {
     const issue = await getIssue(issueNumber, issueCache, loadIssue);
     if (!issue || isInaccessibleIssue(issue) || issue.isPullRequest) {
       return [];
     }
-    return (await getReferences(issue)).map((reference) => reference.target);
+    return (await getReferences(issue))
+      .filter(
+        (reference) => reference.relationship !== 'non-blocking-reference',
+      )
+      .map((reference) => reference.target);
   }
   function recordNode(issue, path) {
     const existing = nodeRecords.get(issue.number);
@@ -578,6 +635,7 @@ export async function enumerateRoadmapGraph(rootIssueNumber, options = {}) {
       roadmapMarkerId: classification.roadmapMarkerId,
       autopilotSuitability: parseAutopilotSuitability(issue.body, markerPrefix),
       effort: parseEffort(issue.body, markerPrefix),
+      milestone: issue.openMilestoneTitle,
       depth,
     });
     recordProvenancePath(issue.number, path);
@@ -642,7 +700,8 @@ function isExpectedRootEnumerationFailure(error, rootNumber) {
  * double-counted.
  *
  * Ranking (global-by-score): the union is sorted by `autopilotSuitability`
- * DESCENDING, tie-broken by issue number ASCENDING (stable). Missing or
+ * DESCENDING, tie-broken by an optional `discover.milestoneScope` match
+ * (#2340), then effort, then issue number ASCENDING (stable). Missing or
  * out-of-range suitability is treated as the configured floor for
  * ordering, but a leaf with no coherent score never ranks above a scored
  * leaf at the same effective value — scored work always sorts first at a
@@ -659,6 +718,10 @@ export async function enumerateAllRoadmapsGraph(options = {}) {
   // 1-5, falling back to the default when unset) once, then rank unscored
   // leaves at that configured floor.
   const floor = normalizeAutopilotSuitabilityFloor(options.floor);
+  // Empty string disables the preference entirely -- same "no scope input"
+  // fallback `parseNonEmptyString` gives policy-helpers.mts callers (#2340).
+  const milestoneScope =
+    typeof options.milestoneScope === 'string' ? options.milestoneScope : '';
   const loadOpenRoadmapRoots = options.loadOpenRoadmapRoots;
   if (typeof loadOpenRoadmapRoots !== 'function') {
     throw new Error(
@@ -746,6 +809,7 @@ export async function enumerateAllRoadmapsGraph(options = {}) {
         roadmapMarkerId: node.roadmapMarkerId,
         autopilotSuitability: node.autopilotSuitability,
         effort: node.effort,
+        milestone: node.milestone,
         sourceRoots: [graph.root.number],
       });
     }
@@ -778,7 +842,9 @@ export async function enumerateAllRoadmapsGraph(options = {}) {
       ...leaf,
       sourceRoots: [...leaf.sourceRoots].sort((left, right) => left - right),
     }))
-    .sort((left, right) => compareUnionLeaves(left, right, floor));
+    .sort((left, right) =>
+      compareUnionLeaves(left, right, floor, milestoneScope),
+    );
   // Opt-in (#1008): annotate the deduped union leaves once each. The per-root
   // enumerations above intentionally run without `claimState`, so each issue's
   // comments are fetched at most once here regardless of how many roots reach
@@ -870,28 +936,48 @@ export async function enumerateAllRoadmapsGraph(options = {}) {
  *      never ranks below an unscored leaf at the same effective value, so
  *      "missing is treated as the configured floor" never lets unscored
  *      work jump ahead of genuinely scored work;
- *   3. issue number ASCENDING — a stable, repository-deterministic
+ *   3. milestone-scope match first (#2340) — when `milestoneScope` is a
+ *      non-empty string, a leaf whose OPEN milestone title equals it sorts
+ *      ahead of a leaf that does not match (or has no open milestone at
+ *      all) within the same effective-score band. An empty `milestoneScope`
+ *      makes every leaf compare equal here, so this step is a no-op and the
+ *      order falls straight through to the next key — byte-identical to
+ *      before this option existed;
+ *   4. effort ordinal ASCENDING (soft tie-breaker) — within a still-tied
+ *      band prefer the lower-effort leaf (S < M < L); a missing/invalid
+ *      hint resolves to the neutral middle ordinal via `effortOrdinal`, so
+ *      a band with no effort hints stays ordered by issue number exactly
+ *      as before;
+ *   5. issue number ASCENDING — a stable, repository-deterministic
  *      tie-break that keeps the order from thrashing between epics.
  *
+ * None of steps 3-4 ever cross a score band or drop a leaf — a large,
+ * out-of-scope issue is still selectable when it is the only ready work.
+ *
  * `floor` is the configured `autopilotSuitability.floor` (already
- * normalized to an integer 1-5). The comparator stays a total order.
+ * normalized to an integer 1-5). `milestoneScope` is the configured
+ * `discover.milestoneScope`, already normalized to `''` (off) for any
+ * non-string input. The comparator stays a total order.
  */
-function compareUnionLeaves(left, right, floor) {
+function compareUnionLeaves(left, right, floor, milestoneScope) {
   const leftScored = isAutopilotSuitabilityScore(left.autopilotSuitability);
   const rightScored = isAutopilotSuitabilityScore(right.autopilotSuitability);
   // Unscored or out-of-range leaves rank at the configured floor.
   const leftEffective = leftScored ? left.autopilotSuitability : floor;
   const rightEffective = rightScored ? right.autopilotSuitability : floor;
-  // Soft effort tie-breaker (after the suitability score, before the
-  // lowest-issue-number fallback): within one effective-score band prefer
-  // the lower-effort leaf (S < M < L). A missing/invalid hint resolves to
-  // the neutral middle ordinal via effortOrdinal, so a band with no effort
-  // hints stays ordered by issue number exactly as before. This never
-  // crosses a score band and never drops a leaf — a large issue is still
-  // selectable when it is the only ready work.
+  // A leaf "matches" only with a non-empty configured scope AND an equal
+  // OPEN milestone title -- an empty milestoneScope, a null leaf.milestone
+  // (no milestone, closed, or API-omitted), and a non-matching title all
+  // compare as `false`, so leftMatch === rightMatch (both false) whenever
+  // the preference is off or neither side is in scope, making this term
+  // `0` and falling through to the effort tie-breaker unchanged.
+  const leftMatch = milestoneScope !== '' && left.milestone === milestoneScope;
+  const rightMatch =
+    milestoneScope !== '' && right.milestone === milestoneScope;
   return (
     rightEffective - leftEffective ||
     Number(rightScored) - Number(leftScored) ||
+    Number(rightMatch) - Number(leftMatch) ||
     effortOrdinal(left.effort) - effortOrdinal(right.effort) ||
     left.number - right.number
   );
@@ -1140,7 +1226,7 @@ export function isClaimHeartbeatOverdue(
  * wiring. `policy` intentionally takes the *raw* parsed config shape (as
  * returned by this file's own `loadPolicy`), not a normalized/flattened view.
  */
-export function buildClaimStateResolution(owner, repo, policy, currentClaimId) {
+export function buildClaimStateResolution(port, policy, currentClaimId) {
   const staleAgeMs =
     parseClaimStaleAgeMs(policy.claimTiming?.staleAge) ??
     DEFAULT_CLAIM_STALE_AGE_MS;
@@ -1148,7 +1234,7 @@ export function buildClaimStateResolution(owner, repo, policy, currentClaimId) {
     parseClaimHeartbeatIntervalMs(policy.claimTiming?.heartbeatInterval) ??
     DEFAULT_CLAIM_HEARTBEAT_INTERVAL_MS;
   return {
-    loadComments: buildCommentLoader(owner, repo),
+    loadComments: buildCommentLoader(port),
     isTrustedAuthor: buildTrustedAuthorPredicate(policy),
     staleAgeMs,
     heartbeatIntervalMs,
@@ -1213,37 +1299,16 @@ export function buildTrustedAuthorPredicate(policy) {
  * Exported (#1395) so `discover-orphan-filter.mts` can reuse the identical
  * loader instead of duplicating this pagination/`gh` wiring.
  *
- * Async (#1394) so each page's `runGh(...) + JSON.parse(...)` fetch can be
- * bounded-retried on a transient failure (e.g. truncated captured stdout
- * under heavy concurrent load). Behavior-preserving: the sole caller
+ * The per-page bounded retry (#1394) now lives inside
+ * `listWorkItemCommentsWithRetryAsync` (#2266): the guard bans importing
+ * `withBoundedRetry` into a migrated domain file, so the retry loop moved
+ * to the adapter, which is exempt. Behavior-preserving: the sole caller
  * (`annotateLeafClaimState`) already `await`s the returned value, and
  * `ClaimStateResolution.loadComments` is typed as `Awaitable<...>` (#1395)
  * to accommodate exactly this.
  */
-export function buildCommentLoader(owner, repo) {
-  return async (issueNumber) => {
-    const comments = [];
-    const pageSize = 100;
-    for (let page = 1; ; page += 1) {
-      const pageItems = await withBoundedRetry(async () => {
-        const raw = runGh([
-          'api',
-          `repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${pageSize}&page=${page}`,
-          '--jq',
-          '.',
-        ]).trim();
-        return raw && raw !== 'null' ? JSON.parse(raw) : [];
-      });
-      if (!Array.isArray(pageItems) || pageItems.length === 0) {
-        break;
-      }
-      comments.push(...pageItems);
-      if (pageItems.length < pageSize) {
-        break;
-      }
-    }
-    return comments;
-  };
+export function buildCommentLoader(port) {
+  return (issueNumber) => port.listWorkItemCommentsWithRetryAsync(issueNumber);
 }
 /**
  * Parse an ISO8601 duration (`P[nD]T[nH][nM][nS]`) to ms; `null` on garbage OR
@@ -1315,32 +1380,155 @@ export function classifyIssue(
     roadmapMarkerId: '',
   };
 }
-export function extractTaskListReferences(body) {
+/**
+ * True when `line` opens a new Markdown block that must terminate a
+ * task-list item's continuation span: a blank line, a new list item
+ * (bulleted or ordered), or an ATX heading. Shared between the item-
+ * grouping loop below and any external caller that needs to slice the
+ * same continuation span (e.g. `audit-authored-issue.mts`'s per-line
+ * Tracks-parse check, #2765). Each marker alternative also accepts
+ * end-of-line, not only trailing whitespace (idd-skill#2765 review,
+ * Codex): CommonMark allows an EMPTY list item or ATX heading (a bare
+ * `-`, `1.`, or `#` with nothing after it), and without the end-of-line
+ * alternative such a line failed to read as a boundary, letting the
+ * continuation span absorb it (and anything after it, including a
+ * later unrelated `(#N)`) into the preceding checkbox item.
+ */
+export function isTaskListBlockBoundary(line) {
+  return (
+    line.trim() === '' ||
+    /^\s*(?:[-*+](?:\s|$)|\d+[.)](?:\s|$)|#{1,6}(?:\s|$))/u.test(line)
+  );
+}
+/**
+ * True when `line` opens a task-list checkbox item (`- [ ]` / `- [x]`).
+ * Requires whitespace (or end-of-line) immediately after the closing
+ * `]` -- GFM's own task-list syntax requires it, and `- [ ]foo` (no
+ * space) is not a real checkbox item, just list-item text that happens
+ * to start with `[ ]`. Without this bound, the trailing-reference
+ * fallback below (idd-skill#2765 review, Copilot) could misclassify an
+ * ordinary bulleted line as a task-list item merely because it opens
+ * with that exact character sequence. Also requires at least one
+ * whitespace character between the bullet marker and the opening `[`
+ * (idd-skill#2765 review, Codex): CommonMark requires whitespace after
+ * a list marker for it to open a list item at all, so `-[ ] text` (no
+ * space) is not a real checkbox either -- a pre-existing laxness the
+ * two leading-form regexes below also share, but one this new
+ * trailing-reference fallback measurably widens the blast radius of
+ * (from "immediately followed by `#N`" to "an arbitrary trailing
+ * reference anywhere in the item's text"), so it is bounded at this
+ * shared gate rather than left unaddressed. Exported for the same
+ * reuse reason as {@link isTaskListBlockBoundary}.
+ */
+export function isTaskListCheckboxLine(line) {
+  return /^\s*-\s+\[(?: |x|X)\](?:\s|$)/u.test(line);
+}
+export function extractTaskListReferences(body, options = {}) {
   // Match against a code-masked copy so a checkbox merely quoted inside inline
   // code or a fenced block is not walked as a real task-list edge — consistent
   // with the #1121 boundary already applied to extractRoadmapMarkerId (#1204).
   // stripMarkdownCodeRegions preserves the line count, so the masked and raw
   // lines share an index and evidence stays the raw line for any surviving edge
   // (e.g. one that shares a line with unrelated inline code).
+  //
+  // Three forms recognized (idd-skill#2476, idd-skill#2765), tried in order
+  // per item: a bare `#123` or a markdown link whose TEXT is `#123` (e.g.
+  // `- [ ] [#123](url)`, the `[`/`]`/`(...)` around the number all
+  // optional) directly after the checkbox marker; falling back to a
+  // markdown link with arbitrary link text whose URL targets
+  // `.../issues/123` or `.../pull/123` (e.g.
+  // `- [ ] [some text](https://.../issues/123)`); falling back further to
+  // a TRAILING local issue reference -- `(#N)`, bare `#N`, or
+  // `owner/repo#N` naming the current repository -- as the last token of
+  // the checkbox item, gathered across the checkbox line and any
+  // continuation lines a soft wrap moved onto the item's own paragraph
+  // (up to the next line that starts a new list item, is blank, or is a
+  // heading -- the exact stop condition idd-skill#2765 specifies; no
+  // additional indentation check, since the stop condition alone already
+  // disambiguates the item's extent). A bare trailing `#N` accepts the
+  // same zero-disambiguation trust the leading bare-`#N` form already
+  // carries -- e.g. "...seen in run #4521" would also match -- a
+  // deliberate tradeoff (see idd-skill#2765's review discussion) rather
+  // than an unreliable keyword denylist. Regex construction is inlined
+  // per-call (not hoisted to a module-level const) because this file's
+  // CLI entry point (`if (import.meta.main)`) sits near the top of the
+  // file and can reach this function during synchronous module
+  // evaluation, before a later top-level const would have initialized
+  // (TDZ).
+  const bareOrLinkTextRe =
+    /^\s*-\s*\[(?: |x|X)\]\s+\[?#(\d+)\b\]?(?:\([^)\n]*\))?/u;
+  const linkUrlRe =
+    /^\s*-\s*\[(?: |x|X)\]\s+\[[^\]\n]*\]\([^)\n]*\/(?:issues|pull)\/(\d+)(?:[/?#][^)\n]*)?\)/u;
+  const trailingReferenceRe =
+    /(?:^|\s)\(?(?:([\w.-]+\/[\w.-]+)#(\d+)|#(\d+))\)?[.,;:]*\s*$/u;
+  const currentRepoRef = normalizeRepoRef(
+    options.currentRepoRef
+      ? options.currentRepoRef.split('/')[0]
+      : options.owner,
+    options.currentRepoRef
+      ? options.currentRepoRef.split('/')[1]
+      : options.repo,
+  );
   const rawBody = String(body ?? '');
   const rawLines = rawBody.split(/\r?\n/u);
   const maskedLines = stripMarkdownCodeRegions(rawBody).split(/\r?\n/u);
-  return maskedLines.flatMap((maskedLine, index) => {
-    const match = maskedLine.match(/^\s*-\s*\[(?: |x|X)\]\s+#(\d+)\b/u);
-    if (!match) {
-      return [];
+  const references = [];
+  for (let index = 0; index < maskedLines.length; index += 1) {
+    const maskedLine = maskedLines[index];
+    if (!isTaskListCheckboxLine(maskedLine)) {
+      continue;
     }
-    const target = Number.parseInt(match[1], 10);
-    return Number.isInteger(target) && target > 0
-      ? [
-          {
-            target,
-            relationship: 'task-list',
-            evidence: (rawLines[index] ?? maskedLine).trim(),
-          },
-        ]
-      : [];
-  });
+    const leadingMatch =
+      maskedLine.match(bareOrLinkTextRe) ?? maskedLine.match(linkUrlRe);
+    if (leadingMatch) {
+      const target = Number.parseInt(leadingMatch[1], 10);
+      if (Number.isInteger(target) && target > 0) {
+        references.push({
+          target,
+          relationship: 'task-list',
+          evidence: (rawLines[index] ?? maskedLine).trim(),
+        });
+      }
+      continue;
+    }
+    // No leading-form match: gather this item's continuation lines (soft-
+    // wrapped text belonging to the same checkbox item) and retry against
+    // the joined item text, looking for a trailing local issue reference.
+    let end = index;
+    while (
+      end + 1 < maskedLines.length &&
+      !isTaskListBlockBoundary(maskedLines[end + 1])
+    ) {
+      end += 1;
+    }
+    const itemText = maskedLines
+      .slice(index, end + 1)
+      .map((line) => line.trim())
+      .join(' ');
+    const trailingMatch = itemText.match(trailingReferenceRe);
+    if (trailingMatch) {
+      const qualifiedRepoRef = trailingMatch[1]
+        ? normalizeRepoRef(...trailingMatch[1].split('/'))
+        : '';
+      const target = Number.parseInt(
+        trailingMatch[2] ?? trailingMatch[3] ?? '',
+        10,
+      );
+      if (
+        (!qualifiedRepoRef || qualifiedRepoRef === currentRepoRef) &&
+        Number.isInteger(target) &&
+        target > 0
+      ) {
+        references.push({
+          target,
+          relationship: 'task-list',
+          evidence: (rawLines[index] ?? maskedLine).trim(),
+        });
+      }
+    }
+    index = end;
+  }
+  return references;
 }
 export function extractKeywordReferences(body, options = {}) {
   const references = [];
@@ -1366,11 +1554,47 @@ export function extractKeywordReferences(body, options = {}) {
     const maskedLine = maskedLines[lineIndex];
     const rawLine = rawLines[lineIndex] ?? maskedLine;
     const keywordMatches = [...maskedLine.matchAll(KEYWORD_REFERENCE_REGEX)];
+    // #1970: precompute this line's token-start offsets once (a single
+    // linear pass), only when the line actually has a keyword match to
+    // check — the majority of lines have none, and this pass would
+    // otherwise double their scan cost for no benefit. `tokenPointer` only
+    // ever advances forward across the loop below (matches are already in
+    // increasing-index order from `matchAll`), so the whole line's
+    // windowing cost stays O(tokens + matches), never re-scanned per match.
+    const tokenStarts =
+      keywordMatches.length > 0
+        ? [...maskedLine.matchAll(/\S+/gu)].map((token) => token.index ?? 0)
+        : [];
+    let tokenPointer = 0;
     for (let index = 0; index < keywordMatches.length; index += 1) {
       const match = keywordMatches[index];
-      const segmentStart = (match.index ?? 0) + match[0].length;
+      const matchIndex = match.index ?? 0;
+      while (
+        tokenPointer + 1 < tokenStarts.length &&
+        tokenStarts[tokenPointer + 1] <= matchIndex
+      ) {
+        tokenPointer += 1;
+      }
+      const windowStart =
+        tokenStarts.length > 0 && tokenStarts[tokenPointer] <= matchIndex
+          ? (tokenStarts[
+              Math.max(0, tokenPointer - NEGATION_LOOKBACK_TOKENS)
+            ] ?? 0)
+          : 0;
+      // #1964: a negated keyword match ("does not close #176") produces no
+      // reference at all — see KEYWORD_NEGATION_PATTERN above.
+      if (isNegatedKeywordMatch(maskedLine, matchIndex, windowStart)) {
+        continue;
+      }
+      const segmentStart = matchIndex + match[0].length;
       const segmentEnd = keywordMatches[index + 1]?.index ?? maskedLine.length;
       const segment = maskedLine.slice(segmentStart, segmentEnd);
+      const baseRelationship = classifyKeywordRelationship(match[1]);
+      const relationship =
+        baseRelationship === 'reference' &&
+        NON_BLOCKING_ANNOTATION_PATTERN.test(segment)
+          ? 'non-blocking-reference'
+          : baseRelationship;
       for (const target of extractKeywordReferenceTargets(
         segment,
         currentRepoRef,
@@ -1380,13 +1604,52 @@ export function extractKeywordReferences(body, options = {}) {
         }
         references.push({
           target,
-          relationship: classifyKeywordRelationship(match[1]),
+          relationship,
           evidence: rawLine.trim(),
         });
       }
     }
   }
   return references;
+}
+/**
+ * True when a negation term (`not`, `never`, `won't`, `doesn't`, ...) sits in
+ * a short token window immediately before the matched keyword at
+ * `matchIndex` on `line` — e.g. "This does not close #176" negates `close`.
+ *
+ * Tests a bounded window (`line.slice(windowStart, matchIndex)`) rather than
+ * the entire prefix from line start — see `NEGATION_LOOKBACK_TOKENS` above
+ * for why `windowStart` is always far enough back that this gives the exact
+ * same answer as testing the full prefix would. This is bounded by *token
+ * count*, not a fixed *character* count: an earlier revision tried a fixed
+ * 30-character slice and broke on long intervening words (see
+ * `KEYWORD_NEGATION_PATTERN`'s own doc comment) — the token-count bound
+ * avoids that failure mode because `windowStart` always sits at the start of
+ * a whole token (never mid-token), so no token this window includes is ever
+ * truncated, regardless of how long it is.
+ */
+function isNegatedKeywordMatch(line, matchIndex, windowStart) {
+  // #1970: every KEYWORD_NEGATION_PATTERN alternative requires `\s+`
+  // immediately before the match position ($) — a negation term directly
+  // followed by whitespace (0 intervening tokens), or an intervening word
+  // itself followed by whitespace. So if the character right before
+  // `matchIndex` is not whitespace, no match is possible at all, and this
+  // returns false without slicing/testing. This also closes a residual
+  // quadratic path the token window alone does not: many keyword matches
+  // glued together by non-whitespace separators (e.g. repeated
+  // "Closes,Closes,Closes,...") never advance `tokenPointer` past the
+  // line's very first whitespace-delimited token (`\S+` treats the whole
+  // comma-joined run as one token), so `windowStart` would otherwise stay
+  // pinned near 0 while `matchIndex` grows — recreating an O(n) slice+test
+  // per match, and thus O(n²) overall, for that specific input shape.
+  // KEYWORD_REFERENCE_REGEX's own leading `\b` guarantees the character
+  // right before any real keyword match is always a non-word character
+  // (whitespace or punctuation), never a word character, so this is a
+  // clean two-way split: whitespace before, or definitively not negated.
+  if (matchIndex === 0 || !/\s/u.test(line[matchIndex - 1] ?? '')) {
+    return false;
+  }
+  return KEYWORD_NEGATION_PATTERN.test(line.slice(windowStart, matchIndex));
 }
 function classifyKeywordRelationship(keyword) {
   const normalized = String(keyword ?? '').toLowerCase();
@@ -1475,7 +1738,11 @@ function normalizeSubIssueNumbers(subIssues) {
 // cannot express this: a `string`-type option always requires exactly one
 // value and a `boolean`-type option never takes one; there is no
 // in-between mode.
-function parseArgs(argv) {
+function parseArgs(rawArgv) {
+  // #1921/#2465: strip a pnpm-forwarded leading `--` the same way the
+  // shared cli-args.mts wrapper does -- this parser is excluded from that
+  // wrapper (see the comment above) so it must call the strip directly.
+  const argv = stripLeadingArgumentSeparator(rawArgv);
   const parsed = {
     issue: 0,
     allRoadmaps: false,
@@ -1670,7 +1937,26 @@ function normalizeIssue(issue) {
     labels: normalizeLabels(issue.labels),
     isPullRequest: Boolean(issue.pull_request),
     subIssueSummaryTotal: extractSubIssueSummaryTotal(issue.sub_issues_summary),
+    openMilestoneTitle: extractOpenMilestoneTitle(issue.milestone),
   };
+}
+/**
+ * Read the OPEN milestone's title from a REST `milestone` object. Returns
+ * null for a missing/non-object field, a closed milestone, or a
+ * non-string/empty title -- every one of these is the same "no scope input"
+ * neutral case for A4 Step 2's milestone preference (#2340).
+ */
+function extractOpenMilestoneTitle(milestone) {
+  if (typeof milestone !== 'object' || milestone === null) {
+    return null;
+  }
+  const record = milestone;
+  if (String(record.state ?? '').toLowerCase() !== 'open') {
+    return null;
+  }
+  return typeof record.title === 'string' && record.title.length > 0
+    ? record.title
+    : null;
 }
 /**
  * Read the native sub-issue count from a REST `sub_issues_summary` object.
@@ -1753,107 +2039,43 @@ async function getIssue(issueNumber, cache, loadIssue) {
 /**
  * Live per-issue loader for the traversal hot path.
  *
- * Bounded-retried (#1394): the `runGhAsync(...) + JSON.parse(...)` body runs
- * inside {@link withBoundedRetry} so a transient hiccup — including a
- * truncated-stdout JSON parse failure — gets up to 2 additional fresh `gh`
- * round-trips before this loader gives up. `isRetryable` reuses the same
- * `isNotFoundIssueLookupError` / `isInaccessibleIssueLookupError` pair the
- * outer `catch` already classifies with, so a genuine 404 or access-style
- * failure is still recognized on the FIRST attempt (retried zero times,
- * exactly like before this change) and still reaches the outer `catch`
- * below unchanged.
+ * The bounded retry (#1394) and its no-retry-on-404/inaccessible
+ * classifier now live inside `getWorkItemForTraversalAsync` (#2266): the
+ * guard bans importing `withBoundedRetry` into a migrated domain file, so
+ * both moved to the adapter, which is exempt. This loader is now a thin
+ * mapping from the port's found/not-found/inaccessible union back onto the
+ * null/sentinel/raw-item contract `getIssue` (this file's own cache-and-
+ * normalize wrapper) already expects.
  */
-export function buildIssueLoader(owner, repo) {
+export function buildIssueLoader(port) {
   return async (issueNumber) => {
-    const args = [
-      'api',
-      `repos/${owner}/${repo}/issues/${issueNumber}`,
-      '--jq',
-      '.',
-    ];
-    try {
-      return await withBoundedRetry(
-        async () => {
-          const result = (
-            await runGhAsync(args, { allowStatuses: [404] })
-          ).trim();
-          if (!result || result === 'null') {
-            return null;
-          }
-          return JSON.parse(result);
-        },
-        {
-          isRetryable: (error) =>
-            !isNotFoundIssueLookupError(error) &&
-            !isInaccessibleIssueLookupError(error),
-        },
-      );
-    } catch (error) {
-      if (isNotFoundIssueLookupError(error)) {
-        return null;
-      }
-      if (isInaccessibleIssueLookupError(error)) {
-        return INACCESSIBLE_ISSUE_SENTINEL;
-      }
-      throw error;
+    const result = await port.getWorkItemForTraversalAsync(issueNumber);
+    if (result.outcome === 'not-found') {
+      return null;
     }
+    if (result.outcome === 'inaccessible') {
+      return INACCESSIBLE_ISSUE_SENTINEL;
+    }
+    return result.item;
   };
 }
 /**
  * Live sub-issue loader for the traversal hot path.
  *
- * Bounded-retried (#1394): each page's `runGraphqlQuery(...)` call runs
- * inside {@link withBoundedRetry} with the default retry-everything
- * classifier — unlike {@link buildIssueLoader}, this loader has no
- * pre-existing REST-status-based classification to preserve, and every
- * failure `runGraphqlQuery` can produce today (a transient truncated-stdout
- * parse failure, a reported GraphQL `errors[]` entry, or a process-exec
- * failure) already rethrows unclassified. A genuinely persistent failure
- * (e.g. an inaccessible parent issue) still rethrows, just after up to 2
- * extra bounded round-trips instead of 0 — a small, deliberate latency cost,
- * not a fail-closed regression. The connection/cursor-shape checks below
- * stay un-retried on purpose: they only fire once `runGraphqlQuery` already
- * resolved without a transport/parse error, so retrying them would not
- * change the outcome.
+ * The per-page bounded retry (#1394) and both fail-fasts (an absent
+ * `subIssues` connection; `hasNextPage` with a missing `endCursor`) now
+ * live inside `listWorkItemSubIssueNodesAsync` (#2266), for the same
+ * guard-import reason as `buildIssueLoader`/`buildCommentLoader` above.
+ * `normalizeSubIssueNumbers` (the coercion-plus-dedup this loader always
+ * deferred to) stays here and is applied once to the full, already-
+ * flattened node list the port method returns across every page, rather
+ * than once per page then again at the end -- the same final Set, reached
+ * in one call instead of two.
  */
-export function buildSubIssueLoader(owner, repo) {
+export function buildSubIssueLoader(port) {
   return async (issueNumber) => {
-    const numbers = [];
-    let after = '';
-    while (true) {
-      const variables = {
-        owner,
-        repo,
-        number: issueNumber,
-      };
-      if (after) {
-        variables.after = after;
-      }
-      const result = await withBoundedRetry(() =>
-        runGraphqlQuery(SUB_ISSUES_QUERY, variables),
-      );
-      const connection = result?.data?.repository?.issue?.subIssues;
-      if (
-        !connection ||
-        !Array.isArray(connection.nodes) ||
-        !connection.pageInfo
-      ) {
-        throw new Error(
-          `subIssues connection missing for issue #${issueNumber}`,
-        );
-      }
-      numbers.push(...normalizeSubIssueNumbers(connection.nodes));
-      if (!connection.pageInfo.hasNextPage) {
-        break;
-      }
-      if (!connection.pageInfo.endCursor) {
-        throw new Error(
-          `subIssues pagination cursor missing for issue #${issueNumber}`,
-        );
-      }
-      after = String(connection.pageInfo.endCursor);
-    }
-    return [...new Set(numbers)];
+    const nodes = await port.listWorkItemSubIssueNodesAsync(issueNumber);
+    return normalizeSubIssueNumbers(nodes);
   };
 }
 /**
@@ -1998,62 +2220,24 @@ function normalizeSearchIssueNumber(issue) {
  * Pull requests are excluded by default (`--include-prs` is never passed),
  * matching the old scan which only ever saw issues from the issues
  * connection.
+ *
+ * Constructs its own port per call from the query's own `owner`/`repo`
+ * (#2266), matching `buildRoadmapMarkerResolver`'s established pattern:
+ * `SearchIssuesFn`'s existing per-call `owner`/`repo` shape is
+ * `buildOpenRoadmapRootsLoader`'s own test seam, unrelated to and
+ * predating the port migration, so it stays untouched here rather than
+ * threading a `ProviderPort` through that loader's signature and its
+ * five existing tests for a call site those tests never exercise anyway
+ * (they inject `searchIssues` directly).
  */
 function buildSearchIssuesRunner() {
-  return ({ owner, repo, label, matchBody, fields }) => {
-    const args = [
-      'search',
-      'issues',
-      '--repo',
-      `${owner}/${repo}`,
-      '--state',
-      'open',
-      '--limit',
-      String(GH_SEARCH_RESULT_CAP),
-      '--json',
-      fields.join(','),
-    ];
-    if (label) {
-      args.push('--label', label);
-    }
-    if (matchBody) {
-      // Restrict the free-text query to the body field, then pass the token
-      // as the positional search query.
-      args.push('--match', 'body', matchBody);
-    }
-    const raw = runGh(args).trim();
-    const parsed = raw && raw !== 'null' ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  };
-}
-/**
- * Async GraphQL runner for the traversal sub-issue loader. Its sole caller
- * (`buildSubIssueLoader`) is already async, so the runner uses the non-blocking
- * `execFile` path — letting several sub-issue queries run in parallel under the
- * prefetch crawl — while keeping the exact arg construction, error-array
- * detection, and `gh api graphql failed: …` wrapping of the previous sync form.
- */
-async function runGraphqlQuery(query, variables) {
-  const args = ['api', 'graphql', '-f', `query=${query}`];
-  for (const [name, value] of Object.entries(variables)) {
-    if (value === '' || value === null || value === undefined) {
-      continue;
-    }
-    const flag = typeof value === 'number' ? '-F' : '-f';
-    args.push(flag, `${name}=${value}`);
-  }
-  try {
-    const stdout = await runGhCapture(args);
-    const parsed = JSON.parse(stdout.trim() || '{}');
-    if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-      throw new Error(formatGraphqlErrors(parsed.errors));
-    }
-    return parsed;
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    const detail = stderr || error.message;
-    throw new Error(`gh api graphql failed: ${detail}`);
-  }
+  return ({ owner, repo, label, matchBody, fields }) =>
+    createGithubProviderAdapter(owner, repo).searchOpenWorkItems({
+      label,
+      matchBody,
+      fields,
+      limit: GH_SEARCH_RESULT_CAP,
+    });
 }
 // Read-and-parse failure semantics (explicit path throws; default path
 // silently falls back only on ENOENT) are converged in idd-config.mts's
@@ -2065,89 +2249,8 @@ async function runGraphqlQuery(query, variables) {
 function loadPolicy(policyPath) {
   return loadPolicyConfig(policyPath).config ?? {};
 }
-/**
- * Normalize a failed-`gh` error's exit status to a number.
- *
- * The synchronous `execFileSync` runner exposes the process exit code on
- * `.status`; the promisified `execFile` runner exposes it on `.code`. Read
- * `.status` first (sync), then fall back to `.code` (async), keeping only a
- * numeric value so a spawn-error string code (e.g. `ENOENT`) resolves to
- * `null` exactly as the previous sync-only path did.
- */
-function resolveGhExitStatus(error) {
-  const candidate = error;
-  const rawStatus = candidate?.status ?? candidate?.code;
-  return typeof rawStatus === 'number' ? rawStatus : null;
-}
-/**
- * Wrap a failed-`gh` error into the canonical `{ status, stderr }` shape that
- * the issue-lookup classifiers (`isNotFoundIssueLookupError` /
- * `isInaccessibleIssueLookupError`) read, so the sync and async runners produce
- * byte-identical errors. Returns `''` when the exit status is tolerated
- * (`allowStatuses`); otherwise throws the wrapped error.
- */
-function wrapGhFailure(error, args, allowStatuses) {
-  const status = resolveGhExitStatus(error);
-  if (status !== null && allowStatuses.includes(status)) {
-    return '';
-  }
-  const stderr = String(error?.stderr ?? '').trim();
-  const prefix = `gh ${args.join(' ')}`;
-  const wrapped = new Error(
-    stderr ? `${prefix} failed: ${stderr}` : `${prefix} failed`,
-  );
-  wrapped.status = status;
-  wrapped.stderr = stderr;
-  throw wrapped;
-}
-function runGh(args, options = {}) {
-  const { allowStatuses = [] } = options;
-  try {
-    return ghText(args, GH_TEXT_LOOP_OPTIONS);
-  } catch (error) {
-    return wrapGhFailure(error, args, allowStatuses);
-  }
-}
-/**
- * Async sibling of {@link runGh} used only by the traversal hot-path loaders
- * (`buildIssueLoader` / `buildSubIssueLoader`), so the bounded prefetch crawl
- * can keep several `gh` subprocesses in flight. Behaviorally identical to
- * {@link runGh}: same tolerated-status handling and the same wrapped-error
- * shape (via {@link wrapGhFailure}).
- */
-async function runGhAsync(args, options = {}) {
-  const { allowStatuses = [] } = options;
-  try {
-    const stdout = await runGhCapture(args);
-    return stdout;
-  } catch (error) {
-    return wrapGhFailure(error, args, allowStatuses);
-  }
-}
 function isInaccessibleIssue(value) {
   return value?.__iddLookupStatus === 'inaccessible';
-}
-function isInaccessibleIssueLookupError(error) {
-  if (!error) {
-    return false;
-  }
-  const rawStatus = error.status;
-  const status = typeof rawStatus === 'number' ? rawStatus : null;
-  if (status !== null && INACCESSIBLE_HTTP_STATUSES.has(status)) {
-    return true;
-  }
-  const stderr = String(error.stderr ?? '');
-  return /Resource not accessible|access denied|Forbidden|Unavailable for legal reasons/i.test(
-    stderr,
-  );
-}
-function isNotFoundIssueLookupError(error) {
-  if (!error) {
-    return false;
-  }
-  const candidate = error;
-  const stderr = String(candidate.stderr ?? candidate.message ?? '');
-  return stderr.includes('HTTP 404');
 }
 function buildEdgeKey(edge) {
   return `${edge.source}:${edge.target}:${edge.relationship}:${edge.evidence}`;
@@ -2201,11 +2304,6 @@ function compareCycles(left, right) {
     left.path.length - right.path.length ||
     left.path.join('>').localeCompare(right.path.join('>'))
   );
-}
-function formatGraphqlErrors(errors) {
-  return errors
-    .map((error) => String(error?.message ?? 'unknown GraphQL error'))
-    .join('; ');
 }
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -12,12 +12,16 @@
 // reports the bound merge command; the ONLY mutation anywhere is the
 // `gh pr merge` issued under `--apply` once every F3 gate holds and the
 // head + claim re-validate immediately before the merge.
-import { ghText } from './gh-exec.mjs';
+import { execFileSync } from 'node:child_process';
 import { deriveGhHttpStatus, ghErrorText } from './gh-http-status.mjs';
 import { loadIddConfig } from './idd-config.mjs';
 import { normalizePolicyConfig } from './policy-helpers.mjs';
 import { collectPreMergeReadiness } from './pre-merge-readiness.mjs';
 import { computePreMergeReadinessBlockers } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 /**
  * GitHub's exact `gh pr merge` failure text for the solo-CODEOWNER
@@ -105,10 +109,26 @@ export function isSafeSoloCodeownerAdminMergeState(
         branchCurrency.requiresUpToDateHead === false))
   );
 }
-// Prepend `-R <repoRef>` to a `gh` argument array only when a repo scope is
-// set; otherwise pass the args verbatim (current-directory repo).
-function scopedGhArgs(repoRef, args) {
-  return repoRef ? ['-R', repoRef, ...args] : args;
+/** `resolveOwnerRepoFromRef`'s split of a `<owner>/<repo>` `repoRef`, or the
+ * current-directory repo (`gh repo view`) when `repoRef` is `null`. Fails
+ * fast on a malformed shape (missing, empty, or extra `/`-separated
+ * segments) rather than silently treating `owner/repo/extra` as
+ * `owner`/`repo` -- every current caller only ever passes the value this
+ * file's own `parseArgs` synthesizes as `${owner}/${repo}` from two
+ * already-parsed flags, but this function has no way to enforce that at
+ * the type level, so it validates its own input instead of trusting it. */
+function resolveOwnerRepoFromRef(repoRef) {
+  if (repoRef) {
+    const segments = repoRef.split('/');
+    const [owner, repo] = segments;
+    if (segments.length !== 2 || !owner || !repo) {
+      throw new Error(
+        `resolveOwnerRepoFromRef: expected "<owner>/<repo>", got "${repoRef}"`,
+      );
+    }
+    return { owner, repo };
+  }
+  return resolveCurrentGithubRepository();
 }
 /**
  * Decode and classify a remote `.github/idd/config.json` read into the
@@ -136,19 +156,22 @@ export function resolveRemoteSoloCodeownerAdminFallbackMode(
   prNumber,
   repoRef,
   headSha,
-  fetchEncodedConfig = (scopedRepoRef, ref) =>
-    ghText(
-      scopedGhArgs(scopedRepoRef, [
-        'api',
-        `repos/${scopedRepoRef}/contents/.github/idd/config.json`,
-        '--method',
-        'GET',
-        '--field',
-        `ref=${ref}`,
-        '--jq',
-        '.content',
-      ]),
-    ),
+  fetchEncodedConfig = (scopedRepoRef, ref) => {
+    const outcome = createGithubProviderAdapter(
+      '',
+      '',
+    ).getRepositoryFileContentAtRef(
+      scopedRepoRef,
+      '.github/idd/config.json',
+      ref,
+    );
+    if (outcome.outcome === 'not-found') {
+      const notFound = new Error('Not Found (HTTP 404)');
+      notFound.stderr = 'Not Found (HTTP 404)';
+      throw notFound;
+    }
+    return outcome.value;
+  },
 ) {
   let config;
   try {
@@ -171,61 +194,74 @@ export function resolveRemoteSoloCodeownerAdminFallbackMode(
 }
 const defaultDeps = {
   collect: (passthrough) => collectPreMergeReadiness(passthrough),
-  fetchHeadSha: (prNumber, repoRef) =>
-    ghText(
-      scopedGhArgs(repoRef, [
-        'pr',
-        'view',
-        String(prNumber),
-        '--json',
-        'headRefOid',
-        '--jq',
-        '.headRefOid',
-      ]),
-    ),
-  fetchMergeState: (prNumber, repoRef) =>
-    JSON.parse(
-      ghText(
-        scopedGhArgs(repoRef, [
-          'pr',
-          'view',
-          String(prNumber),
-          '--json',
-          'mergeable,mergeStateStatus',
-          '--jq',
-          '.',
-        ]),
-      ),
-    ),
-  mergePr: (prNumber, headSha, repoRef) =>
-    ghText(
-      scopedGhArgs(repoRef, [
-        'pr',
-        'merge',
-        String(prNumber),
-        // Always a merge commit — never squash/rebase. Bind to the head.
-        '--merge',
-        '--match-head-commit',
-        headSha,
-      ]),
-    ),
-  mergePrAdmin: (prNumber, headSha, repoRef) =>
-    ghText(
-      scopedGhArgs(repoRef, [
-        'pr',
-        'merge',
-        String(prNumber),
-        '--merge',
-        '--match-head-commit',
-        headSha,
-        '--admin',
-      ]),
-    ),
+  fetchHeadSha: (prNumber, repoRef) => {
+    const { owner, repo } = resolveOwnerRepoFromRef(repoRef);
+    return createGithubProviderAdapter(
+      owner,
+      repo,
+    ).getChangeRequestHeadShaAtRepo(owner, repo, prNumber);
+  },
+  fetchMergeState: (prNumber, repoRef) => {
+    const { owner, repo } = resolveOwnerRepoFromRef(repoRef);
+    const state = createGithubProviderAdapter(
+      owner,
+      repo,
+    ).getChangeRequestAtRepo(owner, repo, prNumber);
+    if (!state) {
+      throw new Error(
+        `fetchMergeState: PR #${prNumber} not found${repoRef ? ` in ${repoRef}` : ''}`,
+      );
+    }
+    return state;
+  },
+  mergePr: (prNumber, headSha, repoRef) => {
+    const { owner, repo } = resolveOwnerRepoFromRef(repoRef);
+    // Always a merge commit — never squash/rebase. Bind to the head.
+    return createGithubProviderAdapter(owner, repo).mergeChangeRequestAtRepo(
+      owner,
+      repo,
+      prNumber,
+      headSha,
+    );
+  },
+  mergePrAdmin: (prNumber, headSha, repoRef) => {
+    const { owner, repo } = resolveOwnerRepoFromRef(repoRef);
+    return createGithubProviderAdapter(
+      owner,
+      repo,
+    ).mergeChangeRequestAdminAtRepo(owner, repo, prNumber, headSha);
+  },
   resolveSoloCodeownerAdminFallbackMode: (prNumber, repoRef, headSha) =>
     repoRef
       ? resolveRemoteSoloCodeownerAdminFallbackMode(prNumber, repoRef, headSha)
       : normalizePolicyConfig(loadIddConfig()).mergeGate
           .soloCodeownerAdminFallback,
+  getLocalHeadState: () => {
+    try {
+      const branch = execFileSync(
+        'git',
+        ['rev-parse', '--abbrev-ref', 'HEAD'],
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        },
+      ).trim();
+      const headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      return { branch: branch || null, headSha: headSha || null };
+    } catch {
+      return { branch: null, headSha: null };
+    }
+  },
+  fetchHeadRefName: (prNumber, repoRef) => {
+    const { owner, repo } = resolveOwnerRepoFromRef(repoRef);
+    return createGithubProviderAdapter(
+      owner,
+      repo,
+    ).getChangeRequestHeadRefNameAtRepo(owner, repo, prNumber);
+  },
 };
 /**
  * Build the F3 verdict and, under `--apply`, execute the merge. The
@@ -265,7 +301,30 @@ export function runMergeExecute(argv, deps = defaultDeps) {
     merged: false,
     mergeResult: '',
     adminFallbackUsed: false,
+    localHeadDrift: null,
   };
+  // #2453: best-effort, advisory-only local-head-drift check. Never lets a
+  // misbehaving dep (or an unrelated local git/gh failure) affect `ready`,
+  // `blockers`, or the merge decision below.
+  try {
+    const localHeadState = deps.getLocalHeadState();
+    if (localHeadState.branch && localHeadState.headSha) {
+      const prHeadRefName = deps.fetchHeadRefName(args.prNumber, args.repoRef);
+      if (
+        prHeadRefName &&
+        prHeadRefName === localHeadState.branch &&
+        localHeadState.headSha !== prHeadSha
+      ) {
+        verdict.localHeadDrift = {
+          localHeadSha: localHeadState.headSha,
+          remoteHeadSha: prHeadSha,
+        };
+      }
+    }
+  } catch {
+    // Advisory only (#2453): a local git or `gh` failure here must never
+    // block or crash an otherwise-successful merge run.
+  }
   if (!args.apply) {
     // Dry-run: read-only. Never merge.
     return { verdict, exitCode: ready ? 0 : 1 };
@@ -486,6 +545,19 @@ function revalidateImmediatelyBeforeMerge(
 // instead coerce every unrecognized flag to `true` -- neither matches this
 // file's "collect and forward whatever the collector itself accepts"
 // contract.
+//
+// #2465: unlike the other five custom parsers excluded from the shared
+// wrapper, this one needs no explicit `stripLeadingArgumentSeparator` call
+// of its own. A pnpm-forwarded leading `--` matches none of the named
+// flags below, so it falls through to the generic `startsWith('--')`
+// passthrough branch and is pushed into `passthrough` verbatim, at
+// position 0. That array is forwarded in-process to
+// `collectPreMergeReadiness` (`deps.collect`), whose own `parseArgs` goes
+// through `parseCliArgs` -- the shared wrapper this file itself is
+// excluded from -- which strips the leading `--` there instead. This
+// immunity is deliberate, not incidental: it depends on the collector
+// always being invoked through `parseCliArgs`, so re-verify this comment
+// (or add an explicit strip here too) if that call path ever changes.
 function parseArgs(argv) {
   const parsed = {
     prNumber: null,
@@ -593,11 +665,26 @@ function printHelp() {
   when the fresh branch-currency evidence says an up-to-date head is not
   required. Unreadable or unsafe live state aborts the retry.
   The verdict's adminFallbackUsed field records whether this path fired.
+
+  Local-head-drift warning (#2453): when the invoking worktree's local
+  git branch matches this PR's own branch but its local HEAD differs from
+  the head about to merge, the verdict's localHeadDrift field is set and
+  a warning is printed on stderr -- a non-fatal signal an unpushed commit
+  may be about to be left behind. Never blocks the merge; a silent no-op
+  from any other directory, branch, or local read failure.
 `);
 }
 // CLI: print the verdict as JSON and exit with the gate/merge status.
 if (import.meta.main) {
   const { verdict, exitCode } = runMergeExecute(process.argv.slice(2));
+  if (verdict.localHeadDrift) {
+    // #2453: surface this prominently on stderr too -- an agent running
+    // --apply interactively should actually notice it, not just find it
+    // buried in the JSON verdict.
+    process.stderr.write(
+      `⚠ local HEAD drift: this worktree's local HEAD (${verdict.localHeadDrift.localHeadSha}) differs from PR #${verdict.prNumber}'s head about to merge (${verdict.localHeadDrift.remoteHeadSha}) -- an unpushed commit may be about to be left behind.\n`,
+    );
+  }
   process.stdout.write(`${JSON.stringify(verdict, null, 2)}\n`);
   process.exit(exitCode);
 }

@@ -5,7 +5,14 @@
 // above by `pnpm run build`. Edit the .mts source, never the generated
 // .mjs. See docs/typescript-sources.md.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  existsSync,
+  constants as fsConstants,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   normalizeAutopilotSuitabilityFloor,
@@ -13,12 +20,19 @@ import {
 } from './autopilot-suitability.mjs';
 import { parseCliArgs } from './cli-args.mjs';
 import { resolveHelperCommandForProfile } from './helper-runtime-manifest.mjs';
+import { isValidIsoTimestamp } from './marker-helpers.mjs';
 import {
   inspectHelperRuntimeConfig,
   POLICY_DEFAULTS,
   parseProjectCommandRows,
 } from './policy-helpers.mjs';
-import { resolveTrustedMarkerActors } from './protocol-helpers.mjs';
+import { fetchGovernanceJson } from './pre-merge-readiness.mjs';
+import {
+  parsePaginatedGhNdjson,
+  resolveTrustedMarkerActors,
+  summarizeBranchReviewRequirements,
+  summarizeRequiredCheckMetadata,
+} from './protocol-helpers.mjs';
 import { loadJson, validate } from './validate-schemas.mjs';
 
 const WORKSHOP_ENTRY_POINTS = ['README.md', 'README.ja.md', 'docs/index.md'];
@@ -35,6 +49,7 @@ export function runDoctor({
   requireGithub,
   cleanupBacklogWindowDays,
   cleanupBacklogWarnThreshold,
+  cleanupBacklogBootstrapCutoff,
   workshopCrossRefAllowMissing,
   strict,
 }) {
@@ -60,6 +75,7 @@ export function runDoctor({
   checkHelperRuntimeConfig(root, report);
   checkLiveConfigSchema(root, report);
   checkClaimTimingConsistency(root, report);
+  checkMergePolicyAcknowledgement(root, report);
   checkDependencyVersionDrift(root, report);
   checkAgentEntryFiles(root, report);
   checkTemplateVersionSignal(root, report);
@@ -73,6 +89,7 @@ export function runDoctor({
     {
       windowDays: cleanupBacklogWindowDays ?? 14,
       warnThreshold: cleanupBacklogWarnThreshold ?? 2,
+      bootstrapCutoff: cleanupBacklogBootstrapCutoff,
       requireGithub,
     },
     report,
@@ -84,7 +101,7 @@ export function runDoctor({
     report,
   );
   checkWorkshopExampleRepoBackLink(root, { requireGithub }, report);
-  checkGithubReadiness(root, requireGithub, report);
+  checkGithubReadiness(root, requireGithub, strict, report);
   checkAutopilotSuitabilityConsistency(
     root,
     { requireGithub, markerPrefix },
@@ -180,18 +197,8 @@ function checkAutopilotSuitabilityConsistency(root, options, report) {
   if (!Array.isArray(issues) || issues.length === 0) {
     return;
   }
-  let floor;
-  let blockedByHumanLabelName;
-  try {
-    const config = JSON.parse(
-      readFileSync(join(root, '.github/idd/config.json'), 'utf8'),
-    );
-    floor = config?.autopilotSuitability?.floor;
-    blockedByHumanLabelName = config?.labels?.blockedByHumanLabelName;
-  } catch {
-    floor = undefined;
-    blockedByHumanLabelName = undefined;
-  }
+  const { floor, blockedByHumanLabelName } =
+    resolveAutopilotSuitabilityPolicy(root);
   const { warnings } = evaluateAutopilotSuitabilityConsistency(issues, {
     floor,
     markerPrefix: options.markerPrefix,
@@ -391,23 +398,47 @@ function checkRequiredFiles(_files, report) {
     report.passes.push('profile artifacts are present');
   }
 }
-function checkPlaceholders(root, files, report) {
+/**
+ * True when `file` (a repo-relative, forward-slash path) is IDD-managed
+ * content `checkPlaceholders` should scan for unresolved `{{...}}` import
+ * placeholders -- not an adopter's own application source, which can
+ * legitimately use `{{...}}` as its own runtime template syntax (i18n,
+ * mustache-style templates, etc.) with nothing to do with IDD onboarding
+ * (idd-skill#2079). An allowlist, not a denylist: only these path classes
+ * are ever scanned -- `docs/*.md`, `profiles/`, `.claude/skills/`,
+ * `.github/idd/`, and the vendored `scripts/`/`schemas/`/
+ * `fixtures/schemas/` bundle.
+ *
+ * `.github/instructions/` is included only in adopter mode
+ * (`distributionSource` false): in the source repository itself those
+ * files document the placeholder syntax with example tokens that are
+ * never meant to be "resolved", so scanning them there would self-trigger
+ * a false positive on every dogfooded run. Pure (no I/O) so it can be
+ * unit-tested directly.
+ */
+export function isIddManagedPlaceholderScanPath(file, distributionSource) {
+  if (file.startsWith('docs/') && file.endsWith('.md')) {
+    return true;
+  }
+  if (
+    file.startsWith('profiles/') ||
+    file.startsWith('.claude/skills/') ||
+    file.startsWith('scripts/') ||
+    file.startsWith('schemas/') ||
+    file.startsWith('fixtures/schemas/') ||
+    file.startsWith('.github/idd/')
+  ) {
+    return true;
+  }
+  return !distributionSource && file.startsWith('.github/instructions/');
+}
+export function checkPlaceholders(root, files, report) {
   const distributionSource =
     exists(join(root, 'idd-template/ONBOARDING.md')) &&
     exists(join(root, 'audit/sync-manifest.json'));
-  const excludedPrefixes = [
-    'idd-template/',
-    'fixtures/',
-    'tests/fixtures/',
-    'tests/',
-    '.git/',
-  ];
-  if (distributionSource) {
-    excludedPrefixes.push('.github/instructions/', 'audit/');
-  }
   const hits = [];
   for (const file of files) {
-    if (excludedPrefixes.some((prefix) => file.startsWith(prefix))) {
+    if (!isIddManagedPlaceholderScanPath(file, distributionSource)) {
       continue;
     }
     const absolutePath = join(root, file);
@@ -635,7 +666,7 @@ function checkCommandResidueAndConsistency(
       if (normalized === null) {
         continue;
       }
-      const token = findToolchainResidueToken(normalized);
+      const token = findToolchainResidueToken(normalized, key);
       if (!token) {
         continue;
       }
@@ -682,9 +713,49 @@ function isConcreteCommandValue(value) {
   }
   return !/\{\{\s*[A-Za-z0-9_-]+\s*\}\}/.test(value);
 }
-function findToolchainResidueToken(value) {
+/**
+ * Per-key documented invocation segments from
+ * `idd-template/docs/customization.md`'s worked-example commands table,
+ * split on `&&` and trimmed. A command value's residue-token segment is
+ * exempt from the warning only when it matches one of these verbatim for
+ * the same key -- the same token under a different key (e.g. `dprint
+ * check` under `fix-validate`, whose documented form is `dprint fmt`) is
+ * not exempt.
+ */
+export const DOCUMENTED_TOOLCHAIN_SEGMENTS = {
+  'fix-validate': [
+    'npx dprint fmt "**/*.md"',
+    'npx markdownlint-cli2 --fix "**/*.md"',
+    'npx markdownlint-cli2 "**/*.md"',
+    'npx cspell lint "**" --no-progress',
+  ],
+  'pre-push-validate': [
+    'npx dprint check "**/*.md"',
+    'npx markdownlint-cli2 "**/*.md"',
+    'npx cspell lint "**" --no-progress',
+  ],
+  'post-fix-validate': [
+    'npx dprint fmt "**/*.md"',
+    'npx markdownlint-cli2 --fix "**/*.md"',
+    'npx markdownlint-cli2 "**/*.md"',
+    'npx cspell lint "**" --no-progress',
+  ],
+};
+function findToolchainResidueToken(value, key) {
+  const documented = DOCUMENTED_TOOLCHAIN_SEGMENTS[key];
+  const segments = value.split('&&').map((segment) => segment.trim());
   for (const token of ['dprint', 'markdownlint-cli2', 'cspell']) {
-    if (new RegExp(`\\b${escapeRegex(token)}\\b`, 'i').test(value)) {
+    const pattern = new RegExp(`\\b${escapeRegex(token)}\\b`, 'i');
+    const matchingSegments = segments.filter((segment) =>
+      pattern.test(segment),
+    );
+    if (matchingSegments.length === 0) {
+      continue;
+    }
+    const allDocumented =
+      documented !== undefined &&
+      matchingSegments.every((segment) => documented.includes(segment));
+    if (!allDocumented) {
       return token;
     }
   }
@@ -848,6 +919,59 @@ export function resolveConfiguredHelperRuntimeProfile(root) {
  */
 export function resolveConfiguredHelperRuntimePackageSpec(root) {
   return resolveConfiguredHelperRuntime(root).packageSpec;
+}
+/**
+ * Resolve the repository's live IDD config document, preferring the
+ * canonical `.github/idd/config.json` and falling back to the legacy
+ * `idd-policy.json` only when the canonical file is entirely absent --
+ * the same first-present-candidate-wins-outright walk over
+ * `LIVE_CONFIG_CANDIDATE_FILES` as `resolveConfiguredHelperRuntime` above,
+ * never a per-key merge of the two files. Shared by every scalar policy
+ * reader below (`readWorktreeGuardEnabled`, `readWorktreeGuardBranchPatterns`,
+ * `readCleanupEvidenceTrustedLogins`, `readTrustEmptyProtectionReads`, and
+ * `checkAutopilotSuitabilityConsistency`'s floor/label read) so the
+ * two-file resolution invariant lives in exactly one place instead of five
+ * separate copies that only ever read the canonical filename
+ * (idd-skill#2028).
+ *
+ * Returns `{ config: null, file: null }` when no candidate file exists;
+ * `{ config: null, file }` when the first present candidate (`file`) is
+ * not valid JSON -- each caller keeps its own fail-closed default for
+ * either case, matching every reader's behavior before this extraction.
+ * `file` names which candidate was selected (idd-skill#2301 review) so a
+ * caller building a remediation message can point at the file actually
+ * read instead of assuming the canonical name.
+ */
+function resolveLiveConfigDocument(root) {
+  for (const file of LIVE_CONFIG_CANDIDATE_FILES) {
+    const absolutePath = join(root, file);
+    if (!exists(absolutePath)) {
+      continue;
+    }
+    try {
+      return { config: JSON.parse(readFileSync(absolutePath, 'utf8')), file };
+    } catch {
+      return { config: null, file };
+    }
+  }
+  return { config: null, file: null };
+}
+/**
+ * Resolve `autopilotSuitability.floor` and `labels.blockedByHumanLabelName`
+ * from the live IDD config (canonical-first, legacy-`idd-policy.json`
+ * fallback via {@link resolveLiveConfigDocument}), for
+ * `checkAutopilotSuitabilityConsistency`'s cross-field check. Extracted as
+ * its own exported reader -- matching `readWorktreeGuardEnabled` and its
+ * siblings -- so this one config read is independently unit-testable
+ * without mocking `gh issue list` (idd-skill#2028).
+ */
+export function resolveAutopilotSuitabilityPolicy(root) {
+  const { config } = resolveLiveConfigDocument(root);
+  const typedConfig = config;
+  return {
+    floor: typedConfig?.autopilotSuitability?.floor,
+    blockedByHumanLabelName: typedConfig?.labels?.blockedByHumanLabelName,
+  };
 }
 /**
  * Decide whether a parsed live-config document is a schema finding, given
@@ -1095,6 +1219,80 @@ export function checkClaimTimingConsistency(root, report) {
     report.warnings.push(finding.message);
   }
 }
+/**
+ * `fully_autonomous_merge` grants an agent unattended F3 merge authority
+ * and is an explicit opt-in against the distributed `human_merge` default
+ * (idd-skill#2284). This reminds an operator who has `mergePolicy:
+ * "fully_autonomous_merge"` recorded -- including one who reached it via
+ * the old distributed default before it flipped -- that the profile is
+ * now an explicit choice, unless they have confirmed it with a matching
+ * `mergePolicyAck`. `mergePolicyAck` is diagnostics-only: it never
+ * participates in F2.5/F3 merge-authority resolution and this check never
+ * changes what any `mergePolicy` value authorizes.
+ *
+ * `file` names the live-config candidate `config` was actually read from
+ * (`.github/idd/config.json` or the legacy `idd-policy.json`) so the
+ * remediation text points at the file the operator needs to edit, not
+ * always the canonical name (idd-skill#2301 review) -- setting
+ * `mergePolicyAck` in a *different* candidate than the one this doctor
+ * run selected would not silence the warning.
+ *
+ * Returns null (no finding) for every `mergePolicy` value other than
+ * `fully_autonomous_merge`, for a missing/absent `mergePolicy` key, or
+ * when `mergePolicyAck` already equals `"fully_autonomous_merge"`.
+ *
+ * The ack is scoped to that exact value rather than a boolean: while
+ * `mergePolicy` is any value *other than* `fully_autonomous_merge`, this
+ * always returns null regardless of `mergePolicyAck` (the check only
+ * fires for that one value). But this is NOT a full time/generation-scoped
+ * reset -- a round trip that later lands back on the exact same
+ * `fully_autonomous_merge` value, with `mergePolicyAck` still equal to
+ * `"fully_autonomous_merge"` from an earlier, now-stale confirmation
+ * that was never cleared in between, does **not** resume the
+ * warning: it silently returns null again. This diagnostics-only field
+ * has no timestamp or generation counter to detect that narrow case -- a
+ * known, accepted limitation of the deliberately value-scoped (not
+ * boolean, not time-scoped) design (idd-skill#2301 review, rejected as a
+ * follow-up beyond this issue's locked scope).
+ */
+export function classifyMergePolicyAcknowledgement(
+  config,
+  file = '.github/idd/config.json',
+) {
+  if (config?.mergePolicy !== 'fully_autonomous_merge') {
+    return null;
+  }
+  if (config.mergePolicyAck === 'fully_autonomous_merge') {
+    return null;
+  }
+  return {
+    level: 'warning',
+    message:
+      'mergePolicy is "fully_autonomous_merge", an explicit opt-in against ' +
+      'the distributed "human_merge" default -- confirm this choice by ' +
+      `setting mergePolicyAck: "fully_autonomous_merge" in ${file} to ` +
+      'silence this reminder.',
+  };
+}
+/**
+ * Checks the resolved live-config candidate ({@link resolveLiveConfigDocument},
+ * the same first-present-wins walk every other scalar policy reader in
+ * this file shares, idd-skill#2028) for the mergePolicy acknowledgement
+ * finding above. Never errors: an unreadable or malformed config is
+ * already surfaced by {@link checkLiveConfigSchema} /
+ * {@link checkHelperRuntimeConfig}, so this silently skips instead of
+ * double-reporting.
+ */
+export function checkMergePolicyAcknowledgement(root, report) {
+  const { config, file } = resolveLiveConfigDocument(root);
+  if (config === null || file === null) {
+    return;
+  }
+  const finding = classifyMergePolicyAcknowledgement(config, file);
+  if (finding) {
+    report.warnings.push(finding.message);
+  }
+}
 // The two packages implicated in the #1164 incident: a stale node_modules
 // install silently masked a real `pnpm run typecheck` break on fresh
 // installs, because the break only surfaced once `@types/node` was
@@ -1255,14 +1453,8 @@ function checkTemplateVersionSignal(root, report) {
   );
 }
 export function readWorktreeGuardEnabled(root) {
-  try {
-    const config = JSON.parse(
-      readFileSync(join(root, '.github/idd/config.json'), 'utf8'),
-    );
-    return config?.worktreeGuard?.enabled === true;
-  } catch {
-    return false;
-  }
+  const { config } = resolveLiveConfigDocument(root);
+  return config?.worktreeGuard?.enabled === true;
 }
 /**
  * Read `worktreeGuard.branchPatterns` from the repo config, falling back
@@ -1271,26 +1463,20 @@ export function readWorktreeGuardEnabled(root) {
  * the hook agree on which branches the guard covers.
  */
 export function readWorktreeGuardBranchPatterns(root) {
-  try {
-    const config = JSON.parse(
-      readFileSync(join(root, '.github/idd/config.json'), 'utf8'),
-    );
-    const patterns = config?.worktreeGuard?.branchPatterns;
-    if (
-      Array.isArray(patterns) &&
-      patterns.length > 0 &&
-      patterns.every((p) => typeof p === 'string' && p.trim().length > 0)
-    ) {
-      // Return trimmed patterns: a configured entry with surrounding
-      // whitespace (e.g. `"issue/* "`) otherwise passes validation but
-      // never matches a real branch, silently covering nothing. The
-      // validation above stays fail-closed — any empty/whitespace-only or
-      // non-string entry invalidates the whole list and falls back to the
-      // defaults — so every surviving entry is non-empty after trim.
-      return patterns.map((pattern) => pattern.trim());
-    }
-  } catch {
-    // fall through to defaults
+  const { config } = resolveLiveConfigDocument(root);
+  const patterns = config?.worktreeGuard?.branchPatterns;
+  if (
+    Array.isArray(patterns) &&
+    patterns.length > 0 &&
+    patterns.every((p) => typeof p === 'string' && p.trim().length > 0)
+  ) {
+    // Return trimmed patterns: a configured entry with surrounding
+    // whitespace (e.g. `"issue/* "`) otherwise passes validation but
+    // never matches a real branch, silently covering nothing. The
+    // validation above stays fail-closed — any empty/whitespace-only or
+    // non-string entry invalidates the whole list and falls back to the
+    // defaults — so every surviving entry is non-empty after trim.
+    return patterns.map((pattern) => pattern.trim());
   }
   return DEFAULT_WORKTREE_GUARD_BRANCH_PATTERNS;
 }
@@ -1430,15 +1616,113 @@ export function classifyWorktreeHeadFinding(
  * `source` command loads the shared `_idd-worktree-guard.sh` helper. Matching
  * the sourcing line (not a bare mention) means a hook that only names the
  * helper in a comment — e.g. a leftover doc line after the source was removed —
- * correctly reads as inert rather than wired. Pure (no I/O) so the
- * wired/unwired classification can be unit-tested directly. A non-string
- * (absent/unreadable hook) is treated as not wiring the guard.
+ * correctly reads as inert rather than wired. The trailing `(?![.\w-])`
+ * boundary rejects a disabled/backed-up filename that merely starts with
+ * `_idd-worktree-guard.sh` (e.g. `_idd-worktree-guard.sh.disabled`,
+ * `_idd-worktree-guard.sh.bak`) — those are not the active guard file,
+ * regardless of the sourcing syntax around them (idd-skill#2476) — while
+ * still matching the CRLF-converted case (a `\r` right after `.sh` is not
+ * excluded, so `hookHasCrlfLineEndings` below stays the sole signal for
+ * that failure mode, unchanged from before this fix). Pure (no I/O) so
+ * the wired/unwired classification can be unit-tested directly. A
+ * non-string (absent/unreadable hook) is treated as not wiring the guard.
  */
 export function hookWiresWorktreeGuard(content) {
   return (
     typeof content === 'string' &&
-    /^[ \t]*(?:\.|source)[ \t]+[^\n]*_idd-worktree-guard\.sh/m.test(content)
+    /^[ \t]*(?:\.|source)[ \t]+[^\n]*_idd-worktree-guard\.sh(?![.\w-])/m.test(
+      content,
+    )
   );
+}
+/**
+ * True when hook file content contains a Windows-style CRLF line ending. A
+ * working tree checked out under Git for Windows' default
+ * `core.autocrlf=true`, with no adopter-side `.gitattributes` override,
+ * converts these shipped POSIX shell hook files to CRLF -- the trailing `\r`
+ * then becomes part of the sourced path (e.g.
+ * `. "$(dirname "$0")/_idd-worktree-guard.sh"\r`), which every POSIX shell
+ * rejects as "No such file", hard-blocking every commit/push even though
+ * `hookWiresWorktreeGuard`'s own regex still matches the text -- the `\r`
+ * sits after, not inside, the matched filename (idd-skill#2060). Pure (no
+ * I/O) so it can be unit-tested directly. A non-string (absent/unreadable
+ * hook) is treated as CRLF-free.
+ */
+export function hookHasCrlfLineEndings(content) {
+  return typeof content === 'string' && content.includes('\r\n');
+}
+/**
+ * True when a git hook file body chains execution to the corresponding
+ * shipped `.githooks/<hookName>` script via one of the two documented
+ * exec/invocation forms from ONBOARDING.md's "Coexisting with an existing
+ * hook manager" recipe:
+ *
+ * ```sh
+ * exec "$(git rev-parse --show-toplevel)/.githooks/<hookName>" "$@"
+ * "$(git rev-parse --show-toplevel)/.githooks/<hookName>" "$@" || exit $?
+ * ```
+ *
+ * Line-anchored and comment-immune the same way `hookWiresWorktreeGuard`
+ * is: a `#`-prefixed line (e.g. a leftover "was:" comment) never matches.
+ * The quoted path must begin the executed command token (immediately after
+ * an optional `exec`, with nothing else in between) — an unrelated leading
+ * command such as `echo "$(...)/.githooks/pre-commit" "$@"` never matches,
+ * since that would only *mention* the path rather than invoke it. The path
+ * must also use the documented `$(git rev-parse --show-toplevel)/` prefix
+ * exactly, not merely end in `.githooks/<hookName>` — an unrelated target
+ * such as `"$HOME/.githooks/<hookName>"` never matches, since that string
+ * has no relationship to this repository's own shipped script regardless
+ * of what happens to live at the fixed `.githooks/<hookName>` path this
+ * function's caller separately verifies. The non-`exec` form additionally
+ * requires the documented `|| exit $?` failure-propagation suffix
+ * immediately afterward (only whitespace may separate them) — without
+ * `exec`, a guard failure that isn't explicitly propagated can be silently
+ * swallowed by whatever the hook manager's own dispatcher runs next, so an
+ * invocation lacking that suffix is not accepted as reliable chaining
+ * evidence. Both forms must also end the line (only trailing whitespace and
+ * an optional `#` comment may follow) — a trailing shell operator such as
+ * `| cat` or a backgrounding `&` can decouple the line's own exit status
+ * from the guard's, so a line carrying either form of the two documented
+ * commands plus anything else is not accepted either. The trailing comment
+ * itself must be preceded by whitespace, matching real shell tokenizing: an
+ * adjacent `#` right after the closing quote (e.g. `"$@"#| cat`) is not a
+ * comment delimiter to the shell at all — it stays part of the same word —
+ * so accepting it here would let disguised trailing content back in through
+ * the very escape hatch meant only for a genuine, separated comment. A
+ * candidate line must also not be a backslash-continuation of the
+ * preceding physical line (a line ending in `\` before it) — the shell
+ * joins such a pair into one logical command, so e.g. a `printf '%s' \`
+ * line immediately followed by the exec form on the next physical line
+ * never actually invokes it; it only passes those words as arguments to
+ * the earlier command.
+ *
+ * Scope boundary: this is a bounded lexical heuristic for the two
+ * documented forms appearing as an ordinary standalone physical line, not
+ * a shell parser. It does not evaluate quoting edge cases, variable
+ * expansion, here-docs, `eval`, subshell wrapping, or any other
+ * adversarial or unusual shell construction that could still reach one of
+ * the two forms at runtime while lexically evading this check (or vice
+ * versa). This is a warning-level misconfiguration diagnostic, not a
+ * security boundary — an operator who wants to fool it can simply not
+ * enable the guard — so further hardening against constructions beyond
+ * the documented recipe is out of scope absent an observed incident.
+ * Pure (no I/O) so it can be unit-tested directly. A non-string
+ * (absent/unreadable hook) is treated as not chaining.
+ */
+export function hookChainsToGithooksScript(content, hookName) {
+  if (typeof content !== 'string') {
+    return false;
+  }
+  const escaped = escapeRegex(hookName);
+  const quotedPath = `"\\$\\(git rev-parse --show-toplevel\\)/\\.githooks/${escaped}"`;
+  const lineEnd = '(?:[ \\t]*$|[ \\t]+#.*$)';
+  const execForm = `exec[ \\t]+${quotedPath}[ \\t]+"\\$@"${lineEnd}`;
+  const nonExecForm = `${quotedPath}[ \\t]+"\\$@"[ \\t]*\\|\\|[ \\t]*exit[ \\t]+\\$\\?${lineEnd}`;
+  const notContinuedLine = '(?<!\\\\\\n)';
+  return new RegExp(
+    `${notContinuedLine}^[ \\t]*(?:${execForm}|${nonExecForm})`,
+    'm',
+  ).test(content);
 }
 /**
  * Decide whether the worktree guard is enabled-but-inert in the current
@@ -1455,6 +1739,7 @@ export function classifyWorktreeGuardActivation({
   headDetached,
   hooksPath,
   guardWired,
+  crlfHookNames,
 }) {
   // Only runs when the guard is opted in.
   if (!guardEnabled) {
@@ -1465,6 +1750,30 @@ export function classifyWorktreeGuardActivation({
   // `classifyPrimaryHead('HEAD')` reports no violation.
   if (headDetached) {
     return null;
+  }
+  // Checked ahead of `guardWired`, and regardless of its value: a
+  // CRLF-converted sourcing line still satisfies `hookWiresWorktreeGuard`'s
+  // regex, so `guardWired` alone cannot be trusted to catch this case.
+  if (crlfHookNames.length > 0) {
+    const names = crlfHookNames.join(', ');
+    const plural = crlfHookNames.length === 1 ? 's' : '';
+    return {
+      level: 'warning',
+      message:
+        `worktreeGuard.enabled is true but ${names} contain${plural} CRLF ` +
+        `line endings; the trailing \\r breaks the "." sourcing path (e.g. ` +
+        `". …: cannot open …/_idd-worktree-guard.sh: No such file") even ` +
+        `though the wiring check still matches the text. A CRLF-broken ` +
+        `hook HARD-BLOCKS any commit or push that invokes it -- via ` +
+        `core.hooksPath = .githooks directly, or a documented chain from ` +
+        `elsewhere -- not merely disables enforcement, so this must be ` +
+        `fixed before (or as part of) wiring core.hooksPath. Likely ` +
+        `cause: Git for Windows' default core.autocrlf=true with no ` +
+        `adopter-side .gitattributes override. Add an explicit LF rule ` +
+        `covering all three shipped .githooks/ files (for example ` +
+        `".githooks/* text eol=lf"); see ONBOARDING.md's worktree-guard ` +
+        `activation section`,
+    };
   }
   // Correctly wired → nothing to report.
   if (guardWired) {
@@ -1480,27 +1789,127 @@ export function classifyWorktreeGuardActivation({
       `worktreeGuard.enabled is true but the commit/push guard is not active ` +
       `in this environment (core.hooksPath = ${shown}); B1 primary-worktree ` +
       `commits will NOT be blocked here. Wire it with: ` +
-      `git config core.hooksPath .githooks`,
+      `git config core.hooksPath .githooks && chmod +x ` +
+      `.githooks/pre-commit .githooks/pre-push — or, if an existing hook ` +
+      `manager already owns core.hooksPath here, chain each hook to the ` +
+      `corresponding .githooks/* script instead of repointing directly; see ` +
+      `ONBOARDING.md's "Coexisting with an existing hook manager" section`,
   };
 }
 /**
  * Read the `pre-commit` and `pre-push` hooks at the resolved `core.hooksPath`
- * and report whether both wire the B1 guard. A relative hooks path resolves
- * against the repository root; an absolute one is used as-is.
+ * and report whether both wire the B1 guard, directly or through a
+ * documented one-level chain. A relative hooks path resolves against the
+ * repository root; an absolute one is used as-is.
+ *
+ * A hook counts as wired when the file **actually present and executable
+ * at `hooksPath`** — the one git itself would invoke, and only when git
+ * would actually invoke it: git silently skips a hook file that exists but
+ * lacks the executable bit — either:
+ *  - sources `_idd-worktree-guard.sh` directly (the base, non-chained
+ *    activation path), or
+ *  - itself chains to the corresponding `.githooks/<hook>` script via a
+ *    documented exec/invocation line, or — **only when `hooksPath` resolves
+ *    to exactly `.husky/_`**, the precise shape Husky v9's own
+ *    `core.hooksPath = .husky/_` plus the committed `.husky/<hook>` file
+ *    takes (see ONBOARDING.md's "Coexisting with an existing hook
+ *    manager") — hands off to the sibling file in `hooksPath`'s **parent**
+ *    directory that does, with that `.githooks/<hook>` script itself
+ *    confirmed to both genuinely source the guard and be executable
+ *    (defense-in-depth against a chain line pointing at a missing,
+ *    non-executable, or tampered target).
+ *
+ * The parent-directory fallback checks the **full path** relative to the
+ * repository root, not merely `hooksPath`'s last path segment: matching on
+ * a bare trailing `_` would also fire for an unrelated directory that
+ * happens to end in `_` (e.g. `.other-hooks/_`), and matching on an
+ * arbitrary directory at all — without the executable-bit check above —
+ * would let an unrelated file that merely happens to sit in some other
+ * hooksPath's parent directory, and happens to contain a chain-shaped
+ * line, supply chain evidence for two files with no real dispatch
+ * relationship (Copilot + Codex review, PR #1969).
+ *
+ * This stays bounded to the documented recipe's two concrete file
+ * locations — it does not trace an arbitrary hook manager's own dispatch
+ * machinery.
  */
-function worktreeGuardWiredAt(root, hooksPath) {
+export function worktreeGuardWiredAt(root, hooksPath) {
   const directory = isAbsolute(hooksPath) ? hooksPath : join(root, hooksPath);
-  const read = (name) => {
+  const parentDirectory = join(directory, '..');
+  const isHuskyUnderscoreSplit =
+    relative(root, directory).split('\\').join('/') === '.husky/_';
+  const githooksDirectory = join(root, '.githooks');
+  const read = (dir, name) => {
     try {
-      return readFileSync(join(directory, name), 'utf8');
+      return readFileSync(join(dir, name), 'utf8');
     } catch {
       return null;
     }
   };
-  return (
-    hookWiresWorktreeGuard(read('pre-commit')) &&
-    hookWiresWorktreeGuard(read('pre-push'))
-  );
+  const isExecutable = (dir, name) => {
+    try {
+      accessSync(join(dir, name), fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const wired = (name) => {
+    const atHooksPath = read(directory, name);
+    // git silently skips a hook file that exists but isn't executable, so
+    // neither wiring form below is reachable without this bit set.
+    if (atHooksPath === null || !isExecutable(directory, name)) {
+      return false;
+    }
+    if (hookWiresWorktreeGuard(atHooksPath)) {
+      return true;
+    }
+    const chains =
+      hookChainsToGithooksScript(atHooksPath, name) ||
+      (isHuskyUnderscoreSplit &&
+        hookChainsToGithooksScript(read(parentDirectory, name), name));
+    return (
+      chains &&
+      hookWiresWorktreeGuard(read(githooksDirectory, name)) &&
+      isExecutable(githooksDirectory, name)
+    );
+  };
+  return wired('pre-commit') && wired('pre-push');
+}
+// The three shipped hook files a native-Windows checkout under
+// `core.autocrlf=true` can silently convert to CRLF, hard-blocking the guard
+// (idd-skill#2060). Always read from `.githooks/` regardless of the resolved
+// `core.hooksPath`: that is where the shipped files themselves live, and
+// where an adopter's own `.gitattributes` LF rule must apply, whether or not
+// `core.hooksPath` points directly at them or chains through another
+// directory (e.g. Husky's `.husky/_`).
+const WORKTREE_GUARD_HOOK_FILE_NAMES = [
+  '_idd-worktree-guard.sh',
+  'pre-commit',
+  'pre-push',
+];
+/**
+ * Read the three shipped `.githooks/` files and report which ones (if any)
+ * contain CRLF line endings, in `WORKTREE_GUARD_HOOK_FILE_NAMES` order. A
+ * missing or unreadable file is treated as CRLF-free (nothing to report;
+ * `worktreeGuardWiredAt`'s own executable/presence checks already cover a
+ * genuinely missing hook).
+ */
+export function detectWorktreeGuardCrlfHookNames(root) {
+  const githooksDirectory = join(root, '.githooks');
+  const found = [];
+  for (const name of WORKTREE_GUARD_HOOK_FILE_NAMES) {
+    let content;
+    try {
+      content = readFileSync(join(githooksDirectory, name), 'utf8');
+    } catch {
+      content = null;
+    }
+    if (hookHasCrlfLineEndings(content)) {
+      found.push(name);
+    }
+  }
+  return found;
 }
 /**
  * Warn when `worktreeGuard.enabled` is true but the commit/push guard is not
@@ -1546,6 +1955,7 @@ function checkWorktreeGuardActive(root, report) {
     headDetached: false,
     hooksPath: hooksPath.length > 0 ? hooksPath : null,
     guardWired,
+    crlfHookNames: detectWorktreeGuardCrlfHookNames(root),
   });
   if (finding) {
     report.warnings.push(finding.message);
@@ -1588,6 +1998,101 @@ export function classifyBacklog(missingPrNumbers, warnThreshold) {
       ? missingPrNumbers.slice(0, 5)
       : [],
   };
+}
+const CUTOFF_DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * Parses a `--cleanup-backlog-bootstrap-cutoff` value (or a `gh`-supplied
+ * `mergedAt`) to a UTC millisecond timestamp, or `null` when unparsable
+ * (idd-skill#2226, CodeRabbit review on PR #2386). Deliberately stricter
+ * than plain `Date.parse`, which both silently normalizes calendar
+ * overflow (`Date.parse('2026-02-30')` resolves to March 2 instead of
+ * rejecting the date) and resolves a timestamp with a time-of-day but no
+ * explicit UTC offset in the HOST's local time zone -- so the identically
+ * configured cutoff would classify different PRs depending on which
+ * machine or CI runner evaluates it (confirmed empirically across `TZ`
+ * values before this fix).
+ *
+ * Two forms are accepted, both unambiguous everywhere:
+ * - a bare calendar date (`YYYY-MM-DD`), anchored to UTC midnight;
+ * - a full ISO8601 UTC timestamp recognized by `isValidIsoTimestamp`
+ *   (marker-helpers.mts) -- this repository's own existing canonical
+ *   timestamp contract, Z-suffixed only, no other offset forms.
+ *
+ * The date-only branch round-trips through `Date` -> `toISOString()` and
+ * compares the calendar-date portion against the input, which rejects
+ * overflow the same way `isValidIsoTimestamp` already does for its own
+ * shape.
+ */
+export function parseStrictCutoffToUtcMs(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  if (CUTOFF_DATE_ONLY_PATTERN.test(value)) {
+    const ms = Date.parse(`${value}T00:00:00.000Z`);
+    return Number.isFinite(ms) &&
+      new Date(ms).toISOString().slice(0, 10) === value
+      ? ms
+      : null;
+  }
+  return isValidIsoTimestamp(value) ? Date.parse(value) : null;
+}
+/**
+ * Numbers among `missingPrNumbers` whose merge predates `cutoffIso`
+ * (idd-skill#2226) -- presentation-only: never changes which PRs count as
+ * missing evidence, only which of them the backlog warning labels
+ * "bootstrap-era" instead of a genuine claim-marker-missing gap. A PR
+ * absent from `mergedAtByNumber` (its `mergedAt` was missing or malformed
+ * at fetch time), whose `mergedAt` fails {@link parseStrictCutoffToUtcMs},
+ * or an unparsable `cutoffIso` never counts as bootstrap-era -- fails
+ * closed to "flag every PR the same as before this feature existed"
+ * rather than guessing. Pure so it can be unit-tested without mocking
+ * `gh`.
+ */
+export function classifyBootstrapEraPrNumbers(
+  missingPrNumbers,
+  mergedAtByNumber,
+  cutoffIso,
+) {
+  const cutoffMs = parseStrictCutoffToUtcMs(cutoffIso);
+  if (cutoffMs === null) {
+    return new Set();
+  }
+  const bootstrapEra = new Set();
+  for (const number of missingPrNumbers) {
+    const mergedAtMs = parseStrictCutoffToUtcMs(mergedAtByNumber.get(number));
+    if (mergedAtMs !== null && mergedAtMs < cutoffMs) {
+      bootstrapEra.add(number);
+    }
+  }
+  return bootstrapEra;
+}
+/**
+ * Selects up to `limit` example PR numbers for display, guaranteeing at
+ * least one bootstrap-era-tagged example is visible whenever `bootstrapEra`
+ * is non-empty (idd-skill#2226 review, Copilot): a plain `slice(0, limit)`
+ * could silently omit every bootstrap-era number when none of the first
+ * `limit` entries in `missingPrNumbers` happen to be tagged, which would
+ * make the warning message's own bootstrap-era count clause look
+ * inconsistent with its own `Examples: ...` list (a non-zero count, zero
+ * `(bootstrap-era)` tags shown). Preserves the plain, order-preserving
+ * slice when `bootstrapEra` is empty or already represented in it --
+ * byte-identical to pre-#2226 behavior in the common case where no cutoff
+ * is configured at all.
+ */
+export function selectBacklogExamples(
+  missingPrNumbers,
+  bootstrapEra,
+  limit = 5,
+) {
+  const natural = missingPrNumbers.slice(0, limit);
+  if (bootstrapEra.size === 0 || natural.some((n) => bootstrapEra.has(n))) {
+    return natural;
+  }
+  const firstBootstrapEra = missingPrNumbers.find((n) => bootstrapEra.has(n));
+  if (firstBootstrapEra === undefined || natural.length === 0) {
+    return natural;
+  }
+  return [...natural.slice(0, natural.length - 1), firstBootstrapEra];
 }
 /**
  * Preamble line announcing how many merged PRs the backlog scan will visit.
@@ -1653,33 +2158,28 @@ export function formatCleanupBacklogRemediation(profile, packageSpec = '') {
 }
 /**
  * Trusted authors for `<!-- idd-cleanup-evidence: ... -->` comments: the
- * repository's configured `trustedMarkerActors` (`.github/idd/config.json`)
- * plus `github-actions[bot]`, the identity `post-merge-cleanup.yml` posts
- * under via `GITHUB_TOKEN`. Any commenter outside this set can pre-post the
- * marker prefix on a public repo, so an untrusted-author match must never
- * count as genuine cleanup evidence -- the same trust-scoping every other
- * IDD operational marker already applies. Fails closed to
- * `github-actions[bot]` alone (config unreadable/malformed never widens
- * trust).
+ * repository's configured `trustedMarkerActors` (from the live IDD config,
+ * canonical `.github/idd/config.json` first, falling back to the legacy
+ * `idd-policy.json` when the canonical file is absent -- see
+ * {@link resolveLiveConfigDocument}) plus `github-actions[bot]`, the
+ * identity `post-merge-cleanup.yml` posts under via `GITHUB_TOKEN`. Any
+ * commenter outside this set can pre-post the marker prefix on a public
+ * repo, so an untrusted-author match must never count as genuine cleanup
+ * evidence -- the same trust-scoping every other IDD operational marker
+ * already applies. Fails closed to `github-actions[bot]` alone (config
+ * unreadable/malformed never widens trust).
  */
 export function readCleanupEvidenceTrustedLogins(root) {
-  let trustedMarkerActors;
-  try {
-    const config = JSON.parse(
-      readFileSync(join(root, '.github/idd/config.json'), 'utf8'),
-    );
-    trustedMarkerActors = config?.trustedMarkerActors;
-  } catch {
-    trustedMarkerActors = undefined;
-  }
+  const { config } = resolveLiveConfigDocument(root);
+  const trustedMarkerActors = config?.trustedMarkerActors;
   const { actors } = resolveTrustedMarkerActors({
     config: { trustedMarkerActors },
   });
   return new Set([...actors, 'github-actions[bot]']);
 }
 /**
- * Filter a `gh pr list --json number,headRefName` result down to entries
- * whose head ref matches the IDD branch-naming convention -- the same
+ * Filter a `gh pr list --json number,headRefName,mergedAt` result down to
+ * entries whose head ref matches the IDD branch-naming convention -- the same
  * `worktreeGuard.branchPatterns` globs (`issue/*`, `roadmap-audit/*` by
  * default; see `readWorktreeGuardBranchPatterns`) that `classifyPrimaryHead`
  * already matches elsewhere in this file. A routine non-IDD merge (a
@@ -1688,6 +2188,11 @@ export function readCleanupEvidenceTrustedLogins(root) {
  * before the backlog count, evidence-fetch loop, or `Examples: ...` list
  * ever sees it (idd-skill#1829). Pure (no I/O) so it can be unit-tested
  * without mocking `gh`.
+ *
+ * The returned `mergedAt` field (#2226) is present only when the input
+ * entry carries a non-empty string value -- an entry with no `mergedAt`
+ * (or a malformed one) yields `{ number }` alone, so callers built before
+ * this field existed (and their fixtures) see an unchanged shape.
  */
 export function filterIddBranchMergedPrs(
   prs,
@@ -1705,13 +2210,33 @@ export function filterIddBranchMergedPrs(
     ) {
       continue;
     }
-    filtered.push({ number: number });
+    const mergedAt = pr?.mergedAt;
+    const entry = {
+      number: number,
+    };
+    if (typeof mergedAt === 'string' && mergedAt.length > 0) {
+      entry.mergedAt = mergedAt;
+    }
+    filtered.push(entry);
   }
   return filtered;
+}
+/**
+ * Renders the backlog warning's `Examples: ...` clause, appending a
+ * `(bootstrap-era)` tag to every listed PR number present in
+ * `bootstrapEra` (idd-skill#2226) -- a presentation-only distinction, never
+ * a change to which numbers are listed. Pure so it can be unit-tested
+ * independently of the network scan.
+ */
+export function formatCleanupBacklogExamples(examples, bootstrapEra) {
+  return examples
+    .map((n) => (bootstrapEra.has(n) ? `#${n} (bootstrap-era)` : `#${n}`))
+    .join(', ');
 }
 function checkPostMergeCleanupBacklog(root, options, report) {
   const windowDays = options.windowDays;
   const warnThreshold = options.warnThreshold;
+  const bootstrapCutoff = options.bootstrapCutoff;
   const requireGithub = options.requireGithub === true;
   // Soft GitHub-API failures (gh missing, no token, repo view fails,
   // pr list fails) are silent by default — same pattern as the other
@@ -1765,7 +2290,7 @@ function checkPostMergeCleanupBacklog(root, options, report) {
       '--search',
       `merged:>=${sinceIso}`,
       '--json',
-      'number,headRefName',
+      'number,headRefName,mergedAt',
       '--limit',
       '1000',
     ],
@@ -1791,10 +2316,10 @@ function checkPostMergeCleanupBacklog(root, options, report) {
   // routine non-IDD merge (Dependabot dependency bumps, for example) never
   // created a branch the F4 cleanup-evidence contract applies to, so it
   // must not count toward the backlog total or the `Examples: ...` list.
-  const iddMergedPrs = filterIddBranchMergedPrs(
-    mergedPrs,
-    readWorktreeGuardBranchPatterns(root),
-  );
+  // Hoisted into a named variable (idd-skill#1936) so the warning text
+  // below can name the patterns actually in effect, not just apply them.
+  const branchPatterns = readWorktreeGuardBranchPatterns(root);
+  const iddMergedPrs = filterIddBranchMergedPrs(mergedPrs, branchPatterns);
   if (iddMergedPrs.length === 0) {
     return;
   }
@@ -1805,6 +2330,12 @@ function checkPostMergeCleanupBacklog(root, options, report) {
     formatCleanupBacklogScanPreamble(iddMergedPrs.length),
   );
   const trustedLogins = readCleanupEvidenceTrustedLogins(root);
+  const mergedAtByNumber = new Map();
+  for (const pr of iddMergedPrs) {
+    if (pr.mergedAt) {
+      mergedAtByNumber.set(pr.number, pr.mergedAt);
+    }
+  }
   const missing = [];
   const evidenceFailures = [];
   let scanned = 0;
@@ -1870,11 +2401,36 @@ function checkPostMergeCleanupBacklog(root, options, report) {
   if (!verdict.warn) {
     return;
   }
-  const examplesText = verdict.examples.map((n) => `#${n}`).join(', ');
+  // idd-skill#2226: presentation-only -- `verdict.count`/`warn`/`examples`
+  // above are computed from the unmodified `missing` list, so a configured
+  // bootstrapCutoff never changes which PRs are flagged, only how the
+  // `Examples: ...` clause labels the ones merged before it.
+  const bootstrapEra = classifyBootstrapEraPrNumbers(
+    missing,
+    mergedAtByNumber,
+    bootstrapCutoff,
+  );
+  // idd-skill#2226 review (Copilot): select from the full `missing` list,
+  // not `verdict.examples` alone, so a non-zero bootstrapEraCountClause
+  // below is never shown alongside an Examples: list with zero
+  // (bootstrap-era) tags.
+  const examplesText = formatCleanupBacklogExamples(
+    selectBacklogExamples(missing, bootstrapEra),
+    bootstrapEra,
+  );
+  const bootstrapEraCountClause =
+    bootstrapEra.size > 0
+      ? ` (${bootstrapEra.size} bootstrap-era, merged before ${bootstrapCutoff})`
+      : '';
   const { profile, packageSpec } = resolveConfiguredHelperRuntime(root);
   const remediation = formatCleanupBacklogRemediation(profile, packageSpec);
+  // State the scoping explicitly (idd-skill#1936) so an operator reading a
+  // low count does not misread it as "no merged PRs in the window" --
+  // non-IDD merges (Dependabot bumps, etc.) are already excluded above and
+  // never reach this count.
+  const patternsText = branchPatterns.join(', ');
   report.warnings.push(
-    `post-merge cleanup backlog: ${verdict.count} merged PRs in the last ${windowDays} days lack F4 cleanup evidence (warn threshold: ${warnThreshold}). Examples: ${examplesText}. ${remediation}`,
+    `post-merge cleanup backlog: ${verdict.count} merged PRs in the last ${windowDays} days lack F4 cleanup evidence${bootstrapEraCountClause} (warn threshold: ${warnThreshold}; scoped to IDD branch patterns: ${patternsText}). Examples: ${examplesText}. ${remediation}`,
   );
 }
 // Default drift thresholds (idd-skill#1269): warn when the checked-out HEAD
@@ -2582,10 +3138,10 @@ function checkWorkshopExampleRepoBackLink(root, options, report) {
     );
   }
 }
-function checkGithubReadiness(root, requireGithub, report) {
+function checkGithubReadiness(root, requireGithub, strict, report) {
   const repoView = runCommand(
     'gh',
-    ['repo', 'view', '--json', 'owner,name,defaultBranchRef'],
+    ['repo', 'view', '--json', 'owner,name,defaultBranchRef,url'],
     root,
   );
   if (!repoView.ok) {
@@ -2613,6 +3169,7 @@ function checkGithubReadiness(root, requireGithub, report) {
   const owner = parsed.owner?.login;
   const repo = parsed.name;
   const branch = parsed.defaultBranchRef?.name;
+  const ghHostname = resolveTargetGhHostname(parsed.url);
   if (!owner || !repo || !branch) {
     const message =
       'github checks skipped: repository owner/name/default branch is incomplete';
@@ -2623,12 +3180,26 @@ function checkGithubReadiness(root, requireGithub, report) {
     }
     return;
   }
-  const protection = runCommand(
-    'gh',
-    ['api', `repos/${owner}/${repo}/branches/${branch}/protection`],
-    root,
-  );
-  if (!protection.ok) {
+  const trustEmptyProtectionReads = readTrustEmptyProtectionReads(root);
+  const encodedBranch = encodeURIComponent(branch);
+  let branchRulesRead;
+  let branchProtectionRead;
+  try {
+    branchRulesRead = fetchGovernanceJson(
+      `repos/${owner}/${repo}/rules/branches/${encodedBranch}`,
+      true,
+      trustEmptyProtectionReads,
+      [],
+      (path, paginate) => fetchGhApiJsonAt(root, ghHostname, path, paginate),
+    );
+    branchProtectionRead = fetchGovernanceJson(
+      `repos/${owner}/${repo}/branches/${encodedBranch}/protection`,
+      false,
+      trustEmptyProtectionReads,
+      {},
+      (path, paginate) => fetchGhApiJsonAt(root, ghHostname, path, paginate),
+    );
+  } catch {
     const message = `branch protection not readable for ${owner}/${repo}:${branch}`;
     if (requireGithub) {
       report.errors.push(message);
@@ -2637,11 +3208,8 @@ function checkGithubReadiness(root, requireGithub, report) {
     }
     return;
   }
-  let protectionJson;
-  try {
-    protectionJson = JSON.parse(protection.stdout);
-  } catch {
-    const message = 'branch protection response is not valid JSON';
+  if (isBranchProtectionUnreadable(branchRulesRead, branchProtectionRead)) {
+    const message = `branch protection not readable for ${owner}/${repo}:${branch}`;
     if (requireGithub) {
       report.errors.push(message);
     } else {
@@ -2649,25 +3217,344 @@ function checkGithubReadiness(root, requireGithub, report) {
     }
     return;
   }
-  const requiredChecks = protectionJson.required_status_checks?.contexts ?? [];
-  const strict = protectionJson.required_status_checks?.strict ?? false;
-  if (requiredChecks.length === 0) {
+  if (isRulesetsOnlyTrustGap(branchRulesRead, branchProtectionRead)) {
+    const message = formatRulesetsOnlyTrustGapWarning(owner, repo, branch);
+    if (strict) {
+      report.errors.push(message);
+    } else {
+      report.warnings.push(message);
+    }
+    // Deliberately falls through to evaluateBranchProtectionFindings below
+    // (unlike the isBranchProtectionUnreadable branch above, which returns):
+    // the Rulesets read still succeeded, so the required-checks and
+    // review-policy findings it powers remain accurate and worth reporting.
+  }
+  const findings = evaluateBranchProtectionFindings(
+    branchRulesRead.value,
+    branchProtectionRead.value,
+  );
+  if (
+    findings.requiredCheckCount === 0 &&
+    !findings.requiredChecksSourcePinned
+  ) {
     report.warnings.push(
       `branch protection is enabled but no required status checks are configured on ${branch}`,
     );
+  } else if (findings.requiredCheckCount === 0) {
+    report.passes.push(
+      `required status checks configured on ${branch} via a source-pinned requirement (e.g. a Rulesets "workflows" rule) with no enumerable check name`,
+    );
   } else {
     report.passes.push(
-      `required status checks configured on ${branch} (${requiredChecks.length}, strict=${strict})`,
+      `required status checks configured on ${branch} (${findings.requiredCheckCount}, strict=${findings.requiredChecksStrict})`,
     );
   }
-  const reviewConfig = protectionJson.required_pull_request_reviews;
-  if (!reviewConfig) {
+  if (!findings.reviewPolicyConfigured) {
     report.warnings.push(
       `required pull request reviews are not configured on ${branch}`,
     );
   } else {
     report.passes.push('required pull request review policy is configured');
   }
+}
+/**
+ * Whether `checkGithubReadiness` should report branch protection as
+ * unreadable, combining both governance reads' outcomes. Only `true` when
+ * **both** the Rulesets read (`rules/branches/{branch}`) and the classic
+ * read (`branches/{branch}/protection`) are unreadable -- matching
+ * idd-skill#2010's acceptance criteria ("When the Rulesets read succeeds,
+ * or the config key is `true`, drop the warning ... instead of returning
+ * early"). A repository on Rulesets-only protection legitimately 404s on
+ * the classic endpoint (GitHub's classic-protection endpoint never
+ * reflects Rulesets-only configuration); requiring only one read to
+ * succeed keeps that case from being misreported as unreadable even when
+ * `ciGate.trustEmptyProtectionReads` is unset (idd-skill#2010 review,
+ * Copilot round). Pure so the classic-only / Rulesets-only / both /
+ * neither matrix is directly testable without mocking `gh`, mirroring
+ * {@link evaluateBranchProtectionFindings}'s own rationale.
+ */
+export function isBranchProtectionUnreadable(
+  branchRulesRead,
+  branchProtectionRead,
+) {
+  return branchRulesRead.unreadable && branchProtectionRead.unreadable;
+}
+/**
+ * Whether `checkGithubReadiness` should warn (or, under `--strict`, error)
+ * that the F2/F3 merge gate will still fail closed on the first merge
+ * attempt despite `idd-doctor` itself reporting clean -- distinct from, and
+ * strictly narrower than, {@link isBranchProtectionUnreadable} above (this
+ * predicate never changes that function's own leniency; idd-skill#2587).
+ *
+ * `true` only when the Rulesets read succeeded with at least one rule AND
+ * the classic read is unreadable:
+ *
+ * - `branchRulesRead.value.length > 0` after a successful
+ *   (`unreadable: false`) `rules/branches/{branch}` read means at least one
+ *   rule is currently **enforcing** on the branch -- GitHub's REST API
+ *   reference for this endpoint states verbatim: "Rules in rulesets with
+ *   'evaluate' or 'disabled' enforcement statuses are not returned." A
+ *   non-empty result therefore never needs a separate enforcement-status
+ *   field (this codebase's `BranchRuleLike` carries none).
+ * - `branchProtectionRead.unreadable` can only be `true` here because
+ *   `checkGithubReadiness` passes the *same* `ciGate.trustEmptyProtectionReads`
+ *   value into both governance reads, and {@link fetchGovernanceJson}
+ *   (`pre-merge-readiness.mts`) sets `unreadable: true` on a read only for a
+ *   genuine `404` when that trust flag is not `true` -- any other thrown
+ *   status re-throws and is caught by `checkGithubReadiness`'s own outer
+ *   `try`/`catch` before this predicate ever runs. So this condition being
+ *   `true` already implies `ciGate.trustEmptyProtectionReads` is not `true`,
+ *   with no separate trust parameter needed.
+ *
+ * Pure and dependency-free, mirroring {@link isBranchProtectionUnreadable}'s
+ * own rationale, so the rulesets-only / both-readable / neither-readable /
+ * no-rulesets-protection matrix is directly testable without mocking `gh`.
+ */
+export function isRulesetsOnlyTrustGap(branchRulesRead, branchProtectionRead) {
+  return (
+    !branchRulesRead.unreadable &&
+    branchRulesRead.value.length > 0 &&
+    branchProtectionRead.unreadable
+  );
+}
+/**
+ * Render {@link isRulesetsOnlyTrustGap}'s warning/error text. Extracted as
+ * its own function so the exact wording -- naming
+ * `ciGate.trustEmptyProtectionReads` and the F2/F3 fail-closed consequence,
+ * per idd-skill#2587's acceptance criteria -- is directly unit-testable
+ * without re-deriving it from a full `checkGithubReadiness` run.
+ *
+ * The endpoint path fragments URL-encode `branch` (matching
+ * `checkGithubReadiness`'s own `encodeURIComponent(branch)` call, since a
+ * branch name can contain `/`) so the printed path reflects the actual API
+ * call; the human-readable `owner/repo:branch` identifier prefix stays
+ * unencoded, matching {@link isBranchProtectionUnreadable}'s own message
+ * convention (Copilot review, idd-skill#2587 PR #2600).
+ *
+ * States the two possible remedies as conditional on cause, rather than
+ * implying `ciGate.trustEmptyProtectionReads` is required "either way" --
+ * when the 404 is permission-masked, fixing the token's permissions makes
+ * the classic read succeed and no trust flag is needed at all; only when
+ * the 404 is genuine (classic protection truly isn't configured) does the
+ * trust flag apply. Blindly setting it over a genuine permission gap would
+ * trust a read that should actually be fixed at the token-scope level
+ * (same tradeoff `fetchGovernanceJson`'s own doc comment describes;
+ * Copilot review, idd-skill#2587 PR #2600).
+ */
+export function formatRulesetsOnlyTrustGapWarning(owner, repo, branch) {
+  const encodedBranch = encodeURIComponent(branch);
+  return (
+    `branch protection on ${owner}/${repo}:${branch}: the classic branches/${encodedBranch}/protection ` +
+    `read returned 404, while the Rulesets read (rules/branches/${encodedBranch}) already confirms at ` +
+    `least one enforcing rule. A 404 here can mean either (1) the token lacks permission to read the ` +
+    `classic endpoint -- fix the token's permissions, the safer remedy, and no config change is ` +
+    `needed, or (2) classic protection genuinely isn't configured (Rulesets-only) -- if so, set ` +
+    `ciGate.trustEmptyProtectionReads: true in .github/idd/config.json. Until whichever cause is ` +
+    `resolved, the F2/F3 merge gate will still fail closed on the first merge attempt`
+  );
+}
+/**
+ * Combine a classic `branches/{branch}/protection` read with a GitHub
+ * Rulesets `rules/branches/{branch}` read into the findings
+ * `checkGithubReadiness` reports. Pure and network-free so the
+ * classic-only / Rulesets-only / both / neither matrix is directly
+ * testable without mocking `gh`.
+ *
+ * Required-check counting reuses the already-exported
+ * `summarizeBranchReviewRequirements()` (`protocol-helpers.mts`), which
+ * already normalizes the field-name differences between classic
+ * `contexts` and a Rulesets `required_status_checks` rule's `parameters`
+ * into one deduplicated name set -- this function adds no separate
+ * name-extraction logic of its own (idd-skill#2010).
+ *
+ * Review-policy presence deliberately stays a presence check, not a
+ * minimum-approval-count check, matching this file's pre-existing
+ * classic-only behavior: a repository that requires a pull request but
+ * configures zero mandatory approvals still counts as configured. The
+ * same presence test is simply widened to also recognize a Rulesets
+ * `pull_request`-type rule.
+ *
+ * `requiredChecksStrict` also honors a Rulesets `required_status_checks`
+ * rule's own `strict_required_status_checks_policy` parameter, not just
+ * classic protection's `strict` field -- a Rulesets-only repository with
+ * that policy enabled previously always reported `strict=false`
+ * (idd-skill#2010 review). GitHub's ruleset docs state that flag "will
+ * not take effect unless at least one status check is enabled", so it
+ * only counts here when that same rule's own check list is non-empty --
+ * the same non-empty-check guard `summarizeBranchCurrency()`
+ * (`protocol-helpers.mts`) already applies for the identical reason
+ * (`#1513`), reusing its `summarizeRequiredCheckMetadata()` extraction
+ * rather than a second name-counting implementation.
+ */
+export function evaluateBranchProtectionFindings(
+  branchRules,
+  branchProtection,
+) {
+  const requirements = summarizeBranchReviewRequirements(
+    branchRules,
+    branchProtection,
+  );
+  const reviewPolicyConfigured =
+    Boolean(branchProtection.required_pull_request_reviews) ||
+    branchRules.some((rule) => rule?.type === 'pull_request');
+  const rulesetStrict = branchRules.some(
+    (rule) =>
+      rule?.type === 'required_status_checks' &&
+      rule.parameters?.strict_required_status_checks_policy === true &&
+      summarizeRequiredCheckMetadata(rule.parameters ?? {}).names.length > 0,
+  );
+  return {
+    requiredCheckCount: requirements.requiredCheckNames.length,
+    requiredChecksSourcePinned: requirements.requiredCheckSourcePinned,
+    requiredChecksStrict:
+      Boolean(branchProtection.required_status_checks?.strict) || rulesetStrict,
+    reviewPolicyConfigured,
+  };
+}
+/**
+ * Root-relative `ciGate.trustEmptyProtectionReads` reader
+ * (idd-skill#2010; #1377 introduced the flag). Deliberately not
+ * `pre-merge-readiness.mts`'s own `readTrustEmptyProtectionReads`, which
+ * reads only `.github/idd/config.json` relative to `process.cwd()` and has
+ * no legacy fallback -- `idd-doctor.mts` supports `--repo-root <path>` and
+ * resolves the live config root-relative, canonical `.github/idd/config.json`
+ * first, falling back to the legacy `idd-policy.json` when the canonical
+ * file is absent (see {@link resolveLiveConfigDocument}, idd-skill#2028),
+ * the same two-file resolution every other scalar reader in this file
+ * shares. Fails closed to `false` on a missing or unparseable config,
+ * matching `normalizePolicyConfig(null).ciGate.trustEmptyProtectionReads`'s
+ * default.
+ */
+export function readTrustEmptyProtectionReads(root) {
+  const { config } = resolveLiveConfigDocument(root);
+  return config?.ciGate?.trustEmptyProtectionReads === true;
+}
+/**
+ * Derive the host {@link fetchGhApiJsonAt} should target from the target
+ * repository's own `gh repo view --json url` result (already fetched once
+ * by `checkGithubReadiness`, so this adds no extra `gh` call). `gh api`
+ * resolves its target host from `GH_HOST` / `--hostname` / the CLI's
+ * single authenticated host, defaulting to `github.com` -- unlike a
+ * higher-level subcommand such as `gh repo view`, it does **not** infer
+ * the host from the checked-out repository's Git remote at all, so
+ * routing the request through `cwd: root` (as every other `gh` call in
+ * this function already does) has no effect on which host `gh api`
+ * targets (`gh-exec.mts`'s `resolveGhApiHostname()` documents the
+ * identical `gh api` contract for its own GHES fix, `#1962`; idd-skill#2010
+ * review, Codex round 2). `resolveGhApiHostname()` itself is env-based
+ * (`GH_HOST`/`GITHUB_SERVER_URL`) and deliberately does not derive a host
+ * from a git remote, by its own design -- the wrong signal here, since
+ * `idd-doctor --repo-root <path>` may target a repository on a different
+ * host than the calling environment's own default. Deriving from the
+ * target repository's own resolved `url` instead is the correct,
+ * `--repo-root`-specific signal. Returns the literal `'github.com'` for
+ * the common `github.com` case as an explicit override: an explicit
+ * `--hostname` flag wins over `gh api`'s own environment-based `GH_HOST`
+ * fallback, but `undefined` (no `--hostname` at all) leaves `GH_HOST` in
+ * force, so a GHES-configured `GH_HOST` in the calling environment would
+ * otherwise leak into a governance read for a genuinely
+ * `github.com`-hosted target repository (idd-skill#2030).
+ *
+ * Returns `URL.host` (hostname plus an explicit non-default port, when
+ * present -- Node's `URL` already elides an explicit-but-default `:443`
+ * on an `https:` URL, so no separate default-port branch is needed here),
+ * not `URL.hostname` -- unlike `resolveGhApiHostname()` (`gh-exec.mts`),
+ * which deliberately keeps the bare hostname for its own env-derived
+ * inputs. The distinction matters only to {@link fetchGhApiJsonAt}: `gh
+ * api --hostname` rejects any value containing a colon outright
+ * (confirmed against a real `gh` binary), so a ported value can never
+ * reach `--hostname`; {@link fetchGhApiJsonAt} instead detects the colon
+ * and routes a ported host through an absolute API URL, omitting
+ * `--hostname` entirely for that request (idd-skill#2052). Omitting it is
+ * not a regression: `gh` v2.98.0 / `cli/go-gh` v2.13.0 source
+ * (`pkg/cmd/api/http.go::httpRequest`, `api/http_client.go::
+ * AddAuthTokenHeader`, `pkg/auth/auth.go::NormalizeHostname`) confirms an
+ * absolute-URL request never consults the `--hostname`/`GH_HOST`-derived
+ * host at all -- routing and the per-request credential lookup both key
+ * off the request URL's own host (port included, `NormalizeHostname`
+ * never strips one), so a `--hostname` alongside an absolute URL would be
+ * inert, not protective. One residual, real gh limitation this fix does
+ * not and cannot change: `gh auth login --hostname` is gated by the same
+ * colon-rejecting validator, so a ported host can never have a
+ * keyring/config-stored credential either -- only `GH_ENTERPRISE_TOKEN`/
+ * `GITHUB_ENTERPRISE_TOKEN` (checked independently of the exact host
+ * string) authenticate a ported GHES host reliably today. Returns
+ * `undefined` only for an unparseable or host-less `url`.
+ */
+export function resolveTargetGhHostname(url) {
+  if (!url) {
+    return undefined;
+  }
+  let host;
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  return host ? host : undefined;
+}
+/**
+ * Root-scoped `gh api` fetch for {@link fetchGovernanceJson}'s injectable
+ * `fetchJson` parameter. That function's own default fetcher
+ * (`ghApiJson` in `pre-merge-readiness.mts`, via `runGh`/`ghText`) never
+ * passes `--hostname` at all, so it always targets `gh`'s own default
+ * host resolution -- correct for that file's own CLI, which always
+ * operates on the repository it is invoked from (typically the same
+ * host the calling environment already authenticates against), but
+ * wrong for `idd-doctor.mts`'s `--repo-root <path>`, which can target a
+ * different repository (and GitHub host) than the caller's own working
+ * directory or environment. Pass the `hostname` {@link
+ * resolveTargetGhHostname} resolved from the target repository's own
+ * `gh repo view` result, and route through this file's own
+ * `runCommand()` (already `cwd`-scoped to `root` for every other `gh`
+ * call in this function -- harmless for `gh api`'s own host resolution,
+ * but keeps this call consistent with its siblings). Mirrors
+ * `ghApiJson`'s own `--paginate --jq '.[]'` NDJSON handling via the
+ * shared `parsePaginatedGhNdjson()`, and shapes a failure's thrown error
+ * the same way a real `execFileSync` failure would (`status`/`stderr`/
+ * `stdout`), so `fetchGovernanceJson()`'s `deriveGhHttpStatus()`-based
+ * 404 detection still works, including its stdout-carried JSON-body
+ * fallback. Exported for direct test coverage of that failure shape.
+ *
+ * A `hostname` carrying an explicit port (from {@link
+ * resolveTargetGhHostname}'s `URL.host`) can never be routed through
+ * `--hostname` -- `gh` rejects any value containing a colon outright --
+ * so this builds an absolute API URL instead
+ * (`https://{host}/api/v3/{path}`, mirroring `gh`'s own
+ * `ghinstance.RESTPrefix` enterprise-host convention: no `api.`
+ * subdomain, that trick is `github.com`-only) and omits `--hostname`
+ * from argv entirely for that request. This is not a functional
+ * regression: `gh`'s own request/auth pipeline never consults
+ * `--hostname` once the endpoint argument is already an absolute URL --
+ * both routing and per-request credential lookup key off the request
+ * URL's own host (idd-skill#2052; see {@link resolveTargetGhHostname}'s
+ * JSDoc for the source citations). Every non-ported `hostname` (including
+ * `undefined`) keeps the exact prior argv shape.
+ */
+export function fetchGhApiJsonAt(root, hostname, path, paginate) {
+  const isPorted = hostname?.includes(':') ?? false;
+  const endpoint = isPorted
+    ? `https://${hostname}/api/v3/${path.replace(/^\//, '')}`
+    : path;
+  const argv = [
+    'api',
+    endpoint,
+    ...(!isPorted && hostname ? ['--hostname', hostname] : []),
+    ...(paginate ? ['--paginate', '--jq', '.[]'] : []),
+  ];
+  const result = runCommand('gh', argv, root);
+  if (!result.ok) {
+    throw Object.assign(new Error('gh api failed'), {
+      status: 1,
+      stderr: result.stderr ?? '',
+      stdout: result.stdout ?? '',
+    });
+  }
+  const raw = result.stdout.trim();
+  if (!raw) {
+    return paginate ? [] : {};
+  }
+  return paginate ? parsePaginatedGhNdjson(raw) : JSON.parse(raw);
 }
 function runCommand(command, argv, cwd) {
   try {
@@ -2683,6 +3570,7 @@ function runCommand(command, argv, cwd) {
       ok: false,
       code: candidate.status,
       stderr: candidate.stderr?.toString?.() ?? '',
+      stdout: candidate.stdout?.toString?.() ?? '',
     };
   }
 }
@@ -2698,6 +3586,7 @@ const IDD_DOCTOR_FLAG_SPEC = {
   '--repo-root': { type: 'string' },
   '--cleanup-backlog-window-days': { type: 'string' },
   '--cleanup-backlog-warn-threshold': { type: 'string' },
+  '--cleanup-backlog-bootstrap-cutoff': { type: 'string' },
   '--workshop-cross-ref-allow-missing': { type: 'string' },
 };
 function parseArgs(argv) {
@@ -2749,6 +3638,27 @@ function parseArgs(argv) {
     }
     args.cleanupBacklogWarnThreshold = numeric;
   }
+  // --cleanup-backlog-bootstrap-cutoff (idd-skill#2226): optional, no
+  // default -- absent means every PR is still reported the same,
+  // undifferentiated way this check has always used. Rejects an explicit
+  // empty string (matching --cleanup-backlog-window-days's own
+  // empty-string guard above) and anything parseStrictCutoffToUtcMs
+  // cannot resolve -- a bare `Date.parse` check here would accept
+  // calendar overflow and a host-timezone-dependent offset-less
+  // timestamp, both fixed by that stricter parser (CodeRabbit review on
+  // PR #2386).
+  const bootstrapCutoffToken = values['cleanup-backlog-bootstrap-cutoff'];
+  if (bootstrapCutoffToken !== undefined) {
+    if (!bootstrapCutoffToken) {
+      throw new Error('--cleanup-backlog-bootstrap-cutoff requires a value');
+    }
+    if (parseStrictCutoffToUtcMs(bootstrapCutoffToken) === null) {
+      throw new Error(
+        `--cleanup-backlog-bootstrap-cutoff must be a strict YYYY-MM-DD date or a Z-suffixed ISO8601 timestamp (got "${bootstrapCutoffToken}")`,
+      );
+    }
+    args.cleanupBacklogBootstrapCutoff = bootstrapCutoffToken;
+  }
   // --workshop-cross-ref-allow-missing: pre-migration guard used
   // `=== undefined` (NOT `!value`), so an explicit empty string was
   // accepted and resolved to an empty list (''.split(',') -> [''] ->
@@ -2788,9 +3698,10 @@ options:
   --repo-root <path>                       repository root to inspect (default: cwd)
   --json                                   print JSON report
   --require-github                         treat GitHub API check failures as errors
-  --strict                                 treat a primary-worktree implementation-branch HEAD as an error (also enabled by worktreeGuard.enabled in config)
+  --strict                                 treat a primary-worktree implementation-branch HEAD as an error (also enabled by worktreeGuard.enabled in config); also treats a rulesets-only branch-protection trust gap (see ciGate.trustEmptyProtectionReads) as an error instead of a warning
   --cleanup-backlog-window-days <N>        merged-PR window for the cleanup backlog check (default: 14)
   --cleanup-backlog-warn-threshold <N>     backlog count above which the check warns (default: 2)
+  --cleanup-backlog-bootstrap-cutoff <YYYY-MM-DD|ISO8601Z> label a flagged merged PR "(bootstrap-era)" in the report when it merged before this UTC date/timestamp, instead of a genuine claim-marker-missing gap (default: none -- every flagged PR reports the same way)
   --workshop-cross-ref-allow-missing <list> comma-separated entry-point paths to skip in the workshop cross-reference check (default: none)
   --help, -h                               show this help
 
@@ -2877,6 +3788,7 @@ if (import.meta.main) {
     requireGithub: args.requireGithub,
     cleanupBacklogWindowDays: args.cleanupBacklogWindowDays,
     cleanupBacklogWarnThreshold: args.cleanupBacklogWarnThreshold,
+    cleanupBacklogBootstrapCutoff: args.cleanupBacklogBootstrapCutoff,
     workshopCrossRefAllowMissing: args.workshopCrossRefAllowMissing,
     strict: args.strict,
   });

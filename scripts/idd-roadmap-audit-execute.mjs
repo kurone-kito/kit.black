@@ -16,6 +16,8 @@
 // with an open / unresolved / inaccessible / nested-roadmap descendant, a
 // closed child with an open linked PR, a traversal cycle, or no explicit child
 // work is NEVER closed.
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { parseCliArgs } from './cli-args.mjs';
 import {
   buildIssueLoader,
@@ -24,14 +26,18 @@ import {
   isClaimStaleByAge,
   parseClaimStaleAgeMs,
 } from './discover-roadmap-graph.mjs';
-import { GH_TEXT_LOOP_OPTIONS, ghText } from './gh-exec.mjs';
 import { loadPolicyConfig } from './idd-config.mjs';
 import { normalizePolicyConfig, POLICY_DEFAULTS } from './policy-helpers.mjs';
 import {
+  normalizeApplyNow,
   renderUnclaimedByMarker,
   resolveTrustedMarkerActors,
   summarizeClaimValidation,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
 // Distributed `claim-stale-age` default (docs/policy-constants.md: 24 h). Used
@@ -43,6 +49,20 @@ const DEFAULT_CLAIM_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 // detector (`hasTrustedCompletionEvidenceComment`, #1299) so the two never
 // drift out of sync.
 const COMPLETION_AUDIT_HEADING = '**IDD roadmap completion audit**';
+// `RoadmapGraphReference.relationship` kinds that are PURELY
+// informational and must never, by themselves, satisfy the
+// childless-blocker check below (idd-skill#2765): a `Refs #N
+// (non-blocking)` breadcrumb. Every other kind counts as explicit
+// child work, matching A2's own "Allowed traversal sources"
+// (`idd-discover.instructions.md`) -- which names `Refs #NNN` and
+// "explicit sub-issue lines" (the `reference` / `sub-issue-reference`
+// kinds) alongside task-list entries and GitHub sub-issue
+// relationships as sources A1.5 must fetch descendants through
+// (`idd-roadmap-audit.instructions.md`'s "Use the same outbound
+// traversal sources as A2") -- so only the `(non-blocking)`-annotated
+// form is excluded here, not the plain `reference`/`sub-issue-reference`
+// kinds (idd-skill#2765 review, Codex).
+const NON_CHILD_RELATIONSHIP_KINDS = new Set(['non-blocking-reference']);
 // Scope caveat (A1.5): this helper gates only the MECHANICAL completion
 // preconditions. It deliberately does NOT verify the roadmap's free-form
 // success criteria or autonomy-gap items — that is agent judgment "where
@@ -61,11 +81,15 @@ function roadmapAuditBranchPattern(roadmapNumber) {
  * roadmap descendant, every traversal cycle, a blocked roadmap root, and a
  * childless/malformed roadmap is collected as a blocker; `ready` is true only
  * when no blocker is collected. The rules mirror the written A1.5 completion
- * criteria exactly — this helper adds no stricter sub-condition. One shape is
- * interpreted as safe rather than ambiguous (#1278): a `reference` back-edge
- * from a non-roadmap execution leaf is the provenance breadcrumb the A1.5
- * follow-up rule itself requires, so it never blocks as a cycle (an open
- * leaf still blocks as `open-child`). Pure and
+ * criteria exactly — this helper adds no stricter sub-condition. Two cycle
+ * shapes are interpreted as safe rather than ambiguous: a `reference`
+ * back-edge from a non-roadmap execution leaf (#1278) is the provenance
+ * breadcrumb the A1.5 follow-up rule itself requires, so it never blocks as
+ * a cycle (an open leaf still blocks as `open-child`); and, regardless of
+ * relationship type, a cycle whose **segment** (the suffix of the recorded
+ * path starting at the first occurrence of the back-edge target) never
+ * touches the audited roadmap and is entirely CLOSED (#1919) — such a loop
+ * has no closure order left to get wrong. Pure and
  * network-free so it is unit-testable apart from live GitHub.
  */
 export function evaluateRoadmapAuditGates(report, options = {}) {
@@ -98,8 +122,20 @@ export function evaluateRoadmapAuditGates(report, options = {}) {
     });
   }
   // No explicit child work → childless / malformed. Do not infer completion
-  // from the absence of candidates.
-  if (report.edges.length === 0) {
+  // from the absence of candidates. An edge counts as child work unless its
+  // relationship is purely informational (idd-skill#2765): only a
+  // `non-blocking-reference` (`Refs #N (non-blocking)`) is excluded here --
+  // `task-list`, `closing-keyword`, `sub-issue`, the plain `reference`
+  // (`Refs #N`, no annotation), and `sub-issue-reference` (prose
+  // "Sub-issue #N" text) all count, matching A2's own allowed traversal
+  // sources. `dependency` (Blocked by / Depends on) is a precondition
+  // pointing away from this roadmap's own descendants, not a child, but is
+  // left counting here unchanged from this check's pre-existing behavior
+  // (`report.edges.length === 0`) since no known repro needs it excluded.
+  const childRelationshipEdgeCount = report.edges.filter(
+    (edge) => !NON_CHILD_RELATIONSHIP_KINDS.has(edge.relationship),
+  ).length;
+  if (childRelationshipEdgeCount === 0) {
     blockers.push({
       kind: 'childless',
       detail: `roadmap #${rootNumber} has no explicit child references (task-list, closing-keyword, or GitHub sub-issue); childless or malformed, not complete`,
@@ -185,23 +221,34 @@ export function evaluateRoadmapAuditGates(report, options = {}) {
       detail: `reference #${diagnostic.source} → #${diagnostic.target} (${diagnostic.relationship}) is inaccessible: ${diagnostic.reason}`,
     });
   }
-  // Cycles / ambiguous graph: do not guess a closure order. A `reference`
-  // back-edge whose source is a non-roadmap execution leaf is exempt (#1278):
-  // a closed leaf's `Refs #<roadmap>` breadcrumb is the provenance the A1.5
-  // follow-up rule requires, and an open leaf is already blocked above as
-  // `open-child`, so the audit still fails closed while reporting the true
-  // cause. Roadmap-source cycles, unknown-source cycles, stronger
-  // relationships (task-list / dependency / closing-keyword / sub-issue),
-  // and execution sources in any other state keep blocking.
+  // Cycles / ambiguous graph: do not guess a closure order. Two exemptions
+  // keep a genuinely-resolved cycle from blocking; every other cycle keeps
+  // blocking (fail closed):
+  //
+  //  - (#1278) A `reference` back-edge whose source is a non-roadmap
+  //    execution leaf is exempt: a closed leaf's `Refs #<roadmap>`
+  //    breadcrumb is the provenance the A1.5 follow-up rule requires, and an
+  //    open leaf is already blocked above as `open-child`, so the audit
+  //    still fails closed while reporting the true cause. This exemption is
+  //    also applied earlier, at the traversal level (`discover-roadmap-graph`
+  //    never even records the CLOSED-source case as a cycle), so only the
+  //    OPEN-source dedup case actually reaches this branch in practice.
+  //  - (#1919) Any cycle, of any relationship type, whose **segment** (see
+  //    `isResolvedCycleSegment`) excludes the audited roadmap and is
+  //    entirely CLOSED: such a loop has no closure order left to get wrong,
+  //    so it is recorded as informational provenance instead of a blocker.
   const openExecutionLeaves = new Set(report.executionCandidates);
   for (const cycle of report.diagnostics.cycles) {
     const sourceNode = report.nodes.find(
       (entry) => entry.number === cycle.source,
     );
-    if (
+    const isProvenanceBreadcrumb =
       cycle.relationship === 'reference' &&
       sourceNode?.classification === 'execution' &&
-      (sourceNode.state === 'CLOSED' || openExecutionLeaves.has(cycle.source))
+      (sourceNode.state === 'CLOSED' || openExecutionLeaves.has(cycle.source));
+    if (
+      isProvenanceBreadcrumb ||
+      isResolvedCycleSegment(cycle, report, rootNumber)
     ) {
       continue;
     }
@@ -213,6 +260,40 @@ export function evaluateRoadmapAuditGates(report, options = {}) {
     });
   }
   return blockers;
+}
+/**
+ * The **cycle segment** (#1919): the suffix of a recorded cycle path
+ * starting at the first occurrence of the back-edge target. For the
+ * recorded path `1904 -> 1905 -> 1564 -> 1563 -> 1564` the segment is
+ * `1564 -> 1563 -> 1564` — the actual closed loop, excluding the acyclic
+ * prefix that merely reached it. `cycle.target` is always present in
+ * `cycle.path` (the traversal appends it as the path's last element), so the
+ * fallback to the full path never fires in practice; it exists only so this
+ * helper stays total for a malformed/hand-built diagnostic.
+ */
+function cycleSegment(cycle) {
+  const firstIndex = cycle.path.indexOf(cycle.target);
+  return firstIndex === -1 ? cycle.path : cycle.path.slice(firstIndex);
+}
+/**
+ * True when a cycle's segment (see {@link cycleSegment}) never touches the
+ * audited roadmap AND every node in it is CLOSED (#1919). A node absent from
+ * `report.nodes`, or carrying any state other than `CLOSED` (including
+ * `OPEN`), fails the all-CLOSED check — fail closed. Such a cycle has no
+ * closure order left to get wrong: every member issue is already closed and
+ * the loop never passes through the roadmap under audit, so it is
+ * informational provenance rather than a blocker.
+ */
+function isResolvedCycleSegment(cycle, report, rootNumber) {
+  const segment = cycleSegment(cycle);
+  if (segment.includes(rootNumber)) {
+    return false;
+  }
+  return segment.every(
+    (segmentNumber) =>
+      report.nodes.find((entry) => entry.number === segmentNumber)?.state ===
+      'CLOSED',
+  );
 }
 /** First (sorted) root→target provenance path, or `[]` when none is recorded. */
 function buildProvenanceLookup(report) {
@@ -453,6 +534,400 @@ export function explainRoadmapClaimReason(reason) {
   return CLAIM_REASON_EXPLANATIONS[reason] ?? UNKNOWN_CLAIM_REASON_EXPLANATION;
 }
 /**
+ * Keep repository discovery tied to the requested `cwd` rather than to
+ * ambient Git overrides inherited from a hook, wrapper, or parent process
+ * (#2225, review finding). Without this, an inherited `GIT_DIR`/
+ * `GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_COMMON_DIR` could silently redirect
+ * every check onto the wrong repository, defeating the safety gate
+ * entirely. A local, file-scoped port of claim-lock.mts's
+ * `sanitizedGitEnvironment` — not imported because that function is not
+ * exported there, and claim-lock.mts is outside this issue's
+ * candidate-files list.
+ */
+function sanitizedGitEnvironment() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_CONFIG')) {
+      delete env[key];
+    }
+  }
+  delete env.GIT_DIR;
+  delete env.GIT_INDEX_FILE;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_COMMON_DIR;
+  delete env.GIT_OBJECT_DIRECTORY;
+  return env;
+}
+/**
+ * Run `git <argv>` in `cwd`, capturing stdout/stderr without throwing
+ * (#2225). A local, file-scoped port of idd-doctor.mts's `runCommand` —
+ * not extracted to a shared module because idd-doctor.mts is outside this
+ * issue's candidate-files list.
+ */
+function runLocalGitCommand(argv, cwd) {
+  try {
+    const stdout = execFileSync('git', argv, {
+      cwd,
+      env: sanitizedGitEnvironment(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, stdout, stderr: '' };
+  } catch (err) {
+    // `encoding: 'utf8'` above decodes the happy path, but a spawn-level
+    // failure (signal, maxBuffer) can still leave stdout/stderr as a Buffer
+    // on the thrown error — coerce via toString() (mirrors idd-doctor.mts's
+    // runCommand) rather than discarding non-string output as empty.
+    const failure = err;
+    // A failure BEFORE git could even emit stderr (e.g. ENOENT for a
+    // missing `git` binary) leaves stdout/stderr empty (review finding,
+    // #2225): fall back to the thrown error's own message so
+    // unreadableReason stays actionable instead of a generic "failed".
+    const stderr =
+      failure.stderr?.toString?.() ||
+      (typeof failure.message === 'string' ? failure.message : '');
+    return {
+      ok: false,
+      stdout: failure.stdout?.toString?.() ?? '',
+      stderr,
+    };
+  }
+}
+/**
+ * Parse `git worktree list --porcelain -z` output into structured entries
+ * (#2225, AC3). Porcelain is the only enumeration this repo can rely on to
+ * surface a detached worktree at all: a branch-name grep (the previous
+ * approach) has nothing to match against, since a detached worktree carries
+ * no branch. `-z` (NUL-delimited fields, a record terminated by an extra
+ * NUL) is required, not merely accepted (review finding, #2225): the plain
+ * newline-delimited form has no way to distinguish a literal newline inside
+ * a worktree path from the blank line that separates records, so a path
+ * containing `\n\n` would silently corrupt the stanza split and hide
+ * exactly the branch this hardening exists to protect — empirically
+ * reproduced with a real dirty linked worktree at such a path. A NUL byte
+ * cannot appear in a path at all, so this ambiguity does not exist for `-z`.
+ * Malformed or empty input yields an empty array rather than throwing.
+ */
+export function parseWorktreeListPorcelain(output) {
+  const entries = [];
+  for (const stanza of output.split('\0\0')) {
+    const lines = stanza.split('\0').filter((line) => line.length > 0);
+    const worktreeLine = lines.find((line) => line.startsWith('worktree '));
+    if (!worktreeLine) {
+      continue;
+    }
+    const entry = {
+      // No .trim() here (review finding, #2225): -z's NUL delimiter already
+      // gives the field's exact bytes, and a path can legitimately end in
+      // whitespace — trimming would silently point every downstream check
+      // at a directory that does not exist.
+      path: worktreeLine.slice('worktree '.length),
+      headSha: null,
+      branchRef: null,
+      bare: false,
+      detached: false,
+      locked: false,
+      lockReason: null,
+      prunable: false,
+      prunableReason: null,
+    };
+    for (const line of lines) {
+      if (line.startsWith('HEAD ')) {
+        entry.headSha = line.slice('HEAD '.length).trim();
+      } else if (line.startsWith('branch ')) {
+        entry.branchRef = line.slice('branch '.length).trim();
+      } else if (line === 'bare') {
+        entry.bare = true;
+      } else if (line === 'detached') {
+        entry.detached = true;
+      } else if (line === 'locked' || line.startsWith('locked ')) {
+        entry.locked = true;
+        const reason = line.slice('locked'.length).trim();
+        entry.lockReason = reason.length > 0 ? reason : null;
+      } else if (line === 'prunable' || line.startsWith('prunable ')) {
+        entry.prunable = true;
+        const reason = line.slice('prunable'.length).trim();
+        entry.prunableReason = reason.length > 0 ? reason : null;
+      }
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+/** `refs/heads/main` -> `main`; a non-branch ref passes through unchanged. */
+function branchNameFromRef(ref) {
+  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+}
+/**
+ * Find every worktree entry whose checked-out branch content-exactly
+ * matches `branchName` (#2225, AC1). Content-exact, not identity-only: this
+ * compares the porcelain `branch` ref itself — what is actually checked
+ * out — rather than trusting that a claim record's own `branch` field
+ * (which may be released or stale) says the branch is unowned. Git
+ * normally refuses to check the same branch out in a second worktree, but
+ * `git checkout --ignore-other-worktrees` (documented in `git checkout -h`)
+ * can force it, so this returns every match rather than only the first —
+ * a caller that only checks the first could see a clean worktree while a
+ * second one silently sits broken. A detached entry has no `branchRef` and
+ * can never match here by construction.
+ */
+export function findWorktreeEntriesForBranch(entries, branchName) {
+  return entries.filter(
+    (entry) =>
+      entry.branchRef !== null &&
+      branchNameFromRef(entry.branchRef) === branchName,
+  );
+}
+/** The first entry {@link findWorktreeEntriesForBranch} would return, or null. */
+export function findWorktreeEntryForBranch(entries, branchName) {
+  return findWorktreeEntriesForBranch(entries, branchName)[0] ?? null;
+}
+/**
+ * True for a POSIX absolute path (`/...`), a Windows drive-absolute path
+ * (`C:/...` or `C:\...`), or a Windows UNC path (`\\server\share`) (#2576).
+ */
+function isGitPathAbsolute(value) {
+  return /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(value);
+}
+/**
+ * Join a git-porcelain-derived worktree path with a (possibly relative)
+ * `git rev-parse --git-path` output, using forward slashes throughout
+ * (#2576). `git worktree list --porcelain` and `git rev-parse --git-path`
+ * both always report forward-slash paths, even on native Windows, so
+ * building the combined path this way — instead of through the platform's
+ * native `path.resolve`/`path.join` (which reformat to backslash and, for a
+ * root-relative but drive-letter-less input, silently guess a drive letter
+ * from `process.cwd()`, corrupting the result) — stays functionally correct
+ * on disk (Windows' filesystem APIs, and Node's `fs` module, accept
+ * forward-slash paths interchangeably with backslash ones) and consistent
+ * with whatever git itself reported for the same location. `relative` may
+ * itself already be absolute (git-path output sometimes is); in that case
+ * it is returned unchanged, `worktreePath` is not consulted at all.
+ */
+function joinGitPath(worktreePath, relative) {
+  if (isGitPathAbsolute(relative)) {
+    return relative;
+  }
+  const base = worktreePath.replace(/[\\/]+$/, '');
+  return `${base}/${relative}`;
+}
+/**
+ * True when a rebase sequencer directory exists for `worktreePath` (#2225,
+ * AC4), resolved via `git -C <worktreePath> rev-parse --git-path <name>`
+ * rather than a hardcoded `.git/rebase-merge` / `.git/rebase-apply` path. A
+ * linked worktree's `.git` is a pointer FILE, not a directory: the real
+ * sequencer state lives under the primary repo's
+ * `.git/worktrees/<name>/` admin directory, and only `--git-path` resolves
+ * that correctly for a worktree other than the primary one.
+ */
+function hasInProgressRebase(worktreePath, resolveGitPath, pathExists) {
+  for (const name of ['rebase-merge', 'rebase-apply']) {
+    const result = resolveGitPath(worktreePath, name);
+    if (!result.ok) {
+      continue;
+    }
+    const resolved = result.stdout.trim();
+    if (resolved.length === 0) {
+      continue;
+    }
+    const absolute = joinGitPath(worktreePath, resolved);
+    if (pathExists(absolute)) {
+      return true;
+    }
+  }
+  return false;
+}
+/**
+ * Resolve the ORIGINAL branch a detached, mid-rebase worktree was checked
+ * out on (#2225, AC4). `git rebase` detaches HEAD while it sequences — a
+ * mid-rebase worktree reports `detached` in `git worktree list --porcelain`,
+ * not its real branch (empirically confirmed) — so
+ * {@link findWorktreeEntryForBranch} alone can never match it. The rebase
+ * sequencer's own `head-name` file records the original ref for exactly
+ * this reason (`git rebase --abort` restores it from there), so this reads
+ * it directly via the same resolved `--git-path` used by
+ * {@link hasInProgressRebase}.
+ */
+function resolveDetachedRebaseBranch(worktreePath, inputs) {
+  for (const name of ['rebase-merge', 'rebase-apply']) {
+    const result = inputs.resolveGitPath(worktreePath, name);
+    if (!result.ok) {
+      continue;
+    }
+    const resolved = result.stdout.trim();
+    if (resolved.length === 0) {
+      continue;
+    }
+    const absolute = joinGitPath(worktreePath, resolved);
+    if (!inputs.pathExists(absolute)) {
+      continue;
+    }
+    const headName = inputs.readFile(joinGitPath(absolute, 'head-name'));
+    if (headName && headName.trim().length > 0) {
+      return branchNameFromRef(headName.trim());
+    }
+  }
+  return null;
+}
+/**
+ * Find every DETACHED worktree entry whose rebase sequencer records
+ * `branchName` as the branch being rebased (#2225, AC4). See
+ * {@link resolveDetachedRebaseBranch} for why a plain branch-ref match on a
+ * mid-rebase worktree always fails. Plural for the same reason as
+ * {@link findWorktreeEntriesForBranch}: more than one worktree can end up
+ * mid-rebase against the same original branch.
+ */
+function findDetachedRebaseEntriesForBranch(entries, branchName, inputs) {
+  return entries.filter(
+    (entry) =>
+      entry.detached &&
+      resolveDetachedRebaseBranch(entry.path, inputs) === branchName,
+  );
+}
+/**
+ * Evaluate one matched worktree entry for the broken-reason signals
+ * {@link evaluateLocalCoordinationState} reports (#2225): porcelain
+ * `locked`/`prunable` flags first (a locked/prunable entry's directory may
+ * not even exist on disk — do not probe further), then uncommitted content
+ * and an in-progress rebase.
+ */
+function evaluateMatchedWorktreeEntry(entry, inputs) {
+  const reasons = [];
+  if (entry.locked) {
+    reasons.push(`locked${entry.lockReason ? `: ${entry.lockReason}` : ''}`);
+  }
+  if (entry.prunable) {
+    reasons.push(
+      `prunable${entry.prunableReason ? `: ${entry.prunableReason}` : ''}`,
+    );
+  }
+  if (reasons.length === 0) {
+    const status = inputs.statusPorcelain(entry.path);
+    if (!status.ok) {
+      reasons.push('working tree status could not be read');
+    } else if (status.stdout.trim().length > 0) {
+      reasons.push('uncommitted content present');
+    }
+    if (
+      hasInProgressRebase(entry.path, inputs.resolveGitPath, inputs.pathExists)
+    ) {
+      reasons.push('rebase in progress');
+    }
+  }
+  return reasons;
+}
+/**
+ * Evaluate whether `branchName`'s local worktree state is safe to treat as
+ * reusable/reclaimable (#2225). `presence: 'absent'` — no local worktree at
+ * all — is the expected common case per the instructions text quoted above,
+ * not an error, and is treated identically to `unreadable: true` (git
+ * missing, not a repository, or any other enumeration failure): both fail
+ * OPEN, because the hazard these checks exist to catch is leftover LOCAL
+ * content, which cannot exist if there is no local state to read. Only a
+ * POSITIVELY confirmed unsafe worktree — dirty, locked, prunable, or
+ * mid-rebase — reports `present-broken`. Once a worktree is matched by
+ * branch, a failure to read ITS status is treated as broken rather than
+ * unreadable: unlike the top-level enumeration failure, a positively
+ * identified worktree that suddenly cannot be probed is exactly the
+ * ambiguous case this hardening exists to catch, so it fails closed. Every
+ * worktree matching `branchName` is evaluated, not just the first (#2225,
+ * P2 review finding): `git checkout --ignore-other-worktrees` can check the
+ * same branch out in more than one worktree, and a clean first match must
+ * not hide a broken second one. Pure: every git read is injected.
+ */
+export function evaluateLocalCoordinationState(branchName, inputs) {
+  const listing = inputs.listWorktrees();
+  if (!listing.ok) {
+    return {
+      presence: 'absent',
+      path: null,
+      brokenReasons: [],
+      detachedWorktreePaths: [],
+      unreadable: true,
+      unreadableReason:
+        listing.stderr || 'git worktree list --porcelain failed',
+    };
+  }
+  const entries = parseWorktreeListPorcelain(listing.stdout);
+  const matchedEntries = [
+    ...findWorktreeEntriesForBranch(entries, branchName),
+    ...findDetachedRebaseEntriesForBranch(entries, branchName, inputs),
+  ];
+  const matchedPaths = new Set(matchedEntries.map((entry) => entry.path));
+  // Every detached entry recovered via its rebase sequencer above (AC4) IS
+  // a matched worktree for this branch, not a mystery unrelated one —
+  // exclude matched paths from the generic informational list so each is
+  // reported exactly once, as a matched (and, via the checks below,
+  // possibly broken) worktree.
+  const detachedWorktreePaths = entries
+    .filter((entry) => entry.detached && !matchedPaths.has(entry.path))
+    .map((entry) => entry.path);
+  if (matchedEntries.length === 0) {
+    return {
+      presence: 'absent',
+      path: null,
+      brokenReasons: [],
+      detachedWorktreePaths,
+      unreadable: false,
+      unreadableReason: null,
+    };
+  }
+  const brokenReasons = [];
+  matchedEntries.forEach((entry, index) => {
+    const prefix = index > 0 ? `at ${entry.path}: ` : '';
+    for (const reason of evaluateMatchedWorktreeEntry(entry, inputs)) {
+      brokenReasons.push(`${prefix}${reason}`);
+    }
+  });
+  return {
+    presence: brokenReasons.length > 0 ? 'present-broken' : 'present-clean',
+    path: matchedEntries[0].path,
+    brokenReasons,
+    detachedWorktreePaths,
+    unreadable: false,
+    unreadableReason: null,
+  };
+}
+/**
+ * Production {@link LocalCoordinationInputs}: local git shell-outs scoped to
+ * `cwd` (#2225). Exported so tests can exercise the real git-backed wiring
+ * (env sanitization, untracked-file handling) against a throwaway
+ * repository, not just a hand-rolled duplicate of it.
+ */
+export function createLocalCoordinationInputs(cwd) {
+  return {
+    listWorktrees: () =>
+      runLocalGitCommand(['worktree', 'list', '--porcelain', '-z'], cwd),
+    // --untracked-files=all overrides a repo/global status.showUntrackedFiles
+    // config, and --ignore-submodules=none overrides diff.ignoreSubmodules
+    // (both review findings, #2225): without them, `status.showUntrackedFiles
+    // = no` would hide an untracked-only leftover, and
+    // `diff.ignoreSubmodules = all` would hide a dirty submodule — either
+    // way silently weakening this exact safety gate through user
+    // configuration this tool never chose.
+    statusPorcelain: (worktreePath) =>
+      runLocalGitCommand(
+        [
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+          '--ignore-submodules=none',
+        ],
+        worktreePath,
+      ),
+    resolveGitPath: (worktreePath, name) =>
+      runLocalGitCommand(['rev-parse', '--git-path', name], worktreePath),
+    pathExists: (path) => existsSync(path),
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf8');
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+/**
  * Trailing caveat appended to a claim-not-owned `result` message when the
  * production viewer-login lookup failed (#1396). Empty string when the
  * lookup succeeded (or was never attempted, e.g. injected test deps), so the
@@ -488,9 +963,10 @@ export function hasTrustedCompletionEvidenceComment(comments, isTrustedAuthor) {
  * ever meant to convert one already-provable claim-loss shape into a nicer
  * idempotent success — it must never leave the helper worse off than the
  * pre-existing fail-closed `claim not owned …; no mutation` exit it sits in
- * front of. Production wires this around the live `gh` comment fetch, whose
- * `ghText` throws on any non-zero exit (transient network blip, rate limit,
- * auth hiccup): without this wrapper such a failure would crash the whole
+ * front of. Production wires this around the live comment fetch
+ * (`port.listWorkItemComments`), which throws on any non-zero `gh` exit
+ * (transient network blip, rate limit, auth hiccup): without this wrapper
+ * such a failure would crash the whole
  * helper instead of falling through to that already-correct fail-closed
  * message (flagged by Copilot review on PR #1303). Pure given a
  * non-throwing `check`, so the catch behavior itself is unit-testable
@@ -502,6 +978,36 @@ export function safeHasTrustedCompletionEvidence(check) {
   } catch {
     return false;
   }
+}
+/**
+ * Apply the local coordination-state gate (#2225) at one point in the apply
+ * sequence: populate `verdict.localCoordinationNote` (and, when unsafe,
+ * `verdict.result` too), and report whether the apply must stop here.
+ * Called at every point claim ownership is re-validated below — the early
+ * check, immediately after the potentially long graph re-fetch, and
+ * immediately before the close — because local state is not immutable
+ * within a single run any more than claim ownership is: another local
+ * process can dirty, lock, prune, or begin rebasing the matched worktree
+ * while this run is still in flight (#2225, P2 review finding).
+ */
+function applyLocalCoordinationGate(resolvedDeps, branchName, verdict) {
+  if (!resolvedDeps.inspectLocalCoordinationState) {
+    return false;
+  }
+  const localState = resolvedDeps.inspectLocalCoordinationState(branchName);
+  if (localState.presence === 'present-broken') {
+    verdict.localCoordinationNote = `branch "${branchName}" has a local worktree at ${localState.path} that is not safe to treat as reusable (${localState.brokenReasons.join(', ')})`;
+    verdict.result = `local coordination state unsafe (${localState.brokenReasons.join(', ')}); no mutation`;
+    return true;
+  }
+  if (localState.unreadable) {
+    verdict.localCoordinationNote = `local coordination state unreadable (${localState.unreadableReason ?? 'unknown reason'}); proceeding`;
+  } else if (localState.presence === 'present-clean') {
+    verdict.localCoordinationNote = `branch "${branchName}" has a clean local worktree at ${localState.path}`;
+  } else if (localState.detachedWorktreePaths.length > 0) {
+    verdict.localCoordinationNote = `${localState.detachedWorktreePaths.length} detached local worktree(s) present (unrelated to this branch by definition): ${localState.detachedWorktreePaths.join(', ')}`;
+  }
+  return false;
 }
 /**
  * Build the A1.5 verdict and, under `--apply`, execute the audit. The dry-run
@@ -624,6 +1130,20 @@ export async function runRoadmapAuditExecute(argv, deps) {
     verdict.result = `claim not owned on re-validation (reason="${earlyClaim.reason}": ${explainRoadmapClaimReason(earlyClaim.reason)}); no mutation${viewerLoginUnavailableCaveat(resolvedDeps.viewerLoginUnavailable)}`;
     return { verdict, exitCode: 1 };
   }
+  // Local worktree/branch safety (#2225): a released/stale claim record
+  // proves nothing about what is actually checked out locally. Re-checked
+  // again below, after the graph re-fetch and immediately before the close
+  // — see applyLocalCoordinationGate's doc comment for why a single early
+  // check alone would leave a TOCTOU gap.
+  if (
+    applyLocalCoordinationGate(
+      resolvedDeps,
+      earlyClaim.activeClaim.branch,
+      verdict,
+    )
+  ) {
+    return { verdict, exitCode: 1 };
+  }
   // Re-fetch the roadmap + child state and confirm the audit input still
   // holds; a roadmap that gained an open / unresolved / nested-roadmap /
   // open-linked-PR descendant between the first read and now must NEVER be
@@ -657,6 +1177,15 @@ export async function runRoadmapAuditExecute(argv, deps) {
     verdict.result = `claim not owned immediately before mutation (reason="${claim.reason}": ${explainRoadmapClaimReason(claim.reason)}); no mutation${viewerLoginUnavailableCaveat(resolvedDeps.viewerLoginUnavailable)}`;
     return { verdict, exitCode: 1 };
   }
+  // Re-check local state too: the graph re-fetch just above can span many
+  // API calls, during which another local process can dirty, lock, prune,
+  // or begin rebasing the matched worktree just as easily as another
+  // session can take over the claim.
+  if (
+    applyLocalCoordinationGate(resolvedDeps, claim.activeClaim.branch, verdict)
+  ) {
+    return { verdict, exitCode: 1 };
+  }
   // Post the evidence comment (non-destructive), THEN re-validate ownership one
   // final time immediately before the CLOSE: a takeover landing in the
   // comment→close gap must not let us close under a claim we no longer own. An
@@ -674,6 +1203,18 @@ export async function runRoadmapAuditExecute(argv, deps) {
   });
   if (!preCloseClaim.owned) {
     verdict.result = `claim lost in the comment→close gap (reason="${preCloseClaim.reason}": ${explainRoadmapClaimReason(preCloseClaim.reason)}); evidence comment posted but roadmap NOT closed${viewerLoginUnavailableCaveat(resolvedDeps.viewerLoginUnavailable)}`;
+    return { verdict, exitCode: 1 };
+  }
+  // One last local-state check, immediately before the close itself, for
+  // the same comment→close gap the claim re-validation just above guards.
+  if (
+    applyLocalCoordinationGate(
+      resolvedDeps,
+      preCloseClaim.activeClaim.branch,
+      verdict,
+    )
+  ) {
+    verdict.result = `${verdict.result} (evidence comment posted but roadmap NOT closed)`;
     return { verdict, exitCode: 1 };
   }
   // Ownership held through the comment: close, then release using the last
@@ -698,89 +1239,18 @@ function closedDescendantNumbers(report) {
     )
     .map((node) => node.number);
 }
-/** Truncate any sub-second fraction so an ISO stamp is `YYYY-MM-DDTHH:mm:ssZ`. */
-function toSecondPrecisionIso(iso) {
-  return String(iso).replace(/\.\d+Z$/, 'Z');
-}
-/**
- * Validate and normalize the apply-time "now" to UTC second-precision ISO
- * (`YYYY-MM-DDTHH:mm:ssZ`), or `null` when unparseable. The caller fails closed
- * on `null` BEFORE any mutation: an unparseable value would mis-evaluate claim
- * staleness (NaN comparisons read as not-stale), and an offset / sub-second
- * form (e.g. `…+09:00`) would otherwise reach `renderUnclaimedByMarker` — which
- * accepts only `…Z` second-precision — and throw AFTER the comment + close had
- * already landed. Normalizing through `toISOString()` also converts any zone
- * offset to UTC, so the single normalized value is safe for both the staleness
- * checks and the release marker.
- */
-function normalizeApplyNow(raw) {
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-  return toSecondPrecisionIso(parsed.toISOString());
-}
 // ---------------------------------------------------------------------------
 // Production dependency wiring (live gh + roadmap-graph traversal).
 // ---------------------------------------------------------------------------
-/**
- * Fetch the authenticated actor's own GitHub login via `gh api user`, or
- * `null` on any failure (e.g. an under-scoped or expired token). Uses the
- * throwing {@link ghText} (not `safeGhText`) wrapped in a local try/catch so
- * a genuine failure is distinguishable from a merely-empty response — the
- * distinction {@link resolveViewerLogin} needs to report
- * `viewerLoginUnavailable` instead of silently treating a failed lookup the
- * same as an anonymous one (#1396).
- */
-function fetchViewerLogin() {
-  try {
-    return ghText(['api', 'user', '--jq', '.login'], GH_TEXT_LOOP_OPTIONS);
-  } catch {
-    return null;
-  }
-}
-/**
- * Resolve the viewer login used to always-trust the current claimant (see
- * {@link buildTrustedAuthorPredicate}), distinguishing a genuinely failed
- * lookup from an empty one instead of collapsing both to `''` (#1396). A
- * previously silent failure here excluded the real claimant from the
- * trusted-author set with no signal that the LOOKUP, not the claim itself,
- * was the problem, so a `not owned` verdict could be misread as a genuine
- * claim conflict.
- *
- * `fetchLogin` defaults to the real {@link fetchViewerLogin} network call but
- * is injectable so both outcomes (success and failure) are unit-testable
- * without shelling out to `gh`. A successful-but-blank response (`''` or
- * whitespace-only) is also reported as unavailable: an authenticated `gh api
- * user` call should never legitimately return an empty login, so a blank
- * result signals a degraded response rather than a real anonymous viewer.
- */
-export function resolveViewerLogin(fetchLogin = fetchViewerLogin) {
-  const raw = fetchLogin();
-  const normalized = String(raw ?? '')
-    .trim()
-    .toLowerCase();
-  if (raw === null || normalized === '') {
-    return { viewerLogin: '', viewerLoginUnavailable: true };
-  }
-  return { viewerLogin: normalized, viewerLoginUnavailable: false };
-}
 function createProductionDeps(args) {
-  const owner =
-    args.owner ||
-    ghText(
-      ['repo', 'view', '--json', 'owner', '--jq', '.owner.login'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
-  const repo =
-    args.repo ||
-    ghText(
-      ['repo', 'view', '--json', 'name', '--jq', '.name'],
-      GH_TEXT_LOOP_OPTIONS,
-    );
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
   const rawConfig = loadPolicy(args.policy);
   const markerPrefix = normalizeMarkerPrefix(rawConfig.markerPrefix);
-  const { viewerLogin, viewerLoginUnavailable } = resolveViewerLogin();
+  const { viewerLogin, viewerLoginUnavailable } = port.resolveViewerLoginSafe();
   const isTrustedAuthor = buildTrustedAuthorPredicate({
     owner,
     viewerLogin,
@@ -793,8 +1263,8 @@ function createProductionDeps(args) {
     parseClaimStaleAgeMs(rawConfig?.claimTiming?.staleAge) ??
     DEFAULT_CLAIM_STALE_AGE_MS;
   const labelsPolicy = normalizePolicyConfig(rawConfig).labels;
-  const loadIssue = buildIssueLoader(owner, repo);
-  const loadSubIssues = buildSubIssueLoader(owner, repo);
+  const loadIssue = buildIssueLoader(port);
+  const loadSubIssues = buildSubIssueLoader(port);
   return {
     collect: (roadmapNumber) =>
       enumerateRoadmapGraph(roadmapNumber, {
@@ -806,7 +1276,7 @@ function createProductionDeps(args) {
         loadSubIssues,
       }),
     resolveOpenLinkedPrIssues: (issueNumbers) =>
-      resolveOpenLinkedPrIssues(owner, repo, issueNumbers),
+      resolveOpenLinkedPrIssues(port, issueNumbers),
     blockedByHumanLabelName: labelsPolicy.blockedByHumanLabelName,
     needsDecisionLabelName: labelsPolicy.needsDecisionLabelName,
     viewerLoginUnavailable,
@@ -817,7 +1287,7 @@ function createProductionDeps(args) {
       expectedAgentId,
       nowIso,
     }) =>
-      evaluateRoadmapClaim(loadIssueComments(owner, repo, issueNumber), {
+      evaluateRoadmapClaim(loadIssueComments(port, issueNumber), {
         roadmapNumber,
         expectedClaimId,
         expectedAgentId,
@@ -828,35 +1298,27 @@ function createProductionDeps(args) {
     hasTrustedCompletionEvidence: (roadmapNumber) =>
       safeHasTrustedCompletionEvidence(() =>
         hasTrustedCompletionEvidenceComment(
-          loadIssueComments(owner, repo, roadmapNumber),
+          loadIssueComments(port, roadmapNumber),
           isTrustedAuthor,
         ),
       ),
-    postEvidenceComment: (issueNumber, body) =>
-      postIssueComment(owner, repo, issueNumber, body),
-    closeRoadmap: (issueNumber) =>
-      ghText(
-        [
-          'issue',
-          'close',
-          String(issueNumber),
-          '--repo',
-          `${owner}/${repo}`,
-          '--reason',
-          'completed',
-        ],
-        GH_TEXT_LOOP_OPTIONS,
-      ),
-    releaseClaim: (issueNumber, fields) =>
-      postIssueComment(
-        owner,
-        repo,
-        issueNumber,
-        renderUnclaimedByMarker(fields),
-      ),
+    postEvidenceComment: (issueNumber, body) => {
+      port.postWorkItemComment(issueNumber, body);
+    },
+    closeRoadmap: (issueNumber) => {
+      port.closeWorkItem(issueNumber, 'completed');
+    },
+    releaseClaim: (issueNumber, fields) => {
+      port.postWorkItemComment(issueNumber, renderUnclaimedByMarker(fields));
+    },
     // Honor a caller-supplied --now (deterministic staleness + release
     // timestamps for tests / replays); fall back to the wall clock.
     now: () => args.now || new Date().toISOString(),
+    inspectLocalCoordinationState: (branchName) =>
+      evaluateLocalCoordinationState(
+        branchName,
+        createLocalCoordinationInputs(process.cwd()),
+      ),
   };
 }
 /**
@@ -884,38 +1346,12 @@ function buildTrustedAuthorPredicate({ owner, viewerLogin, rawConfig }) {
     );
 }
 /** Load every issue comment (paginated) as the claim-marker event stream. */
-function loadIssueComments(owner, repo, issueNumber) {
-  const comments = [];
-  const pageSize = 100;
-  for (let page = 1; ; page += 1) {
-    const raw = ghText(
-      [
-        'api',
-        `repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${pageSize}&page=${page}`,
-        '--jq',
-        '.',
-      ],
-      GH_TEXT_LOOP_OPTIONS,
-    );
-    const pageItems = raw && raw !== 'null' ? JSON.parse(raw) : [];
-    if (!Array.isArray(pageItems) || pageItems.length === 0) {
-      break;
-    }
-    comments.push(...pageItems);
-    if (pageItems.length < pageSize) {
-      break;
-    }
-  }
-  return comments.map((entry) => {
-    const comment = entry ?? {};
-    return {
-      body: String(comment.body ?? ''),
-      createdAt: String(comment.createdAt ?? comment.created_at ?? ''),
-      author: {
-        login: String(comment.author?.login ?? comment.user?.login ?? ''),
-      },
-    };
-  });
+function loadIssueComments(port, issueNumber) {
+  return port.listWorkItemComments(issueNumber).map((comment) => ({
+    body: comment.body,
+    createdAt: comment.createdAt,
+    author: { login: comment.authorLogin },
+  }));
 }
 /**
  * Resolve which of `issueNumbers` still have an OPEN linked PR — covering A1.5's
@@ -938,21 +1374,18 @@ function loadIssueComments(owner, repo, issueNumber) {
  * — a deleted / transferred / inaccessible issue, or partial GraphQL data),
  * treats the issue as blocked. An absent connection is distinct from a
  * genuinely present-but-empty `nodes: []` (legitimately no PR on that signal),
- * which does NOT block on that signal. The GraphQL runner is injectable so the
- * absence distinction is unit-testable without `gh`.
+ * which does NOT block on that signal -- getWorkItemClosingPullRequestsPage/
+ * getConnectedPullRequestEventsPage throw on the absent case (verified via
+ * their own dedicated adapter tests), so a per-issue lookup error and an
+ * absent connection both simply reach the same catch below.
  */
-export function resolveOpenLinkedPrIssues(
-  owner,
-  repo,
-  issueNumbers,
-  runGraphql = ghGraphql,
-) {
+export function resolveOpenLinkedPrIssues(port, issueNumbers) {
   const blocked = [];
   for (const issueNumber of issueNumbers) {
     try {
       if (
-        hasOpenClosingPr(owner, repo, issueNumber, runGraphql) ||
-        hasOpenConnectedPr(owner, repo, issueNumber, runGraphql)
+        hasOpenClosingPr(port, issueNumber) ||
+        hasOpenConnectedPr(port, issueNumber)
       ) {
         blocked.push(issueNumber);
       }
@@ -964,56 +1397,23 @@ export function resolveOpenLinkedPrIssues(
   return blocked;
 }
 /**
- * Narrow a parsed GraphQL response to the named connection on its issue node,
- * THROWING (→ fail closed) when the issue is `null`/absent or the connection
- * itself is `null`/`undefined`. A present connection (even with empty `nodes`)
- * is returned as-is so a legitimately PR-free issue is not treated as blocked.
- */
-function requireIssueConnection(parsed, pick, label) {
-  const issue = parsed?.data?.repository?.issue;
-  if (issue === null || issue === undefined) {
-    throw new Error(`${label}: issue is null/absent (fail closed)`);
-  }
-  const connection = pick(issue);
-  if (connection === null || connection === undefined) {
-    throw new Error(`${label}: connection is null/absent (fail closed)`);
-  }
-  return connection;
-}
-/**
  * True when the issue has an OPEN PR that reference-closes it. Pages through
  * `closedByPullRequestsReferences` and short-circuits on the first OPEN PR
  * (one is enough to block); truncating the list could miss an OPEN blocker on
  * a later page, wrongly green-lighting a close. Throws (→ blocked) on an absent
- * connection.
+ * connection (getWorkItemClosingPullRequestsPage's own contract).
  */
-function hasOpenClosingPr(owner, repo, issueNumber, runGraphql) {
-  const query = `query($owner:String!,$repo:String!,$number:Int!,$after:String){
-  repository(owner:$owner,name:$repo){
-    issue(number:$number){
-      closedByPullRequestsReferences(first:50,after:$after,includeClosedPrs:false){
-        nodes { state }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}`;
+function hasOpenClosingPr(port, issueNumber) {
   let after = null;
   for (;;) {
-    const parsed = runGraphql(query, owner, repo, issueNumber, after);
-    const connection = requireIssueConnection(
-      parsed,
-      (issue) => issue.closedByPullRequestsReferences,
-      'closedByPullRequestsReferences',
-    );
-    const nodes = connection.nodes ?? [];
-    if (nodes.some((node) => String(node?.state ?? '') === 'OPEN')) {
+    const page = port.getWorkItemClosingPullRequestsPage(issueNumber, after);
+    if (page.nodes.some((node) => String(node?.state ?? '') === 'OPEN')) {
       return true;
     }
-    if (!connection.pageInfo?.hasNextPage) {
+    if (!page.hasNextPage) {
       return false;
     }
-    after = connection.pageInfo.endCursor ?? null;
+    after = page.endCursor ?? null;
     if (!after) {
       // hasNextPage with no endCursor: an incomplete / unexpected connection
       // read. Throw so the per-issue catch fails closed (blocks the child)
@@ -1029,37 +1429,19 @@ function hasOpenClosingPr(owner, repo, issueNumber, runGraphql) {
  * relationship without a closing keyword). Pages the CONNECTED/DISCONNECTED
  * timeline in full — the whole stream is needed so a later DISCONNECTED is not
  * missed — then reconciles it via the pure {@link reconcileConnectedOpenPrs}.
- * Throws (→ blocked) on an absent connection.
+ * Throws (→ blocked) on an absent connection
+ * (getConnectedPullRequestEventsPage's own contract).
  */
-function hasOpenConnectedPr(owner, repo, issueNumber, runGraphql) {
-  const query = `query($owner:String!,$repo:String!,$number:Int!,$after:String){
-  repository(owner:$owner,name:$repo){
-    issue(number:$number){
-      timelineItems(first:50,after:$after,itemTypes:[CONNECTED_EVENT,DISCONNECTED_EVENT]){
-        nodes {
-          __typename
-          ... on ConnectedEvent { subject { __typename ... on PullRequest { number state } } }
-          ... on DisconnectedEvent { subject { __typename ... on PullRequest { number } } }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}`;
+function hasOpenConnectedPr(port, issueNumber) {
   const events = [];
   let after = null;
   for (;;) {
-    const parsed = runGraphql(query, owner, repo, issueNumber, after);
-    const connection = requireIssueConnection(
-      parsed,
-      (issue) => issue.timelineItems,
-      'timelineItems',
-    );
-    events.push(...parseConnectedPrEvents(connection.nodes ?? []));
-    if (!connection.pageInfo?.hasNextPage) {
+    const page = port.getConnectedPullRequestEventsPage(issueNumber, after);
+    events.push(...parseConnectedPrEvents(page.events));
+    if (!page.hasNextPage) {
       break;
     }
-    after = connection.pageInfo.endCursor ?? null;
+    after = page.endCursor ?? null;
     if (!after) {
       // hasNextPage with no endCursor: reconciling a truncated timeline could
       // miss a later CONNECTED open PR. Throw so the per-issue catch fails
@@ -1070,32 +1452,6 @@ function hasOpenConnectedPr(owner, repo, issueNumber, runGraphql) {
     }
   }
   return reconcileConnectedOpenPrs(events).length > 0;
-}
-/**
- * Run one `gh api graphql` page, passing `after` only when set.
- *
- * Stdin-safe (#1396): called from a per-issue pagination loop
- * (`resolveOpenLinkedPrIssues` → `hasOpenClosingPr` / `hasOpenConnectedPr`),
- * the exact tight-loop hazard `GH_TEXT_LOOP_OPTIONS` exists for — this call
- * site was missed by the initial pass over the file's other `ghText` calls.
- */
-function ghGraphql(query, owner, repo, issueNumber, after) {
-  const apiArgs = [
-    'api',
-    'graphql',
-    '-f',
-    `query=${query}`,
-    '-f',
-    `owner=${owner}`,
-    '-f',
-    `repo=${repo}`,
-    '-F',
-    `number=${issueNumber}`,
-  ];
-  if (after) {
-    apiArgs.push('-f', `after=${after}`);
-  }
-  return JSON.parse(ghText(apiArgs, GH_TEXT_LOOP_OPTIONS));
 }
 /** Coerce raw CONNECTED/DISCONNECTED timeline nodes into reconcile events. */
 function parseConnectedPrEvents(nodes) {
@@ -1129,19 +1485,6 @@ function parseConnectedPrEvents(nodes) {
  * unclaim marker) are silently dropped by `gh issue comment` / `gh api -f
  * body=`; the same path is reused for the evidence comment for consistency.
  */
-function postIssueComment(owner, repo, issueNumber, body) {
-  ghText(
-    [
-      'api',
-      '--method',
-      'POST',
-      `repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-      '--input',
-      '-',
-    ],
-    { input: JSON.stringify({ body }) },
-  );
-}
 // Read-and-parse failure semantics (explicit path throws; default path
 // silently falls back only on ENOENT) are converged in idd-config.mts's
 // loadPolicyConfig (#1721). The `?? {}` preserves this helper's existing

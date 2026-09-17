@@ -13,6 +13,7 @@ import {
   readForcedHandoffMode,
 } from './collaborator-permission.mjs';
 import {
+  combineOwnerRepoFlags,
   DEFAULT_GH_PAGINATED_TIMEOUT_MS,
   ghApiJson,
   ghText,
@@ -37,6 +38,7 @@ const LIVE_STATUS_DIGEST_FLAG_SPEC = {
   '--issue': { type: 'string' },
   '--pr': { type: 'string' },
   '--repo': { type: 'string' },
+  '--owner': { type: 'string' },
   '--dry-run': { type: 'boolean', default: false },
   '--apply': { type: 'boolean', default: false },
   '--phase': { type: 'string' },
@@ -96,7 +98,12 @@ function main() {
       '--apply requires --claim-issue and --claim-id, or explicit --skip-claim-check',
     );
   }
-  const repository = args.repo ?? detectRepository();
+  let repository;
+  try {
+    repository = combineOwnerRepoFlags(args) ?? detectRepository();
+  } catch (error) {
+    fail(error.message);
+  }
   const [owner, repo] = parseRepository(repository);
   const targetType = args.issue ? 'issue' : 'pr';
   const targetNumber = parsePositiveInteger(
@@ -566,6 +573,7 @@ function parseArgs(argv) {
     issue: requireNonEmpty(values.issue, '--issue'),
     pr: requireNonEmpty(values.pr, '--pr'),
     repo: requireNonEmpty(values.repo, '--repo'),
+    owner: requireNonEmpty(values.owner, '--owner'),
     dryRun: values['dry-run'],
     apply: values.apply,
     phase: requireNonEmpty(values.phase, '--phase'),
@@ -615,18 +623,22 @@ function printUsage() {
 Options:
   --dry-run                         compute the create/update/noop action (default)
   --apply                           create or update the single current digest
-  --phase <text>                    digest Phase field
-  --claim <text>                    digest Claim field
-  --branch <text>                   digest Branch field
+  --phase <text>                    digest Phase field (required)
+  --claim <text>                    digest Claim field (required)
+  --branch <text>                   digest Branch field (required)
   --last-checked <timestamp>        digest Last checked field (default: current UTC)
-  --open-blockers <text>            digest Open blockers field
-  --next-action <text>              digest Next action field
-  --authoritative-by <text>         digest Authoritative by field
-  --claim-issue <number>            issue whose active claim protects apply mode
+  --open-blockers <text>            digest Open blockers field (required)
+  --next-action <text>              digest Next action field (required)
+  --authoritative-by <text>         digest Authoritative by field (required)
+  --claim-issue <number>            issue carrying the active claim, required for apply mode
   --claim-id <id>                   active claim id required for apply mode
   --agent-id <id>                   optionally require this claim agent id
   --skip-claim-check                explicit maintainer override for apply mode
-  --repo <owner/name>               repository override
+  --repo <owner/name>               repository override, combined form
+  --owner <owner>                   repository override, split form (use
+                                     with --repo <name>, the bare
+                                     repository name -- not both --owner
+                                     and a combined --repo together)
   --format <json|table>             output format (default: json)
   --include-body                    include the rendered body in JSON reports
   --help                            show this help

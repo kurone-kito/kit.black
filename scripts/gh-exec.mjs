@@ -15,8 +15,18 @@
 // Consumed by the `src/scripts/*.mts` helpers that shell out to `gh` or
 // need the CLI-entry-point guard.
 import { execFile, execFileSync } from 'node:child_process';
+import {
+  closeSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { deriveGhHttpStatus } from './gh-http-status.mjs';
 import { parsePaginatedGhNdjson } from './protocol-helpers.mjs';
 /**
  * Default `execFileSync`/`execFile` timeout (ms) applied when a caller
@@ -79,7 +89,51 @@ export function ghText(args, options = {}) {
     timeout: options.timeout ?? DEFAULT_GH_TIMEOUT_MS,
     ...(options.stdio ? { stdio: options.stdio } : {}),
     ...(options.input !== undefined ? { input: options.input } : {}),
+    ...(options.maxBuffer !== undefined
+      ? { maxBuffer: options.maxBuffer }
+      : {}),
   }).trim();
+}
+/**
+ * Sibling of {@link ghText} for a response with no safely-guessable size
+ * ceiling (#2935 review, rounds 4-6): a fixed `maxBuffer` for a large
+ * paginated GraphQL page turned into an escalating, never-fully-provable
+ * guessing game (an initial 10 MiB estimate, then a "proven" 25 MiB
+ * worst-case calculation from GitHub's 65,536-character comment cap and
+ * UTF-8's 4-bytes-per-character ceiling, then a further finding that the
+ * calculation still did not account for `\uXXXX` JSON-escaping, which can
+ * cost up to 12 bytes per character) -- each fix removed one gap but
+ * could not close the class of problem, since the true worst case
+ * depends on exactly how the response is serialized, which this codebase
+ * does not control and should not need to reverse-engineer. This
+ * function removes the ceiling-guessing problem entirely instead of
+ * refining the guess further: it redirects the child process's stdout
+ * directly to a temp file (never through an in-memory pipe with a fixed
+ * cap) and reads that file back, so the only limit is available disk
+ * space -- a categorically different, non-adversarial-input concern.
+ *
+ * Deliberately minimal compared to {@link ghText}: no `stdio`/`input`
+ * override support, since no current caller needs stdin or a custom
+ * stdio shape for a call whose defining trait is "the output size is not
+ * safely boundable" -- add that support only if a real caller needs it.
+ */
+export function ghTextUnbounded(args, options = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'gh-exec-unbounded-'));
+  const outPath = join(dir, 'stdout');
+  try {
+    const fd = openSync(outPath, 'w');
+    try {
+      execFileSync('gh', args, {
+        stdio: ['ignore', fd, 'pipe'],
+        timeout: options.timeout ?? DEFAULT_GH_TIMEOUT_MS,
+      });
+    } finally {
+      closeSync(fd);
+    }
+    return readFileSync(outPath, 'utf8').trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 /** {@link ghText}, swallowing any failure and returning `''` instead. */
 export function safeGhText(args, options = {}) {
@@ -88,6 +142,25 @@ export function safeGhText(args, options = {}) {
   } catch {
     return '';
   }
+}
+/**
+ * Live GitHub default branch for `{owner}/{repo}` (#2272), via `gh api
+ * repos/{owner}/{repo}` and the `default_branch` field. Extracted here so
+ * `pre-merge-readiness.mts`, `ci-wait-state.mts`, `branch-conflict-state.mts`,
+ * and `idd-merge-execute.mts` share one reader instead of four near-identical
+ * `gh api` calls, matching this module's existing role as the shared `gh`
+ * CLI layer. Returns `null` on any failure (unreadable, unauthenticated,
+ * missing repo) so callers treat the branch as undetermined rather than
+ * throwing -- distinct from `idd-onboard.mts`'s own `readGithubDefaultBranch`,
+ * which derives `owner`/`repo` from a local checkout's `remote.origin.url`
+ * instead of accepting them directly.
+ */
+export function readGithubRepoDefaultBranch(owner, repo) {
+  const output = safeGhText(
+    ['api', `repos/${owner}/${repo}`, '--jq', '.default_branch // empty'],
+    GH_TEXT_LOOP_OPTIONS,
+  );
+  return output === '' ? null : output;
 }
 /**
  * Async sibling of {@link ghText}, for callers that need several `gh`
@@ -119,6 +192,113 @@ export async function ghTextAsync(args, options = {}) {
   return stdout.trim();
 }
 /**
+ * Resolve the `--hostname` override {@link ghApiJson} / {@link ghGraphql}
+ * pass to `gh api` / `gh api graphql`, so a self-hosted GitHub Enterprise
+ * Server (GHES) repository's GitHub-API-backed calls target the correct
+ * host instead of silently defaulting to `api.github.com` (#1962).
+ *
+ * `gh api` resolves its target host from `GH_HOST` / `--hostname`, or the
+ * CLI's single configured/authenticated host, defaulting to `github.com`
+ * -- unlike higher-level subcommands (`gh pr view`, `gh issue edit`, ...),
+ * it does **not** infer the host from the checked-out repository's Git
+ * remote (`gh help environment`). On a GHES-hosted repository running in
+ * GitHub Actions, this means an unset `GH_HOST` still sends these calls to
+ * `api.github.com` using `GH_TOKEN`, and `GH_ENTERPRISE_TOKEN` (set
+ * alongside it by #1946) is never read at all, even though the workflow
+ * itself is genuinely running against the GHES host.
+ *
+ * Resolution order:
+ *
+ * 1. `GH_HOST`, when set -- `gh` already reads this itself (`gh help
+ *    environment`), so no `--hostname` override is needed here; returning
+ *    `undefined` avoids a second, potentially-redundant resolution path
+ *    for a case `gh` already handles, and leaves an operator's explicit
+ *    override unchanged.
+ * 2. `GITHUB_SERVER_URL` -- a GitHub Actions **default** environment
+ *    variable present in every job (no workflow `env:` entry required),
+ *    always a well-formed `scheme://host` URL supplied by the runner
+ *    itself (`https://github.com` or `https://<ghes-host>`), so this
+ *    strips the scheme instead of parsing untrusted input. When the
+ *    stripped host equals `github.com` (the overwhelming common case,
+ *    including every run of this repository's own CI), this returns
+ *    `undefined` so the emitted argv stays byte-identical to before this
+ *    change -- the "no behavior change on github.com" half of #1962's
+ *    acceptance criteria.
+ * 3. Otherwise (a non-Actions caller with no `GH_HOST` set, e.g. a local
+ *    `idd-doctor` run) -- `undefined`. `gh`'s own "single authenticated
+ *    host" default already resolves correctly for a developer
+ *    authenticated only to their GHES instance; a developer authenticated
+ *    to more than one host sets `GH_HOST` themselves (case 1), the same
+ *    convention `gh` itself documents. This deliberately adds no
+ *    git-remote-derived fallback here (contrast
+ *    `branch-conflict-state.mts`'s `resolveFetchOrigin`, which fetches
+ *    from a remote and has no other host signal available): that would
+ *    widen this change beyond `gh-exec.mts`'s two wrappers and risks
+ *    silently overriding a `gh` config that was already resolving
+ *    correctly. See `idd-template/ONBOARDING.md`'s GHES host-resolution
+ *    note for the fuller design record, including the still-open gap for
+ *    helpers (e.g. `idd-doctor.mts`) that call `gh api` directly instead
+ *    of through this module's shared wrappers.
+ */
+export function resolveGhApiHostname(env = process.env) {
+  if (env.GH_HOST?.trim()) return undefined;
+  const serverUrl = env.GITHUB_SERVER_URL?.trim();
+  if (!serverUrl) return undefined;
+  const host = serverUrl
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  return host && host !== 'github.com' ? host : undefined;
+}
+/**
+ * #2454: the majority of `src/scripts/*.mts` accept a split `--owner
+ * <owner> --repo <name>` pair; five scripts (`audit-pr-cleanup.mts`,
+ * `live-status-digest.mts`, `token-cost-harvest.mts`,
+ * `local-validation-evidence.mts`, `provider-outage-declaration.mts`)
+ * instead accept only a combined `--repo <owner>/<name>`. Rewriting the
+ * majority onto the combined form (or vice versa) is out of scope; this
+ * helper lets the five minority scripts accept EITHER form while
+ * changing nothing else about their own resolution pipeline: it folds a
+ * split pair into the single combined string each script's own existing
+ * parser (or default-repo fallback) already consumes, so a caller only
+ * has to route its `--owner`/`--repo` flags through this function once,
+ * immediately after `parseCliArgs`, and every downstream line is
+ * unchanged.
+ *
+ * - Neither flag given → returns `args.repo` unchanged (`undefined` or
+ *   the caller's own empty-string default), so the caller's existing
+ *   default-repo resolution (a `gh repo view` fallback, or a hard
+ *   "--repo is required" error, depending on the script) still runs
+ *   exactly as before.
+ * - Only `--repo` given → returned unchanged, whether it is already the
+ *   combined `owner/name` form (the pre-existing, still-supported case)
+ *   or some other value the caller's own parser will accept or reject.
+ * - Only `--owner` given → combined with `--repo` (which must be the
+ *   bare name, no `/`) into `owner/name`. Throws when `--repo` is
+ *   missing (an owner alone cannot resolve a repository) or already
+ *   contains a `/` (mixing both forms is ambiguous, not a genuine
+ *   split-form name) — a specific, actionable error instead of letting
+ *   a double-prefixed value reach `gh api` and 404 downstream.
+ */
+export function combineOwnerRepoFlags(args) {
+  if (!args.owner) {
+    return args.repo;
+  }
+  if (args.repo?.includes('/')) {
+    throw new Error(
+      `--owner and a combined --repo "${args.repo}" conflict -- pass ` +
+        'either --repo <owner>/<name> alone or --owner <owner> --repo ' +
+        '<name>, not both forms together',
+    );
+  }
+  if (!args.repo) {
+    throw new Error(
+      '--owner requires --repo <name> (the bare repository name)',
+    );
+  }
+  return `${args.owner}/${args.repo}`;
+}
+/**
  * Run `gh api <path>` and parse its output as JSON, optionally paginating
  * (NDJSON-compatible) and/or tolerating specific failure statuses.
  *
@@ -126,10 +306,19 @@ export async function ghTextAsync(args, options = {}) {
  * replaces: `advisory-wait-state.mts`'s NDJSON-pagination handling and
  * `review-activity-snapshot.mts`'s `allowStatuses` tolerated-failure
  * fallback.
+ *
+ * Targets the correct GHES host via {@link resolveGhApiHostname} (#1962)
+ * instead of always defaulting to `github.com`.
  */
 export function ghApiJson(path, options = {}) {
   const { paginate = false, extraArgs = [], allowStatuses = [] } = options;
-  const args = ['api', path, ...extraArgs];
+  const hostname = resolveGhApiHostname();
+  const args = [
+    'api',
+    path,
+    ...(hostname ? ['--hostname', hostname] : []),
+    ...extraArgs,
+  ];
   if (paginate) {
     args.push('--paginate', '--jq', '.[]');
   }
@@ -167,9 +356,19 @@ export function ghApiJson(path, options = {}) {
  * file's existing role as the shared `gh`-execution module for `ghText` /
  * `ghApiJson`. Uses `ghText`'s own default timeout (no explicit override
  * here, unchanged from this function's pre-extraction behavior).
+ *
+ * Targets the correct GHES host via {@link resolveGhApiHostname} (#1962)
+ * instead of always defaulting to `github.com`.
  */
 export function ghGraphql(query, variables) {
-  const args = ['api', 'graphql', '-f', `query=${query}`];
+  const hostname = resolveGhApiHostname();
+  const args = [
+    'api',
+    'graphql',
+    ...(hostname ? ['--hostname', hostname] : []),
+    '-f',
+    `query=${query}`,
+  ];
   for (const [key, value] of Object.entries(variables)) {
     if (value === null || value === undefined) continue;
     if (typeof value === 'number') {
@@ -179,6 +378,71 @@ export function ghGraphql(query, variables) {
     args.push('-f', `${key}=${value}`);
   }
   return JSON.parse(ghText(args).trim() || '{}');
+}
+/** #2148: REST `GET /user` failures that may still have a live GraphQL
+ * `viewer { login }` — 5xx, timeout, or a killed child. Unclassified
+ * errors and 4xx stay fail-closed on REST (no GraphQL fallback), so an
+ * unparsable 4xx cannot leak through `deriveGhHttpStatus() === null`. */
+export function viewerLoginFailureIsGraphqlEligible(error) {
+  const code = String(error?.code ?? '');
+  if (code === 'ETIMEDOUT' || code === 'ABORT_ERR') {
+    return true;
+  }
+  if (error?.killed === true) {
+    return true;
+  }
+  const status = deriveGhHttpStatus(error);
+  if (status == null) {
+    return false;
+  }
+  return status >= 500 && status <= 599;
+}
+function defaultRestViewerLogin(options = {}) {
+  return ghText(['api', 'user', '--jq', '.login'], options);
+}
+function defaultGraphqlViewerLogin() {
+  const payload = ghGraphql('query { viewer { login } }', {});
+  const root = payload;
+  return String(root.data?.viewer?.login ?? root.viewer?.login ?? '').trim();
+}
+/** Resolve the current GitHub actor login for A5 collectors (#2148).
+ *
+ * REST `GET /user` first. On 5xx, timeout, or empty body, try GraphQL
+ * `viewer { login }` once. 4xx does not fall back. If both fail, the
+ * original REST error is rethrown (today's fail-closed abort). */
+export function resolveViewerLogin(options = {}, deps = {}) {
+  const rest = deps.rest ?? (() => defaultRestViewerLogin(options));
+  const graphql = deps.graphql ?? defaultGraphqlViewerLogin;
+  try {
+    const login = rest().trim();
+    if (login) {
+      return login;
+    }
+  } catch (error) {
+    if (!viewerLoginFailureIsGraphqlEligible(error)) {
+      throw error;
+    }
+    try {
+      const fallback = graphql().trim();
+      if (fallback) {
+        return fallback;
+      }
+    } catch {
+      // Keep the REST error as the fail-closed abort.
+    }
+    throw error;
+  }
+  try {
+    const fallback = graphql().trim();
+    if (fallback) {
+      return fallback;
+    }
+  } catch {
+    // Empty REST body plus GraphQL failure is still unavailable.
+  }
+  throw new Error(
+    'viewer login unavailable from REST /user and GraphQL viewer',
+  );
 }
 const DEFAULT_BOUNDED_RETRY_ATTEMPTS = 3;
 const DEFAULT_BOUNDED_RETRY_BASE_DELAY_MS = 200;

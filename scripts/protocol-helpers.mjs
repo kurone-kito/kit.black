@@ -5,9 +5,13 @@
 // generated .mjs. See docs/typescript-sources.md.
 import { Buffer } from 'node:buffer';
 import {
+  buildAdvisoryConvergenceWaiverPrecondition,
+  buildSecondaryQuietWindowStatus,
   DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+  DEFAULT_ADVISORY_CONVERGENCE_DEADLINE_MINUTES,
   DEFAULT_ADVISORY_PRIMARY_BOT_LOGIN,
   normalizeAdvisoryWaitRuntimeOptions,
+  SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON,
 } from './advisory-wait-policy.mjs';
 
 // Re-exported so callers that already import advisory-bot-identity helpers
@@ -24,9 +28,12 @@ export { DEFAULT_ADVISORY_BOT_LOGINS } from './advisory-wait-policy.mjs';
 // rule (it must never import back from this file).
 export * from './marker-helpers.mjs';
 
+import { loadIddConfig } from './idd-config.mjs';
 import {
+  detectMalformedOperationalMarker,
   findActivationNonceWinner,
   IDD_AGENT_DERIVED_MARKERS,
+  isIddOriginatedReply,
   isValidIsoTimestamp,
   operationalMarkerPrefix,
   operationalMarkerPrefixByStart,
@@ -76,6 +83,18 @@ export function parsePaginatedGhNdjson(raw) {
       return Array.isArray(value) ? value : [value];
     });
 }
+/** Check-run states treated as pass-equivalent for the CI required-check
+ * gate: a check in one of these states is never eligible for waiver
+ * coverage (already passing, or intentionally not run) and never counts as
+ * a genuinely non-passing cause. Hoisted to module scope (#2021) so both
+ * {@link summarizeRequiredChecks} and {@link computePreMergeReadinessBlockers}
+ * share one definition instead of two independently-maintained copies. */
+const CHECK_PASS_EQUIVALENT_STATES = new Set([
+  'SUCCESS',
+  'SKIPPED',
+  'NEUTRAL',
+  'NOT_APPLICABLE',
+]);
 function matchCheckSelectorLocal(name, selector, matchMode) {
   const n = String(name ?? '').trim();
   const s = String(selector ?? '').trim();
@@ -135,10 +154,13 @@ export function summarizeExternalCheckWaivers(
   {
     prHeadSha = '',
     activeClaimId = '',
+    activeClaimSupersedes = '',
     trustedMarkerLogins = [],
     now = '',
     waivableSelectors = null,
     maxValidity = '',
+    mode = '',
+    allowSelfReferentialBootstrapAuto = false,
   } = {},
 ) {
   const trustedSet = new Set(normalizeTrustedMarkerLogins(trustedMarkerLogins));
@@ -153,6 +175,11 @@ export function summarizeExternalCheckWaivers(
   const unauthorized = [];
   const malformed = [];
   const notConfigured = [];
+  const modeDisabled = [];
+  // An empty `mode` leaves this gate off (legacy/unit-caller default); a
+  // non-empty value must equal `maintainer-authorized` exactly, mirroring
+  // `advisory-convergence.mts`'s own guard.
+  const modeGateOpen = mode === '' || mode === 'maintainer-authorized';
   for (const comment of comments ?? []) {
     const body = String(comment?.body ?? '');
     // Prefilter on a marker-start, case-insensitive match aligned with
@@ -168,6 +195,18 @@ export function summarizeExternalCheckWaivers(
     const parsed = parseExternalCheckWaiverComment(body, createdAt);
     if (!parsed) {
       malformed.push({ authorLogin, bodyPreview: body.slice(0, 120) });
+      continue;
+    }
+    // kurone-kito/idd-skill#2657 (Codex review, PR #2895): excluded
+    // entirely, before any other classification, for every caller except
+    // the one dedicated auto-waiver evidence call that opts in -- see
+    // `allowSelfReferentialBootstrapAuto`'s own doc comment above for why
+    // author/head/claim/expiry classification must never even run for
+    // this reason token otherwise.
+    if (
+      !allowSelfReferentialBootstrapAuto &&
+      parsed.reason === SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON
+    ) {
       continue;
     }
     if (!trustedSet.has(authorLogin)) {
@@ -199,15 +238,34 @@ export function summarizeExternalCheckWaivers(
     // the sentinel can never route around a genuine claim mismatch. Every
     // other combination is unchanged: a non-`none` claimId on an unclaimed PR
     // still falls into `wrongClaim` -- the exact regression #1077 fixed.
+    //
+    // #2080: one-hop takeover exception. A waiver bound to claim A remains
+    // valid after an in-policy takeover installs claim B whose
+    // `supersedes` field is A -- the waiver authorizes the PR, not the
+    // current session. The predecessor value is accepted only when it is
+    // non-empty and is NOT a case-insensitive `none` sentinel: a freshly
+    // claimed PR carries `supersedes: 'none'`, and treating that as a
+    // bindable predecessor would make every claimless waiver validate on
+    // every fresh claim (reopening #1077/#1905). A two-hop-old claim id
+    // (neither B nor B.supersedes) stays rejected; walking a full lineage
+    // is out of scope.
     const claimIdIsNoneSentinel = parsed.claimId.toLowerCase() === 'none';
+    const predecessorClaimId = String(activeClaimSupersedes ?? '').trim();
+    const predecessorIsBindable =
+      predecessorClaimId !== '' && predecessorClaimId.toLowerCase() !== 'none';
     const claimBindingSatisfied = activeClaimLower
-      ? parsed.claimId === activeClaimLower
+      ? parsed.claimId === activeClaimLower ||
+        (predecessorIsBindable && parsed.claimId === predecessorClaimId)
       : claimIdIsNoneSentinel;
     if (!claimBindingSatisfied) {
       wrongClaim.push({
         authorLogin,
         checkSelector: parsed.checkSelector,
         waiverClaimId: parsed.claimId,
+        reason: parsed.reason,
+        runId: parsed.runId,
+        createdAt: parsed.createdAt,
+        expiresAt: parsed.expiresAt,
       });
       continue;
     }
@@ -217,6 +275,9 @@ export function summarizeExternalCheckWaivers(
         authorLogin,
         checkSelector: parsed.checkSelector,
         expiresAt: parsed.expiresAt,
+        reason: parsed.reason,
+        runId: parsed.runId,
+        createdAt: parsed.createdAt,
       });
       continue;
     }
@@ -235,6 +296,9 @@ export function summarizeExternalCheckWaivers(
           authorLogin,
           checkSelector: parsed.checkSelector,
           expiresAt: parsed.expiresAt,
+          reason: parsed.reason,
+          runId: parsed.runId,
+          createdAt: parsed.createdAt,
         });
         continue;
       }
@@ -259,11 +323,28 @@ export function summarizeExternalCheckWaivers(
       });
       continue;
     }
+    // #2046: `mode` gates the whole waiver mechanism, independent of the
+    // `waivable` selector list -- an otherwise-valid, correctly-configured
+    // waiver must never count while the policy's
+    // `ciGate.externalCheckWaivers.mode` is not `maintainer-authorized`
+    // (schema default: `disabled`), matching `advisory-convergence.mts`'s
+    // own required check, which never even evaluates waiver evidence
+    // outside that mode.
+    if (!modeGateOpen) {
+      modeDisabled.push({
+        authorLogin,
+        checkSelector: parsed.checkSelector,
+        expiresAt: parsed.expiresAt,
+      });
+      continue;
+    }
     valid.push({
       authorLogin,
       checkSelector: parsed.checkSelector,
       reason: parsed.reason,
       expiresAt: parsed.expiresAt,
+      createdAt: parsed.createdAt,
+      runId: parsed.runId,
     });
   }
   return {
@@ -274,6 +355,7 @@ export function summarizeExternalCheckWaivers(
     unauthorized,
     malformed,
     notConfigured,
+    modeDisabled,
   };
 }
 export function findLiveStatusDigestComments(comments) {
@@ -395,12 +477,25 @@ export function unsafeTextReason(body) {
   }
   return null;
 }
+// #2473: Copilot's PR-level review object reports a `[bot]`-suffixed slug
+// login (`copilot-pull-request-reviewer[bot]`), but its inline
+// review-comment replies report a bare, capitalized display-name login
+// (`Copilot`, normalized here to `copilot`) with no suffix. The former
+// prefix check (`normalized.startsWith('copilot-pull-request-reviewer')`)
+// never matched that bare form, so a caller filtering comments by
+// `isKnownReviewBot` silently treated a genuine Copilot reply as unknown.
+// Delegating to `isCopilotReviewerLogin` (the #1686 exact-set matcher,
+// already reused by the advisory-wait pending-coverage path) recognizes
+// all three genuine login forms via `EXACT_COPILOT_REVIEWER_LOGINS`,
+// including the bare `copilot` form, and narrows the old unbounded prefix
+// match to that exact set -- closing the #1686 lookalike-username gap
+// here too as a side effect of reuse, not a separately-designed change.
 export function isKnownReviewBot(login) {
   const normalized = login.toLowerCase();
-  return (
-    REVIEW_BOT_LOGINS.has(normalized) ||
-    normalized.startsWith('copilot-pull-request-reviewer')
-  );
+  // `isCopilotReviewerLogin` also trims `login`, unlike the plain
+  // `.toLowerCase()` above -- a benign widening (a GitHub API `login` field
+  // never carries surrounding whitespace) rather than a deliberate choice.
+  return REVIEW_BOT_LOGINS.has(normalized) || isCopilotReviewerLogin(login);
 }
 export function isCodeRabbitLogin(login) {
   const normalized = login.toLowerCase();
@@ -414,6 +509,199 @@ export function isCodeRabbitLogin(login) {
 // byte-for-byte the same marker and cannot drift.
 export const CODERABBIT_SUMMARY_MARKER =
   '<!-- This is an auto-generated comment: summarize by coderabbit.ai -->';
+// #2161: CodeRabbit nests this inner marker inside a comment that also
+// starts with `CODERABBIT_SUMMARY_MARKER` when no review content exists
+// (billing failure, or a repository below the star-count manual-trigger
+// gate) -- the outer wrapper is byte-for-byte identical to a genuine
+// summary walkthrough, so this inner marker is the only signal
+// distinguishing the two. Single-sourced here so `isAdvisoryNonReviewNotice`
+// and `isReviewSummaryComment` agree on the same marker and cannot drift.
+export const CODERABBIT_SKIP_REVIEW_MARKER =
+  '<!-- This is an auto-generated comment: skip review by coderabbit.ai -->';
+// Case-insensitive, matching CodeRabbit's own outer-marker patterns
+// elsewhere in this file (see the rate-limit marker above) -- a
+// case-sensitive `includes()` check here previously let
+// `isReviewSummaryComment` and `isAdvisoryNonReviewNotice` disagree on a
+// casing-only marker variation (kurone-kito/idd-skill#2161 review).
+// Single-sourced so both predicates share the exact same test.
+const CODERABBIT_SKIP_REVIEW_MARKER_RE = new RegExp(
+  escapeRegExp(CODERABBIT_SKIP_REVIEW_MARKER),
+  'i',
+);
+// The exact marker `chatgpt-codex-connector[bot]` prefixes its own recurring
+// PR-level review-status comment with: a single issue-level comment it edits
+// in place (not reposts) on every push, showing a "Running"/"Completed"
+// status table against the current commit. The Codex analog of
+// `CODERABBIT_SUMMARY_MARKER` (#2695).
+export const CODEX_SUMMARY_MARKER =
+  '<!-- codex-pull-request-review-summary -->';
+// Every recognized advisory-bot review-summary marker, keyed by the bot's
+// suffix-insensitive identity token (see `advisoryBotIdentityToken`) so
+// `isReviewSummaryComment` recognizes each configured advisory bot's own
+// review-summary comment instead of only CodeRabbit's (#2695). Recognizing
+// the marker does NOT by itself mean the review is complete -- Codex's
+// summary can also appear while its own status table still reads "Running"
+// for the current HEAD; `disposition-non-review-notices.mts`'s
+// `isCodexReviewSummaryCompleteForHeadSha` gates the actual auto-accept on
+// that separately. Single-sourced here so adding a future bot's summary
+// marker means adding one map entry, not touching the recognizer function
+// itself.
+const REVIEW_SUMMARY_MARKERS_BY_BOT_IDENTITY = new Map([
+  ['coderabbitai', CODERABBIT_SUMMARY_MARKER],
+  ['chatgpt-codex-connector', CODEX_SUMMARY_MARKER],
+]);
+// The exact marker CodeRabbit appends to a reply it generates on an
+// existing review thread (distinct from `CODERABBIT_SUMMARY_MARKER`,
+// which opens a fresh review-summary walkthrough). Single-sourced here
+// (#2641 review) so `classifyRegularBotComment`'s stale review-trigger
+// check and `CODERABBIT_ACK_OPENING_RE`'s marker-first tolerance
+// recognize byte-for-byte the same marker and cannot drift.
+export const CODERABBIT_AUTO_GENERATED_REPLY_MARKER =
+  '<!-- This is an auto-generated reply by CodeRabbit -->';
+// Matches the two section headings this older CodeRabbit format nests
+// per-file findings under (kurone-kito/idd-skill#2197, kurone-kito/idd-skill#2559): a review whose finding has no
+// threaded comment of its own. A newer-format review ("Actionable comments
+// posted: N", individually threaded) never emits either heading, so this
+// gate alone already satisfies the "newer format stays unaffected"
+// acceptance criterion.
+const CODERABBIT_EMBEDDED_SECTION_HEADING_RE =
+  /<summary>(?:🧹 Nitpick comments|⚠️ Outside diff range comments) \(\d+\)<\/summary>/g;
+// A per-file grouping inside one of the sections above: `<summary>{file}
+// (N)</summary>`. Accepts an extensionless, separator-less filename (e.g.
+// `Dockerfile`, `Makefile`, `LICENSE`) -- an earlier version required a
+// `.` extension or `/` separator to avoid matching an unrelated
+// `<summary>` heading that also carries a parenthesized count, e.g. the
+// review's own "📒 Files selected for processing (N)" section, but that
+// also dropped every finding for a real extensionless file (Copilot
+// review, PR #2563). The real defense against that unrelated heading is
+// {@link CODERABBIT_EMBEDDED_SECTION_END_RE} bounding the section's own
+// span below, not this pattern.
+const CODERABBIT_EMBEDDED_FILE_HEADING_RE =
+  /<summary>([^<]+?) \(\d+\)<\/summary>/g;
+// Marks the natural end of a Nitpick/Outside-diff section's own content in
+// every review body sampled for #2197/#2559: CodeRabbit always follows the
+// per-file findings with this footer before any unrelated section (e.g.
+// "ℹ️ Review info" > "📒 Files selected for processing"). Bounding the
+// section span here -- not just at the next same-kind section heading --
+// keeps the relaxed file-heading pattern above from matching a later,
+// unrelated `<summary>{text} (N)</summary>` several sections down (Copilot
+// review, PR #2563).
+const CODERABBIT_EMBEDDED_SECTION_END_RE =
+  /<summary>🤖 Prompt for all review comments with AI agents<\/summary>/;
+// One finding's header line inside a file grouping: a backtick-quoted line
+// or line range, a colon, then 1-3 pipe-separated italic metadata segments
+// (category, severity, effort -- CodeRabbit does not document this shape
+// itself; it is inferred from every review body sampled for #2197/#2559).
+// Deliberately confined to same-line whitespace (`[ \t]`, never `\s`, which
+// includes newlines) in both the per-segment content and the separator
+// between segments: an earlier `\s`-based version could absorb an entirely
+// separate later `_italic_` phrase from the finding's own prose into this
+// same metadata capture once a blank line intervened, corrupting the
+// severity/title boundary (Copilot review, PR #2563).
+const CODERABBIT_EMBEDDED_FINDING_HEADER_RE =
+  /`(\d+(?:-\d+)?)`:[ \t]*((?:_[^_\n]*_[ \t]*\|?[ \t]*)+)/g;
+// No `\b` before/after the word: each segment is markdown-italic-wrapped
+// (`_..._`), and `_` is itself a `\w` character, so a trailing `\b` would
+// never match immediately before the closing underscore.
+const CODERABBIT_SEVERITY_WORD_RE = /(Trivial|Minor|Major|Critical)/i;
+/** Bold title line (`**...**`) directly introducing a finding's prose. */
+const CODERABBIT_EMBEDDED_FINDING_TITLE_RE = /\*\*(.+?)\*\*/;
+/**
+ * Extract each finding embedded in a CodeRabbit review body's older
+ * "🧹 Nitpick comments" / "⚠️ Outside diff range comments" collapsible
+ * format (#2197, #2559) -- a specific, file/line-cited finding that this
+ * format never gives its own threaded review comment, unlike CodeRabbit's
+ * newer per-comment format. Returns `[]` when `body` carries neither
+ * section heading (including every newer-format review) or is not a
+ * string.
+ *
+ * Best-effort, not a full HTML/Markdown parser: scoped to one section at a
+ * time by heading-to-next-heading text slicing, then one file grouping at a
+ * time the same way, then one finding header line at a time within that
+ * slice. A finding whose bold title cannot be found before the next
+ * boundary still contributes an entry with `description: ''` rather than
+ * being silently dropped -- an uncovered finding this parser cannot
+ * describe is still an uncovered finding.
+ */
+export function extractCodeRabbitEmbeddedFindings(body) {
+  if (typeof body !== 'string' || body.length === 0) {
+    return [];
+  }
+  const sectionHeadings = [
+    ...body.matchAll(CODERABBIT_EMBEDDED_SECTION_HEADING_RE),
+  ];
+  if (sectionHeadings.length === 0) {
+    return [];
+  }
+  const findings = [];
+  for (let i = 0; i < sectionHeadings.length; i += 1) {
+    const start = sectionHeadings[i].index + sectionHeadings[i][0].length;
+    const nextSectionStart = sectionHeadings[i + 1]?.index ?? body.length;
+    const footerMatch = body
+      .slice(start, nextSectionStart)
+      .match(CODERABBIT_EMBEDDED_SECTION_END_RE);
+    const end =
+      footerMatch?.index !== undefined
+        ? start + footerMatch.index
+        : nextSectionStart;
+    findings.push(
+      ...extractCodeRabbitEmbeddedFindingsFromSection(body.slice(start, end)),
+    );
+  }
+  return findings;
+}
+function extractCodeRabbitEmbeddedFindingsFromSection(section) {
+  const fileHeadings = [
+    ...section.matchAll(CODERABBIT_EMBEDDED_FILE_HEADING_RE),
+  ];
+  const findings = [];
+  for (let i = 0; i < fileHeadings.length; i += 1) {
+    const file = fileHeadings[i][1].trim();
+    const start = fileHeadings[i].index + fileHeadings[i][0].length;
+    const end = fileHeadings[i + 1]?.index ?? section.length;
+    const zone = section.slice(start, end);
+    // Collected up front (not iterated via a live matchAll) so each
+    // finding's own title search below can be bounded by the NEXT
+    // finding's header position -- searching the zone's unbounded
+    // remainder let a finding with no bold title of its own "steal" a
+    // later finding's title instead of reporting an empty description
+    // (Copilot review, PR #2563).
+    const headers = [...zone.matchAll(CODERABBIT_EMBEDDED_FINDING_HEADER_RE)];
+    for (let j = 0; j < headers.length; j += 1) {
+      const header = headers[j];
+      const lineRange = header[1];
+      const severityMatch = header[2].match(CODERABBIT_SEVERITY_WORD_RE);
+      const contentStart = header.index + header[0].length;
+      const contentEnd = headers[j + 1]?.index ?? zone.length;
+      const findingContent = zone.slice(contentStart, contentEnd);
+      const titleMatch = findingContent.match(
+        CODERABBIT_EMBEDDED_FINDING_TITLE_RE,
+      );
+      findings.push({
+        file,
+        lineRange,
+        severity: severityMatch ? severityMatch[0] : null,
+        description: titleMatch ? titleMatch[1].trim() : '',
+      });
+    }
+  }
+  return findings;
+}
+/**
+ * Compare {@link extractCodeRabbitEmbeddedFindings}'s count for `body`
+ * against `threadedCommentCount` -- the number of `coderabbitai[bot]`
+ * threaded review comments already present for this review/PR -- so a
+ * caller gets the uncovered-finding gap (#2559) without re-deriving the
+ * comparison. Never negative: a review whose threaded comments already
+ * meet or exceed its embedded-finding count reports `0`.
+ */
+export function countUncoveredCodeRabbitEmbeddedFindings(
+  body,
+  threadedCommentCount,
+) {
+  const embeddedFindingCount = extractCodeRabbitEmbeddedFindings(body).length;
+  return Math.max(0, embeddedFindingCount - threadedCommentCount);
+}
 export function classifyRegularBotComment(
   comment,
   comments,
@@ -451,9 +739,7 @@ export function classifyRegularBotComment(
     }
     return null;
   }
-  if (
-    body.startsWith('<!-- This is an auto-generated reply by CodeRabbit -->')
-  ) {
+  if (body.startsWith(CODERABBIT_AUTO_GENERATED_REPLY_MARKER)) {
     if (
       /\b(Review triggered|Sure! I'll review|I'll review)\b/i.test(body) &&
       hasExplicitDispositionAfter(comment, comments, {
@@ -522,7 +808,12 @@ export function indexThreadsByReview(threads, options = {}) {
       if (
         !hasFreshDisposition(thread, {
           isDispositionAuthor: options.isDispositionAuthor,
-        })
+        }) &&
+        !classifyThreadAckOnlyPostDisposition(thread, {
+          iddAgentLogins: options.iddAgentLogins,
+          advisoryBotLogins: options.advisoryBotLogins,
+          prAuthorLogin: options.prAuthorLogin,
+        }).ackOnlyPostDisposition
       ) {
         current.missingDisposition += 1;
       }
@@ -847,10 +1138,18 @@ export function hasFreshDisposition(thread, options = {}) {
   // Callers that require IDD-only dispositions (e.g., audit-pr-cleanup) should pass:
   //   { isDispositionAuthor: (login) => iddAgentLogins.has(login) }
   // This design trades stricter default behavior for backward compatibility with utility functions.
+  // `isIddOriginatedBody` (#2139) additionally accepts a stamped disposition
+  // regardless of author login: the #2135 review-reply stamp is utterance
+  // identity, so a stamped `**Accepted**` still clears an advisory thread
+  // even when the same trusted account also posts unmarked human prose.
   const dispositionAuthorPredicate =
     typeof options.isDispositionAuthor === 'function'
       ? options.isDispositionAuthor
       : (login) => !isKnownReviewBot(login);
+  const originatedBodyPredicate =
+    typeof options.isIddOriginatedBody === 'function'
+      ? options.isIddOriginatedBody
+      : null;
   const comments = thread.comments?.nodes ?? [];
   // A resolved thread may be terminally dispositioned with the documented
   // `**Rejection confirmed by maintainer**` marker instead of a fresh
@@ -860,24 +1159,26 @@ export function hasFreshDisposition(thread, options = {}) {
   const isDisposition = (comment) =>
     isDispositionComment(comment) ||
     (threadResolved && isRejectionConfirmedDisposition(comment));
+  const isIddDisposition = (comment) => {
+    if (!isDisposition(comment)) {
+      return false;
+    }
+    const authorLogin = String(comment.author?.login ?? '')
+      .trim()
+      .toLowerCase();
+    if (dispositionAuthorPredicate(authorLogin)) {
+      return true;
+    }
+    return Boolean(originatedBodyPredicate?.(String(comment.body ?? '')));
+  };
   const latestFeedbackAt = maxIsoTimestamp(
     comments
-      .filter((comment) => {
-        const authorLogin = String(comment.author?.login ?? '')
-          .trim()
-          .toLowerCase();
-        return !(
-          isDisposition(comment) && dispositionAuthorPredicate(authorLogin)
-        );
-      })
+      .filter((comment) => !isIddDisposition(comment))
       .map((comment) => effectiveThreadCommentActivityAt(comment))
       .filter(isValidIsoTimestamp),
   );
   return comments.some((comment) => {
-    const authorLogin = String(comment.author?.login ?? '')
-      .trim()
-      .toLowerCase();
-    if (!(isDisposition(comment) && dispositionAuthorPredicate(authorLogin))) {
+    if (!isIddDisposition(comment)) {
       return false;
     }
     const dispositionActivityAt = effectiveThreadCommentActivityAt(comment);
@@ -903,6 +1204,19 @@ export function hasFreshDisposition(thread, options = {}) {
 // `trimStart()` first.
 const DISPOSITION_ACCEPTED_PREFIX_RE = /^\*\*Accepted[.!:]?\*\*/;
 const DISPOSITION_REJECTED_PREFIX_RE = /^\*\*Rejected[.!:]?\*\*/;
+// #2249: loose "close but not exact" detector for `missingRegularComments[].hint`
+// (`MALFORMED_DISPOSITION_PREFIX_HINT`) -- deliberately laxer than the two
+// exact-match regexes above, matching only the four literal prefixes a
+// near-miss reply typically starts with: bare `Accepted`/`Rejected`
+// (no bold markdown) or `**Accepted`/`**Rejected` (bold markdown present
+// but the marker still fails `isDispositionComment`, e.g. interior text
+// before the closing `**`). The leading `**` is optional but must be
+// exactly zero or two chars (not one, e.g. `*Accepted`), and the
+// trailing `\b` stops a longer word like `Acceptedness` from matching --
+// Copilot review on PR #2383 caught both gaps in an earlier draft.
+// Always paired with `!isDispositionComment` at each call site so an
+// already-valid disposition never matches.
+const MALFORMED_DISPOSITION_PREFIX_RE = /^(?:\*\*)?(?:Accepted|Rejected)\b/;
 export function isDispositionComment(comment) {
   const body = (comment.body ?? '').trimEnd();
   return (
@@ -948,7 +1262,828 @@ const ADVISORY_NON_REVIEW_NOTICE_PATTERNS = [
   // the `summarize by coderabbit.ai` review marker) and its warning heading.
   /<!--\s*This is an auto-generated comment:\s*rate limited by coderabbit\.ai\s*-->/i,
   /^[>\s]*#{1,6}\s*Review limit reached\b/im,
+  // #2161: CodeRabbit skip-review notice, nested inside the same outer
+  // `summarize by coderabbit.ai` wrapper as a genuine walkthrough (see
+  // CODERABBIT_SKIP_REVIEW_MARKER above) -- carries no review content even
+  // though the outer wrapper alone cannot tell it apart from a real summary.
+  CODERABBIT_SKIP_REVIEW_MARKER_RE,
 ];
+// #2641: CodeRabbit's own courtesy-acknowledgment reply shape, mirroring
+// the notice patterns above (real observed structure, not an invented
+// template). Derived from this repository's own merged-PR review-thread
+// history: 18/18 sampled CodeRabbit replies that followed an existing
+// disposition on a resolved thread were confirmation-only (agreeing with
+// or withdrawing the finding, never a new substantive concern), and all 18
+// shared both structural signals below (a false positive here could carry
+// a stale disposition onto a real review -- a false merge, so this
+// deliberately under-matches like the notice patterns above).
+//
+// Opening: an `` `@{login}` `` mention immediately followed by a
+// confirmation/dismissal verb -- the consistent lead-in across every
+// sampled reply (e.g. "`@kurone-kito`, confirmed. ...",
+// "`@kurone-kito` Thanks for the fix. ...", "`@kurone-kito`, agreed. ...",
+// "`@kurone-kito`, acknowledged. ..." -- kurone-kito/idd-skill#2657, PR
+// #2895 round 17: a freshly observed CodeRabbit reply used this verb,
+// which the original 18-sample derivation never happened to include;
+// added as one more member of the SAME already-covered class (a
+// confirmation/dismissal opener), not a new open-ended category).
+// An optional leading `CODERABBIT_AUTO_GENERATED_REPLY_MARKER` is tolerated
+// before the mention (Copilot review, #2649): CodeRabbit's other marker-led
+// reply form (`classifyRegularBotComment`'s stale review-trigger check
+// above) places the marker first, so a courtesy ack using the same
+// ordering must not be missed just because `^` otherwise anchors on the
+// mention.
+const CODERABBIT_ACK_OPENING_RE = new RegExp(
+  `^(?:${escapeRegExp(CODERABBIT_AUTO_GENERATED_REPLY_MARKER)}\\s*)?` +
+    '`@[\\w.-]+`[,:]?\\s+(?:thanks?(?:\\s+you)?|confirmed|agreed|acknowledged)\\b',
+  'i',
+);
+// Closure (Codex review, PR #2649, round 3): matching the opening plus ANY
+// CodeRabbit-generated text -- an auto-generated-reply marker, a skip
+// marker, even the bare 🐇 emoji -- is not enough. All of those mark "this
+// reply came from CodeRabbit," not "CodeRabbit is done with this finding":
+// the bare auto-generated-reply marker alone also appears on 19/48 of
+// CodeRabbit's *initial* (non-ack) findings in the same sample. An
+// enumerated blocklist of "new concern" phrasing (tried and reverted here)
+// is a losing battle -- natural language has unbounded ways to raise a
+// concern, as two rounds of adversarial review examples demonstrated.
+//
+// What IS a reliable signal: CodeRabbit only attempts (or reports failing)
+// to mark the review thread itself resolved when it considers the finding
+// closed. It never does this on a reply that raises a new concern. This is
+// CodeRabbit's own resolution DECISION, not a fingerprint of its output
+// format -- exactly the "complete known acknowledgment template" the
+// original issue asked for, not a fragment of one. Matches either of the
+// two closure forms observed across all 18 sampled trailing acks: "✅
+// Review thread resolved." (the thread-resolve API call succeeded) or its
+// "I couldn't resolve this review thread on the repository platform..."
+// fallback trailer (the same API call failed, so CodeRabbit reports the
+// attempt instead).
+//
+// #2858: a THIRD, weaker-in-kind shape -- observed on
+// kurone-kito/idd-skill#2853's review thread on the issue-reference
+// template link (2 samples from that one already-agent-resolved thread,
+// not the 18/18 sample above): "...addresses the template
+// link-resolution concern." /
+// "...addresses the template issue-reference finding." Unlike the two
+// forms above, this is prose describing an outcome, not CodeRabbit's own
+// resolve-attempt decision: CodeRabbit never attempted (or reported
+// failing) to resolve this thread, because it was already resolved
+// independently (e.g. by the IDD agent's own resolve-review-thread.mjs)
+// before CodeRabbit replied, so it had no attempt of its own to report.
+// Kept as its own regex (`CODERABBIT_ACK_ADDRESSES_CLOSURE_RE`, below,
+// tested only after the two strong forms above fail) rather than folded
+// into one `|`-alternation, specifically so its own guards -- narrowed
+// across three rounds of Codex/Copilot review on this same PR (#2858,
+// PR #2868) -- never apply to the two strong, structurally-safe forms:
+//
+// #2927: a FOURTH shape, weaker-in-kind the same way -- "The fix
+// matches the requested behavior." rather than "addresses the ...
+// concern/finding" -- documented separately, below the lead-in
+// whitelist, as `CODERABBIT_ACK_MATCHES_BEHAVIOR_CLOSURE_RE`, tried
+// after this third form in `isKnownAdvisoryAckTemplate` below --
+// including when this third form's own regex DOES structurally match
+// but that match's own lead-in then fails, not only when this third
+// form's regex fails to match at all (Copilot review, #2927, round 2,
+// on an earlier revision of this sentence that understated it). Each
+// form is checked against its own lead-in independently; see that
+// function's own comment for why. Mentioned here only as an index
+// pointer so this comment block's forward references stay coherent;
+// its own reasoning lives with its own regex, not duplicated into this
+// third form's guard history below.
+//
+// Guard history below reflects the CURRENT implementation as of round 7
+// (Codex/CodeRabbit review on PR #2868) -- Copilot's round-8 review
+// flagged an earlier revision of this comment block for still describing
+// the pre-round-7 `{0,80}`/`[^.!?]` mechanism after the code had already
+// moved on, which is exactly the kind of drift this file's own extensive
+// documentation is meant to prevent. Each guard below states what it
+// does NOW, with the specific round/finding that shaped it for
+// traceability, not a literal transcript of an earlier regex.
+//
+// 1. **Locality bound, tokenized** (originally a `{0,80}` character
+//    count; replaced by a `{0,3}` modifier-TOKEN count, round 7, Codex):
+//    the gap between "addresses the" and "concern"/"finding" is capped
+//    so an incidental "concern"/"finding" mention far away in the same
+//    reply's trailing Learnings-used block can't retroactively create a
+//    false closure signal. Both real observed replies use a 2-token
+//    noun-phrase modifier ("template link-resolution", "template
+//    issue-reference"); the cap allows one token of headroom beyond
+//    that, since a coherent conjunction-based topic change realistically
+//    needs 4+ words (round 7's own adversarial example needed 5).
+// 2. **Word/hyphen-only tokens, no sentence-boundary or comma crossing**
+//    (originally `[^.!?]` exclusion, round 1, Codex; superseded by the
+//    `[\w-]+` token grammar, round 7): restricting each gap token to
+//    word and hyphen characters, separated only by whitespace, means
+//    neither a comma nor a sentence terminator (`.`/`!`/`?`) can appear
+//    inside the gap at all -- either one breaks the token chain outright.
+//    This subsumes the original round-1 finding ("This addresses the
+//    requested change. However, I still have a concern." must not reach
+//    the second sentence's "concern") without a separate exclusion rule.
+// 3. **Mandatory boilerplate tail, no bare end-of-body fallback**
+//    (round 1, Codex; tail shape fully anchored to end-of-body, round 6,
+//    Codex): the closure sentence must end in a period immediately
+//    followed by the complete recognized boilerplate shape (see
+//    `CODERABBIT_ACK_CLOSURE_TAIL_SOURCE` below), not merely start with
+//    one of its markers. Every sampled reply (all 21: the original 18,
+//    these 2, plus #2927's own sample below) carries real trailing
+//    boilerplate, so requiring it
+//    unconditionally costs no real match; this also rejects a single-
+//    sentence reply with nothing following it at all, such as "`@user`,
+//    confirmed. This partially addresses the concern." with no footer --
+//    a hedged, non-committal acknowledgment that would otherwise pass on
+//    structure alone.
+// 4. **No backtracking past an earlier same-sentence "concern"/"finding"**
+//    (round 3, Codex; largely a consequence of guards 1-2's token
+//    grammar rather than a separate per-character lookahead, but not
+//    unconditionally so -- see the precise bound stated below): "`@user`,
+//    confirmed. This addresses the original concern but reveals another
+//    finding.\n\n🐇 ✓" has a genuinely new finding joined by "but" in the
+//    SAME sentence. Reaching the later "finding" would require consuming
+//    "concern", "but", and "reveals" as modifier tokens first -- 3 tokens
+//    before even reaching "another finding", already past the `{0,3}`
+//    cap guard 1 enforces -- so no valid parse reaches the second
+//    occurrence; the match fails at the first "concern" instead, exactly
+//    as guard 3's tail check requires. This holds whenever reaching the
+//    second occurrence needs MORE than 3 modifier tokens; a short,
+//    non-contrastive conjunctive bridge can still consume an earlier
+//    occurrence as a plain token within budget and reach a second one --
+//    "addresses the concern and finding.\n\n🐇 ✓" matches by treating
+//    "concern" as modifier-token #1 (self-critique, E2 pass on this PR).
+//    Not treated as a precision bug: "X addresses the concern and
+//    finding" reads as a benign compound object (both were addressed),
+//    not a hidden new concern, unlike the "but"-joined case above.
+// 5. **Hedge-adverb guard, both before "addresses" and inside the gap**
+//    (round 2, Codex; scoping fixed round 3, Copilot; extended into the
+//    gap itself, round 7, Codex): "`@user`, confirmed. This partially
+//    addresses the concern.\n\n🐇 ✓" has genuine boilerplate immediately
+//    following, crosses no sentence boundary, and "concern" is the first
+//    and only candidate, so guards 1-4 don't catch it. A small, closed
+//    set of English degree adverbs immediately before "addresses" -- the
+//    same narrow-enumeration style `CODERABBIT_ACK_OPENING_RE` already
+//    uses for its own confirmation verbs (thanks/confirmed/agreed) -- is
+//    materially different from the open-ended "new concern" blocklist
+//    already tried and reverted above: that attempt tried to recognize
+//    arbitrarily-phrased new substantive content (unbounded), while this
+//    is a small, well-known closed class of adverbs modifying
+//    "addresses" itself. Implemented as a negative lookbehind directly on
+//    this alternative (not a separate whole-body check) so it can never
+//    reject the two strong forms merely because unrelated hedge-shaped
+//    wording happens to appear elsewhere in the same reply's boilerplate
+//    (e.g. a Learnings-used block quoting a past PR's discussion) --
+//    Copilot's round-3 finding on the round-2 fix. Round 7 additionally
+//    checks each gap token against the same enumeration, since a hedge
+//    word can also hide INSIDE the gap ("addresses the partially
+//    resolved concern") where the lookbehind never looks. Given this
+//    repository's `fully_autonomous_merge` policy (AGENTS.md), a hedged
+//    "addresses" is exactly the shape most likely to hide real
+//    outstanding feedback behind an ack-shaped reply, so closing this
+//    demonstrated case outweighs leaving it as stated residual risk the
+//    way the new-concern class above still is.
+//
+// Residual risk, stated rather than papered over -- NOT the same class as
+// the two strong forms: those report CodeRabbit's own resolve-attempt
+// DECISION, which by this file's own reasoning cannot co-occur with a new
+// substantive concern in the same reply. This third form reads prose with
+// no such structural barrier, so it is strictly weaker. Two residual gaps
+// remain, both raised as a design question on issue #2858 rather than
+// chased further here:
+//
+// (a) **Contrastive/evaluative adjectives within the `{0,3}` token
+//     window** (Codex round 8, PR #2868): degree adverbs (guard 5) are a
+//     closed, enumerable class -- English has roughly a dozen. A
+//     CONTRASTIVE adjective is not: "wrong", "different", "other",
+//     "unrelated", "remaining", "outstanding", "unaddressed" all read as
+//     coherent, grammatically ordinary English inside the gap --
+//     "`@user`, thanks. This addresses the wrong security
+//     concern.\n\n🐇 ✓" is a coherent sentence stating the fix missed the
+//     mark, yet matches structurally. Enumerating this class would be
+//     the exact open-ended "new concern" blocklist this file's own
+//     history already tried and reverted (guard 5's comment above); it
+//     is not the same shape as a short, closed adverb list. This is the
+//     third form's irreducible limit for recognizing a prose closure via
+//     structure rather than genuine language understanding, not a gap
+//     guards 1-5 failed to close. Both real observed samples use plain
+//     noun-attributive modifiers naming the topic ("template",
+//     "link-resolution"), never an evaluative adjective -- no sampled
+//     reply has used this shape to hide misclassified feedback.
+// (b) The `<details>` block's interior (see
+//     `CODERABBIT_ACK_CLOSURE_DETAILS_SOURCE` below) is intentionally
+//     opaque, quoted text; a concern hidden there rather than as sibling
+//     prose would also still misclassify, for the same reason.
+const CODERABBIT_ACK_STRONG_CLOSURE_RE =
+  /✅\s*Review thread resolved\.|I couldn't resolve this review thread on the repository platform/i;
+// Widened to add `almost`/`nearly` (Copilot review, #2927, round 4): a
+// proximity adverb -- "close to, but short of, complete" -- is the same
+// hedged/non-committal degree semantic this enumeration already covers
+// ("partially", "mostly", "largely"), just a different lexical subclass
+// (proximity rather than partiality). "`@user`, thanks. The fix almost
+// matches the requested behavior.\n\n🐇 ✅" states an explicitly
+// INCOMPLETE fix -- the same class of risk guard 5's own reasoning
+// already established for this whole enumeration -- and previously
+// passed the pre-"matches" lookbehind unnoticed, wired into this shared
+// constant so both the third and fourth shapes benefit without
+// duplication.
+const CODERABBIT_ACK_HEDGE_WORDS_SOURCE =
+  'partially|partly|somewhat|mostly|largely|barely|slightly|arguably|almost|nearly|in\\s+part|to\\s+some\\s+extent|not\\s+(?:fully|entirely|completely|really)';
+// Sibling enumeration to the degree-adverb list above, for the SAME
+// hedged/non-committal semantic class but the ADJECTIVE part of speech
+// (self-critique, E2 pass on this PR, PR #2868): the adverb list above
+// modifies a VERB ("partially addresses"); a lead-in noun phrase instead
+// takes an ADJECTIVE modifying its noun ("The partial workaround
+// addresses...", "The temporary fix addresses..."). Grammatically
+// distinct from the adverb list, so it is its own enumeration rather
+// than folded in, but the SAME bounded philosophy: a small, closed set
+// of English words describing partial/provisional completeness -- not
+// the open-ended CONTRASTIVE-adjective class (residual gap (a) above,
+// "wrong", "different", "unrelated") that states something was done
+// incorrectly rather than only partially or temporarily.
+const CODERABBIT_ACK_HEDGE_ADJECTIVES_SOURCE =
+  'partial|temporary|interim|provisional|tentative|preliminary|stopgap|incomplete';
+// A THIRD, semantically distinct closed enumeration (Codex review, PR
+// #2868, round 10; widened round 12): hedge words (adverb and adjective
+// forms above) say something was done to a DEGREE; negation words say
+// it was NOT done at all -- a strictly stronger, more severe inversion,
+// not a variant of hedging. "The fix never addresses the security
+// concern.\n\n🐇 ✓" matched: "never" sits immediately before "addresses"
+// the same way a hedge adverb would, but neither hedge enumeration
+// includes it (hedging and negating are different speech acts), so the
+// lookbehind below passed it through untouched. English negation
+// adverbs occurring directly before a verb are a small, well-known
+// closed class -- the same narrow-enumeration standard as the two hedge
+// lists above, not the open-ended contrastive-adjective problem
+// (residual gap (a)): negation is a grammatical function word category,
+// not free descriptive vocabulary. `no\s+longer` is included as a
+// two-word negation idiom; `barely` is deliberately NOT duplicated here
+// since it is already in the hedge-adverb list above (a "small degree,"
+// not "zero," semantic). Round 12 (Codex) found the initial enumeration
+// still omitted `seldom` (a negative-frequency adverb, the same class as
+// `rarely`/`hardly`); widened the same pass to also cover the two
+// negation IDIOMS `in\s+no\s+way` and `by\s+no\s+means`, completing the
+// small set of common English negation function words/idioms rather
+// than waiting for each to surface as its own review round -- see the
+// closing statement below `CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE` for
+// where further membership widening of this closed class belongs.
+const CODERABBIT_ACK_NEGATION_WORDS_SOURCE =
+  'never|not|nor|hardly|scarcely|rarely|seldom|no\\s+longer|in\\s+no\\s+way|by\\s+no\\s+means';
+// A FOURTH closed enumeration, added proactively in the same pass as the
+// round-12 negation widening above rather than waiting for its own
+// review round: EPISTEMIC adverbs, which cast doubt on whether a claimed
+// action genuinely happened at all, distinct from both hedging (a
+// partial degree) and negation (an outright denial). "`@user`,
+// confirmed. This supposedly addresses the concern.\n\n🐇 ✓" reads as
+// the acknowledgment itself casting doubt on its own claim -- CodeRabbit
+// (or a reply mimicking its template) questioning whether the fix
+// really works, not confirming that it does. A small, well-known closed
+// class of English evidentiality adverbs, the same bounded standard as
+// the three enumerations above.
+//
+// **Closing statement for this whole family of enumerations**: degree
+// (hedge), adjectival-degree, negation, and epistemic are the closed
+// SEMANTIC function-word classes this guard enumerates, each
+// independently motivated by a distinct relationship to the
+// acknowledgment ("to what degree," "was it done at all," "should the
+// claim itself be trusted"). A fifth, GRAMMATICAL (not semantic) class
+// -- coordinating conjunctions -- is enumerated separately below
+// (`CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE`) for a structural reason,
+// not a meaning-based one. A further member surfacing within one of
+// these five existing classes (a synonym for an adverb already covered,
+// an idiomatic variant) is a bounded widening, fixed in place the same
+// way round 12 fixed `seldom` and round 13 fixed `perhaps`/`possibly`/
+// `maybe`/`presumably` below. A genuinely NEW class -- distinct from all
+// five, and from the coordinating-conjunction structural fix -- is a
+// design question for issue #2858, the same escalation path residual
+// gap (a) already used -- not something to keep discovering ad hoc
+// inside this PR's review-fix loop.
+const CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE =
+  'supposedly|allegedly|ostensibly|nominally|purportedly|seemingly|apparently|perhaps|possibly|maybe|presumably';
+// A GRAMMATICAL (not semantic) closed class (Codex review, PR #2868,
+// round 13): the seven English coordinating conjunctions ("FANBOYS":
+// for/and/nor/but/or/yet/so) are excluded from the internal gap's
+// modifier tokens, closing a compact variant of the round-7 "but
+// reveals another finding" bypass that fits within the `{0,3}` token
+// cap: "`@user`, confirmed. This addresses the concern but raises
+// concerns.\n\n🐇 ✓" consumes "concern", "but", "raises" as three
+// modifier tokens (all within budget, unlike round 7's 5-token example)
+// and reaches the second, plural "concerns" as the closure target.
+// Tightening the token CAP further cannot close this in general: real
+// samples already need up to 2 tokens, and a 2-token variant of the same
+// bypass exists ("concern yet concerns"), so no finite cap excludes the
+// attack while still admitting real noun phrases. Excluding coordinating
+// conjunctions specifically is the right bound instead, because English
+// has EXACTLY seven of them -- a closed set fixed by the language's
+// grammar, not an open-ended vocabulary list -- and a genuine noun-phrase
+// modifier never needs one (neither real observed sample does).
+const CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE = 'for|and|nor|but|or|yet|so';
+// CodeRabbit review, PR #2868, round 4: two mechanical bypasses in the
+// pattern below, both closed by widening two sub-patterns from singular-
+// only to also accept the plural/multi-space form, exactly the same
+// narrow-enumeration style as every other guard here:
+// 1. The gap's negative lookahead and the final anchor only recognized
+//    the SINGULAR "concern"/"finding". A plural first occurrence
+//    ("concerns"/"findings") does not satisfy `\b(?:concern|finding)\b`
+//    (no word boundary between "concern" and its trailing "s"), so the
+//    lookahead's `(?!...)` trivially succeeds there and the engine keeps
+//    consuming characters as if no candidate occurrence existed --
+//    resurfacing guard 4's own "backtrack past the first occurrence"
+//    class of bug, but for plural nouns specifically. Both sub-patterns
+//    now accept an optional trailing "s".
+// 2. The hedge lookbehind ended in a single `\s`, so "partially  addresses"
+//    (two spaces) fell outside the lookbehind's fixed one-character gap
+//    and bypassed the guard entirely. Widened to `\s+`; V8's lookbehind
+//    supports variable-length alternatives (confirmed empirically on
+//    this exact Node floor after Copilot's round-5 finding to the
+//    contrary was rejected, above), so this is a safe, narrow widening.
+//
+// Tail grammar, anchored to end-of-body (Codex review, PR #2868, round 6):
+// the boilerplate-tail alternation used to validate only the FIRST
+// recognized token (`🐇`, `---`, `<details`, `<!--`, or
+// `_You are interacting`) and accept whatever followed unexamined --
+// itself a prefix match, the same "validated a fragment, not the whole
+// shape" bug rounds 4-5 already closed on the opening side. Demonstrated:
+// "`@user`, confirmed. This addresses the wording concern.\n\n---\n\n
+// However, the null-check remains unresolved." matched, because "---"
+// satisfies the alternation even though genuine new feedback follows it.
+// Every one of the four alternatives had the same flaw.
+//
+// Fixed by replacing the prefix alternation with the fixed-order,
+// fully-optional tail grammar the two real observed samples
+// (kurone-kito/idd-skill#2853) actually have -- sign-off, then a
+// `---`-delimited `<details>...</details>` block (the Learnings-used
+// container; its interior is opaque quoted text and is NOT re-validated,
+// see residual risk below), then the AI-system disclaimer, then the
+// auto-generated-reply marker (single-sourced via
+// `CODERABBIT_AUTO_GENERATED_REPLY_MARKER` so it cannot drift from
+// `CODERABBIT_ACK_OPENING_RE`'s own use of the same literal) -- anchored
+// to `$` so nothing can follow any of them unexamined.
+//
+// Residual risk, stated rather than papered over: the `<details>` block's
+// interior is intentionally NOT validated -- real templates quote
+// arbitrary past-PR text there (see the two real fixtures below), so
+// requiring it to match a known shape is not feasible. A genuinely new
+// concern hidden INSIDE a collapsed Learnings-used block, rather than as
+// plain sibling prose, would still misclassify. This is a structural
+// container CodeRabbit uses for inert quotation, not a shape any sampled
+// reply has used to hide substantive feedback -- the same "no sampled
+// reply has done this" standard the hedge-adverb guard's own residual
+// risk above already applies.
+//
+// Note on the four-branch alternation below: each of the four elements
+// (sign-off, details block, disclaimer, marker) is individually optional
+// -- no single one is present in every sample -- but making all four
+// optional independently would let an empty tail (nothing at all after
+// the closure period) match too, reopening exactly the "hedged reply with
+// no footer" gap guard 3 already closed. The alternation instead
+// enumerates the four valid ENTRY points (start at the sign-off, or skip
+// straight to the details block, or the disclaimer, or the bare marker),
+// each requiring at least that one element to be genuinely present, with
+// everything after it in the fixed real-sample order still optional.
+//
+// The details block's interior uses the same no-backtrack-past-the-
+// first-occurrence technique as guard 4's `concern`/`finding` gap above,
+// not a plain lazy `[\s\S]*?`: a lazy quantifier still backtracks FORWARD
+// past the first "</details>" to a later one if the rest of the pattern
+// fails at the first (regression test added alongside this fix,
+// self-caught before this ever reached review) -- a second, unrelated
+// details block later in the tail let a lazy match swallow genuine prose
+// sandwiched between the two as if it were all one details block's
+// content. The per-character negative lookahead forbids consuming past
+// the first "</details>" at all, so no such backtrack is possible.
+// Widened to also accept the ✅ (U+2705, "white heavy check mark")
+// emoji alongside the existing ✓ (U+2713, "check mark") (#2927): the
+// fourth ack shape's real observed sample, documented below
+// `CODERABBIT_ACK_CLOSURE_LEADIN_RE`, signs off with "🐇 ✅" rather
+// than "🐇 ✓" (confirmed byte-exact via the REST comments API, no
+// variation selector). Purely additive -- the ✓ alternative, and every
+// existing regression sample that uses it, still matches unchanged, so
+// this costs nothing against the unchanged-regression requirement
+// (AC2, #2927).
+const CODERABBIT_ACK_CLOSURE_SIGNOFF_SOURCE = '🐇(?:\\s*(?:✓|✅))?';
+const CODERABBIT_ACK_CLOSURE_DETAILS_SOURCE =
+  '---\\s*<details>(?:(?!<\\/details>)[\\s\\S])*<\\/details>';
+const CODERABBIT_ACK_CLOSURE_DISCLAIMER_SOURCE =
+  '_You are interacting with an AI system\\._';
+const CODERABBIT_ACK_CLOSURE_MARKER_SOURCE = escapeRegExp(
+  CODERABBIT_AUTO_GENERATED_REPLY_MARKER,
+);
+const CODERABBIT_ACK_CLOSURE_TAIL_SOURCE =
+  `(?:${CODERABBIT_ACK_CLOSURE_SIGNOFF_SOURCE}` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_DETAILS_SOURCE})?` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_DISCLAIMER_SOURCE})?` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_MARKER_SOURCE})?` +
+  `|${CODERABBIT_ACK_CLOSURE_DETAILS_SOURCE}` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_DISCLAIMER_SOURCE})?` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_MARKER_SOURCE})?` +
+  `|${CODERABBIT_ACK_CLOSURE_DISCLAIMER_SOURCE}` +
+  `(?:\\s*${CODERABBIT_ACK_CLOSURE_MARKER_SOURCE})?` +
+  `|${CODERABBIT_ACK_CLOSURE_MARKER_SOURCE})` +
+  '\\s*$';
+// Internal gap tokenized, capped at 3 modifier words, hedge words
+// excluded per token (Codex review, PR #2868, round 7): the previous
+// `(?:(?!\b(?:concerns?|findings?)\b)[^.!?]){0,80}` gap was a NEGATIVE
+// bound again -- any non-period, non-concern/finding character was
+// allowed, for up to 80 of them -- and Codex demonstrated it accepts a
+// coordinating conjunction that silently swaps in a genuinely different,
+// unaddressed concern: "confirmed. This addresses the documentation
+// issue but leaves a security concern.\n\n🐇 ✓" has only ONE "concern"
+// occurrence (so guard 4's no-backtrack protection never engages), and
+// it is immediately followed by the required boilerplate, so the old
+// gap matched it as a clean acknowledgment even though "but leaves a"
+// means the opposite.
+//
+// Both real observed samples (kurone-kito/idd-skill#2853) show the gap
+// is a SHORT, plain noun-phrase modifier with no verbs or conjunctions
+// at all: "template link-resolution" and "template issue-reference" (2
+// tokens each). The fix flips this gap to the same positive-shape style
+// as guard 6's lead-in whitelist: the gap may consist of at most 3
+// space-separated `[\w-]+` tokens (one more than either real sample
+// needs, since a coherent conjunction-based "flip" needs a verb plus a
+// new subject -- realistically 4 or more words -- to read as a genuine
+// change of topic; Codex's own example needs 5). Restricting tokens to
+// `[\w-]+` also subsumes guards 2 and 4 for free: neither a comma nor a
+// sentence-terminating `.`/`!`/`?` is a word character or whitespace, so
+// either one breaks the token chain outright, and reaching a SECOND,
+// later "concern"/"finding" now requires consuming more modifier tokens
+// than the cap allows (verified against round 3's own "addresses the
+// original concern but reveals another finding" fixture below, still
+// rejected under the new grammar with no separate backtrack guard
+// needed).
+//
+// Each token is additionally checked against the same closed hedge-word
+// enumeration as the lookbehind below, via a per-token negative
+// lookahead: without this, "addresses the partially resolved concern"
+// would let a hedge word hide INSIDE the gap rather than immediately
+// before "addresses", bypassing the lookbehind (which only inspects the
+// text immediately preceding "addresses") entirely.
+//
+// Residual risk, stated rather than papered over, the same standard as
+// every guard above -- and corrected here after an earlier revision of
+// this paragraph understated it (Codex round 8, PR #2868, below): within
+// the 3-token cap, the token content itself is not semantically
+// restricted beyond the closed hedge-adverb enumeration. This is not
+// limited to ungrammatical "word salad" like "addresses the concern
+// finding." -- a CONTRASTIVE adjective reads as perfectly ordinary
+// English while still meaning the opposite of an acknowledgment:
+// "addresses the wrong security concern" is coherent and structurally
+// matches. See residual gap (a) in the comment above
+// `CODERABBIT_ACK_STRONG_CLOSURE_RE` for why this class (contrastive
+// adjectives: "wrong", "different", "unrelated", "remaining", and
+// similar) is NOT enumerable the way the degree-adverb hedge list is,
+// and is raised as a design question on issue #2858 rather than chased
+// with an open-ended list here.
+const CODERABBIT_ACK_ADDRESSES_CLOSURE_RE = new RegExp(
+  `(?<!\\b(?:${CODERABBIT_ACK_HEDGE_WORDS_SOURCE}|${CODERABBIT_ACK_NEGATION_WORDS_SOURCE}|${CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE})\\s+)` +
+    '\\baddresses\\s+the\\b' +
+    `(?:\\s+(?!(?:${CODERABBIT_ACK_HEDGE_WORDS_SOURCE}|${CODERABBIT_ACK_NEGATION_WORDS_SOURCE}|${CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE}|${CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE})\\b)[\\w-]+){0,3}` +
+    '\\s+\\b(?:concerns?|findings?)\\b\\.\\s*' +
+    CODERABBIT_ACK_CLOSURE_TAIL_SOURCE,
+  'i',
+);
+// Explicit `isCodeRabbitLogin` author check (Copilot review, #2649,
+// round 4): the closure phrase is CodeRabbit's own resolution decision in
+// practice, but it is still literal text a differently-configured
+// advisory bot could in principle also emit. The caller
+// (`classifyThreadAckOnlyPostDisposition`) already restricts to
+// `isConfiguredAdvisoryBotLogin` (any configured advisory bot, not just
+// CodeRabbit), so this check is the cheap, defense-in-depth narrowing
+// down to CodeRabbit specifically, on top of (not instead of) the
+// content-based signals below. #2641's own research found
+// `chatgpt-codex-connector` posted zero post-disposition trailing replies
+// across this repository's sampled merged-PR history -- with no observed
+// template to derive, it now fails closed both by construction (no
+// observed shape) and by this explicit author gate.
+//
+// Residual risk, stated rather than papered over: CodeRabbit itself
+// emitting a closure signal on a reply that is NOT actually a pure
+// acknowledgment (a CodeRabbit-side defect) would still misclassify here.
+// This helper matches CodeRabbit's own stated decision; it cannot second-
+// guess a wrong decision CodeRabbit reports about itself.
+//
+// 6. **Opening-to-closure lead-in whitelist, scoped to the weaker
+//    "addresses the ..." form only** (Codex review, PR #2868, rounds 4
+//    and 5): every guard above narrows what counts as a closure WITHIN a
+//    matched span, but neither closure regex was ever anchored to where
+//    the opening ends -- `.test(body)` searches the WHOLE body, so an
+//    entirely separate sentence carrying genuinely new, unresolved
+//    feedback between the opening and the closure was invisible to it.
+//    Round 4 tried a NEGATIVE bound: at most one sentence terminator
+//    (`.`/`!`/`?`) between the opening and the closure match, on the
+//    theory that a second terminator means a second, independent
+//    sentence sits in between. Round 5 disproved it: natural language
+//    can join an unresolved clause to the closure without ANY second
+//    terminator at all -- "`@user`, confirmed. The null-check remains
+//    unresolved; this update addresses the wording concern.\n\n🐇 ✓"
+//    joins with a semicolon and leaves the terminator count at exactly
+//    one. An em dash or a bare coordinating conjunction ("and") work
+//    the same way. Any guard defined by what the gap must NOT contain is
+//    probeable forever against open-ended prose -- guard 5's own
+//    reasoning already said so; the round-4 terminator count was the one
+//    guard in this file that violated it anyway.
+//
+//    The fix flips to a POSITIVE whitelist, the same style as
+//    `CODERABBIT_ACK_OPENING_RE`'s own closed verb list and guard 5's
+//    closed adverb list: instead of asking "does the gap avoid
+//    disallowed punctuation," ask "does the gap match one of the small
+//    number of lead-in shapes the real observed samples actually use."
+//    Both observed samples (kurone-kito/idd-skill#2853, tests above) are
+//    a bare, short noun-phrase subject referring back to the fix -- "The
+//    repository-qualified reference", "Commit `80c936a7`" -- never a
+//    clause with its own verb describing outstanding status.
+//    `CODERABBIT_ACK_CLOSURE_LEADIN_RE`, below, requires the ENTIRE gap
+//    (the opening's own terminating `.`/`!`, then this lead-in, then
+//    nothing else) to match one of: a bare pronoun ("this"/"that"/"it"),
+//    "the" plus one or two more words, or "commit" plus a short hex
+//    SHA -- deliberately not a free `[^...]` class anywhere.
+//
+//    This intentionally FAILS CLOSED on any lead-in shape not in the
+//    list, including a legitimate one not yet observed: given this
+//    repository's `fully_autonomous_merge` policy, an unrecognized
+//    lead-in should route to a human-authored disposition rather than
+//    risk silently accepting hidden feedback behind an ack-shaped reply.
+//    That is the intended failure mode, not a defect to widen away the
+//    next time a real reply is rejected -- widen the enumeration
+//    (bounded, reviewable) rather than reopening a `[^...]` gap
+//    (unbounded, the class of bug this guard exists to close).
+//
+//    Scoped to `CODERABBIT_ACK_ADDRESSES_CLOSURE_RE` only, not the two
+//    strong forms: those report CodeRabbit's own resolve-attempt
+//    DECISION, which this file's own reasoning above already treats as
+//    unable to co-occur with a new concern in the same reply, so they
+//    keep the whole-body `.test()` they always had.
+//
+// 7. **Hedge words excluded from the lead-in's own noun-phrase tokens
+//    too** (self-critique, E2 pass on this PR): guard 5's hedge-adverb
+//    enumeration reaches the internal "addresses the ... concern" gap
+//    (guard 5 above) but never reached the LEAD-IN's own "the" plus
+//    1-2 word slots, since that whitelist was designed purely as a
+//    structural check (pronoun / short noun phrase / commit SHA), not a
+//    semantic filter. "`@user`, confirmed. The partial workaround
+//    addresses the wording concern.\n\n🐇 ✓" matched despite "partial"
+//    being exactly the hedged, non-committal shape guard 5 exists to
+//    reject elsewhere. Applying the same per-token negative lookahead
+//    used in the internal gap closes this location too. Excludes BOTH
+//    enumerations (adverb and adjective forms), since a lead-in noun
+//    phrase's modifier is grammatically an adjective ("partial",
+//    "temporary") even though the internal gap's is an adverb
+//    ("partially") -- the first attempt at this fix reused only the
+//    adverb list and still let "partial"/"temporary" straight through,
+//    caught empirically before this ever reached review.
+// 8. **Negation words excluded everywhere a free token or a hedge
+//    lookbehind already exists** (Codex review, PR #2868, round 10,
+//    widened round 12): hedge words (guards 5 and 7) say something was
+//    done to a DEGREE; negation words say it was NOT done at all -- a
+//    stronger, more severe inversion, not a hedging variant, so it is
+//    its own enumeration (`CODERABBIT_ACK_NEGATION_WORDS_SOURCE` above)
+//    rather than folded into either hedge list. "`@user`, confirmed.
+//    The fix never addresses the security concern.\n\n🐇 ✓" matched:
+//    "never" sits immediately before "addresses" the same way a hedge
+//    adverb would, but neither hedge enumeration includes negation
+//    words, so every guard passed it through untouched. Round 12 found
+//    the initial enumeration still omitted `seldom`; widened in the same
+//    pass to also cover `in no way` / `by no means`. Wired into all
+//    three locations a hedge check already exists -- the lookbehind
+//    immediately before "addresses" (guard 5), the internal gap's
+//    per-token exclusion (guard 5), and the lead-in's per-token
+//    exclusion (guard 7) -- for the same defense-in-depth reasoning as
+//    guard 7's own dual adverb/adjective exclusion above.
+// 9. **Epistemic-adverb enumeration, added proactively rather than
+//    waiting for a review round** (self-critique, same pass as round
+//    12's negation widening; widened round 13):
+//    `CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE` above closes a fourth,
+//    distinct semantic relationship -- casting doubt on whether the
+//    claimed fix genuinely happened at all ("supposedly", "allegedly")
+//    -- neither a degree (hedge) nor an outright denial (negation).
+//    Wired into the same three locations as guards 5, 7, and 8. Round
+//    13 (Codex) found the initial enumeration omitted "perhaps"; widened
+//    the same pass to also cover "possibly"/"maybe"/"presumably". See
+//    the closing statement in that constant's own doc comment for why
+//    this is treated as the natural end of the SEMANTIC enumeration
+//    family (guard 10 below is a separate, GRAMMATICAL closed class, not
+//    a sixth semantic one).
+// 10. **Coordinating-conjunction exclusion, a grammatical rather than
+//     semantic closed class** (Codex review, PR #2868, round 13): the
+//     `{0,3}` token cap alone cannot close every conjunction-joined
+//     bypass, because a COMPACT one fits within budget where round 7's
+//     original 5-token example did not -- "confirmed. This addresses
+//     the concern but raises concerns.\n\n🐇 ✓" consumes "concern",
+//     "but", "raises" as three modifier tokens (within the cap) and
+//     reaches the second, plural "concerns" as the closure target.
+//     Tightening the cap further cannot close this in general: a
+//     2-token variant of the same bypass exists ("concern yet
+//     concerns"), and real samples already need up to 2 tokens, so no
+//     finite cap excludes the attack while still admitting real noun
+//     phrases. `CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE` excludes
+//     English's seven coordinating conjunctions ("FANBOYS") instead --
+//     a set fixed by the language's grammar, not open-ended vocabulary,
+//     so this is not the same class of fix as the semantic
+//     enumerations above and does not reopen the open-ended
+//     new-concern-blocklist problem. Wired into the internal gap (the
+//     demonstrated bypass) and the lead-in (defense-in-depth,
+//     consistent with guards 7-9); not the immediate pre-"addresses"
+//     lookbehind, since a bare conjunction directly before "addresses"
+//     ("confirmed. But addresses...") is not a coherent English
+//     sentence in the first place.
+const CODERABBIT_ACK_CLOSURE_LEADIN_RE = new RegExp(
+  '^[.!]\\s+(?:' +
+    'this|that|it|' +
+    `the\\s+(?!(?:${CODERABBIT_ACK_HEDGE_WORDS_SOURCE}|${CODERABBIT_ACK_HEDGE_ADJECTIVES_SOURCE}|${CODERABBIT_ACK_NEGATION_WORDS_SOURCE}|${CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE}|${CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE})\\b)[\\w-]+` +
+    `(?:\\s+(?!(?:${CODERABBIT_ACK_HEDGE_WORDS_SOURCE}|${CODERABBIT_ACK_HEDGE_ADJECTIVES_SOURCE}|${CODERABBIT_ACK_NEGATION_WORDS_SOURCE}|${CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE}|${CODERABBIT_ACK_CONJUNCTION_WORDS_SOURCE})\\b)[\\w-]+){0,1}|` +
+    'commit\\s+`[0-9a-f]{7,40}`' +
+    ')\\s+$',
+  'i',
+);
+// #2927: a FOURTH ack shape, observed on kurone-kito/idd-skill#2921's
+// review thread `discussion_r3989223825`
+// (<https://github.com/kurone-kito/idd-skill/pull/2921#discussion_r3989223825>),
+// fetched byte-exact via the pulls/comments REST API (the same
+// byte-exact-fixture discipline #2858's own comment above already
+// established for its two samples):
+//
+//   `@kurone-kito`, thanks. The fix matches the requested behavior. The
+//   default fixture now uses the permissive zero-parseable-run-ID path.
+//
+//   🐇 ✅
+//
+//   _You are interacting with an AI system._
+//
+//   <!-- This is an auto-generated reply by CodeRabbit -->
+//
+// Same root cause as the third shape above: this thread was already
+// resolved independently (by this repository's own
+// resolve-review-thread.mjs) before CodeRabbit replied, so it had no
+// resolve-attempt of its own to report -- neither
+// `CODERABBIT_ACK_STRONG_CLOSURE_RE` nor
+// `CODERABBIT_ACK_ADDRESSES_CLOSURE_RE` match it: no "Review thread
+// resolved" trailer, and its verb phrase is "matches the requested
+// behavior" rather than "addresses the ... concern/finding".
+//
+// Structurally SIMPLER than the third shape in one respect: "matches
+// the requested behavior" is a fixed, closed phrase with no internal
+// noun-phrase gap to police, unlike "addresses the [1-3 modifier
+// tokens] concern/finding". Guards 1, 2, 4, and 10 above exist only to
+// bound that internal gap, so none of them apply here -- a contrastive
+// insertion such as "matches a different requested behavior" (AC3,
+// #2927's own contrastive example) simply fails to match the fixed
+// phrase at all, rather than needing its own guard.
+//
+// What DOES transfer, for the identical reason guards 5/8/9 exist on
+// the third shape: AC3 (#2927) requires "This partially matches...",
+// "This never matches...", and "This supposedly matches..." to still
+// read as withheld/uncertain, not confirmed. The same closed hedge/
+// negation/epistemic enumerations are reused via an identical negative
+// lookbehind immediately before "matches".
+//
+// A first attempt reused `CODERABBIT_ACK_CLOSURE_LEADIN_RE` unchanged
+// for the opening-to-closure gap, on the theory that the real sample's
+// lead-in, "The fix", already fits that regex's existing "the" + one-
+// word alternative. Copilot review (#2927, round 2) found this reuse
+// carries over a pre-existing gap in that shared regex's OWN "the ..."
+// branch: it excludes hedge/negation/epistemic words (guard 7) but not
+// CONTRASTIVE adjectives, the same residual gap (a) documented above
+// `CODERABBIT_ACK_STRONG_CLOSURE_RE` for the third shape's internal
+// gap. "`@user`, thanks. The wrong fix matches the requested
+// behavior.\n\n🐇 ✅" passes that branch ("the" + "wrong" + "fix", two
+// words, within budget) even though "wrong fix" plausibly signals a
+// substantive problem. For the third shape this gap was accepted as
+// residual risk (no sampled reply has used it); reusing the same
+// broad "the" + 1-2 arbitrary words shape here would import that same
+// risk into a SECOND caller with no sample-based justification of its
+// own. With only ONE real sample and no evidence this shape needs
+// anything broader than the exact phrase actually observed,
+// `CODERABBIT_ACK_MATCHES_LEADIN_RE` below gives this fourth shape its
+// OWN, much narrower lead-in check instead of reusing the shared one:
+// a bare pronoun (`this`/`that`/`it`, the same closed, modifier-free
+// words the shared regex also uses, so no NEW gap there) or the exact
+// literal phrase "the fix" -- not "the" plus any word. This closes the
+// contrastive-adjective gap completely for this shape ("the wrong
+// fix" no longer matches "the fix" literally) without touching the
+// shared regex or the third shape's own established behavior.
+//
+// New wrinkle this shape introduces: the real sample above has ONE
+// more free-text sentence ("The default fixture now uses...") between
+// the closure verb phrase and the boilerplate tail. The third shape's
+// guard 3 requires the boilerplate immediately after its closure
+// sentence, with no bare trailing content allowed at all; reusing that
+// requirement unchanged here would reject the real sample and fail AC1
+// (#2927).
+//
+// A first attempt permitted this trailing sentence via a token-capped,
+// positive-shape grammar (10 `[\w-]+` tokens, closed-class-excluded,
+// determiner-first-token restricted) -- the same STYLE as guard 1's
+// internal "addresses the ... concern" gap. Copilot review (#2927)
+// correctly rejected this as still too permissive: the grammar's own
+// documented residual risk -- a syntactically clean, unhedged,
+// determiner-led sentence with no excluded vocabulary, e.g. "The
+// null-check still remains unresolved in the other branch." (9 tokens,
+// "The" opener, no excluded word) -- structurally satisfies ANY such
+// bounded-but-general grammar while stating a genuine new blocker, and
+// would suppress the merge gate exactly the way this file's fail-closed
+// philosophy exists to prevent. Unlike gap (a) above (contrastive
+// adjectives inside an already-narrow noun-phrase slot, genuinely
+// irreducible without recreating the open-ended "new concern"
+// blocklist), an open determiner-led sentence is not a narrow residual
+// edge -- it is most of the risk surface a "positive-shape grammar"
+// was supposed to close in the first place. The SAME review also found
+// this permissive grammar could absorb the third shape's own "addresses
+// the ... concern/finding" vocabulary as innocuous filler, which could
+// then interact badly with `isKnownAdvisoryAckTemplate`'s own
+// closure-form selection (see that function's own comment for the
+// control-flow half of that fix).
+//
+// With only ONE real observed sample and no broader pattern to derive a
+// general grammar FROM, the trailing sentence is instead permitted only
+// as an EXACT literal match of that one sample's own continuation text
+// -- the same resolution guard 6's lead-in whitelist already applies
+// (enumerate the exact observed shape(s), fail closed on everything
+// else, widen later only when a new real sample demonstrates a genuine
+// second shape) -- rather than a grammar general enough to also accept
+// prose no sample has ever produced. This has no residual risk in this
+// slot at all (a fixed string cannot admit arbitrary new content), and
+// incidentally also closes the cross-shape-vocabulary concern above for
+// free: the literal sample text contains neither "addresses" nor
+// "concern"/"finding".
+const CODERABBIT_ACK_MATCHES_TRAILING_OBSERVED_SENTENCE_SOURCE = escapeRegExp(
+  'The default fixture now uses the permissive zero-parseable-run-ID path.',
+);
+const CODERABBIT_ACK_MATCHES_BEHAVIOR_CLOSURE_RE = new RegExp(
+  `(?<!\\b(?:${CODERABBIT_ACK_HEDGE_WORDS_SOURCE}|${CODERABBIT_ACK_NEGATION_WORDS_SOURCE}|${CODERABBIT_ACK_EPISTEMIC_WORDS_SOURCE})\\s+)` +
+    '\\bmatches\\s+the\\s+requested\\s+behavior\\b\\.\\s*' +
+    `(?:${CODERABBIT_ACK_MATCHES_TRAILING_OBSERVED_SENTENCE_SOURCE}\\s*)?` +
+    CODERABBIT_ACK_CLOSURE_TAIL_SOURCE,
+  'i',
+);
+// This fourth shape's own opening-to-closure lead-in check (Copilot
+// review, #2927, round 2) -- deliberately NOT `CODERABBIT_ACK_CLOSURE_
+// LEADIN_RE`; see the doc comment above `CODERABBIT_ACK_MATCHES_
+// BEHAVIOR_CLOSURE_RE` for why reusing that shared regex's broader
+// "the" + 1-2 arbitrary words branch would import its known
+// contrastive-adjective gap into a second caller with no sample-based
+// justification. A bare pronoun or the exact literal phrase "the fix"
+// -- the only lead-in actually observed -- and nothing else.
+const CODERABBIT_ACK_MATCHES_LEADIN_RE =
+  /^[.!]\s+(?:this|that|it|the\s+fix)\s+$/i;
+function isKnownAdvisoryAckTemplate(comment) {
+  const authorLogin = String(comment.author?.login ?? '');
+  const body = String(comment.body ?? '');
+  if (!authorLogin || !isCodeRabbitLogin(authorLogin) || !body) {
+    return false;
+  }
+  const openingMatch = CODERABBIT_ACK_OPENING_RE.exec(body);
+  if (!openingMatch) {
+    return false;
+  }
+  // The two strong forms (CodeRabbit's own resolve-attempt decision) are
+  // checked on the whole body with no further guard -- see the comment
+  // above `CODERABBIT_ACK_STRONG_CLOSURE_RE` for why the weaker third
+  // and fourth forms' guards (locality, sentence-boundary, hedge-adverb,
+  // opening-to-closure lead-in whitelist) must never apply here, even
+  // when unrelated hedge-shaped wording happens to appear elsewhere in
+  // the same reply (e.g. a Learnings-used block).
+  if (CODERABBIT_ACK_STRONG_CLOSURE_RE.test(body)) {
+    return true;
+  }
+  // The third (#2858) and fourth (#2927) forms are tried in the order
+  // they were introduced, each independently and each against its OWN
+  // lead-in check (the third shape's shared `CODERABBIT_ACK_CLOSURE_
+  // LEADIN_RE`; the fourth shape's own, narrower `CODERABBIT_ACK_
+  // MATCHES_LEADIN_RE` -- see that constant's doc comment for why it is
+  // not the shared one). A structural match whose own lead-in fails
+  // does NOT disqualify a later form from also being tried, since a
+  // lead-in check is a per-match verdict, not a whole-body one.
+  // Committing to the first structural match regardless of its own
+  // lead-in outcome was a real bug (Copilot review, #2927, round 1): an
+  // unrelated `CODERABBIT_ACK_ADDRESSES_CLOSURE_RE` match elsewhere in
+  // the body, with its own lead-in failing, used to short-circuit this
+  // whole function to `false` without ever trying this fourth shape's
+  // own, separately valid, match -- not only when the third shape's
+  // regex fails to match at all, contrary to an earlier revision of the
+  // index comment above `CODERABBIT_ACK_STRONG_CLOSURE_RE` (Copilot
+  // review, #2927, round 2). See the doc comment above `CODERABBIT_ACK_
+  // MATCHES_BEHAVIOR_CLOSURE_RE` for why its trailing-sentence slot is
+  // ALSO narrowed to an exact literal match rather than relying on this
+  // loop fix alone.
+  const openingEnd = openingMatch.index + openingMatch[0].length;
+  for (const { closureRe, leadinRe } of [
+    {
+      closureRe: CODERABBIT_ACK_ADDRESSES_CLOSURE_RE,
+      leadinRe: CODERABBIT_ACK_CLOSURE_LEADIN_RE,
+    },
+    {
+      closureRe: CODERABBIT_ACK_MATCHES_BEHAVIOR_CLOSURE_RE,
+      leadinRe: CODERABBIT_ACK_MATCHES_LEADIN_RE,
+    },
+  ]) {
+    const closureMatch = closureRe.exec(body);
+    if (!closureMatch) {
+      continue;
+    }
+    const gapToClosure = body.slice(openingEnd, closureMatch.index);
+    if (leadinRe.test(gapToClosure)) {
+      return true;
+    }
+  }
+  return false;
+}
 // Codex usage / quota exhaustion for code reviews. Token-anchored on all
 // three of "Codex usage limit(s)", a reach/exceed/hit-family verb, and "for
 // code reviews", each tolerant of interposed wording drift, in the two known
@@ -1111,6 +2246,32 @@ export const NON_REVIEW_NOTICE_DISPOSITION_HINT =
   'must start with "**Rejected**" and match /\\bdid not review HEAD\\b/i -- ' +
   'canonical form: "**Rejected** — {bot} did not review HEAD {sha} ' +
   '({reason}); this is not a completed review"';
+// #2249 diagnostic-only hint text, single-sourced like
+// `NON_REVIEW_NOTICE_DISPOSITION_HINT` above: names the exact literal
+// prefix `isDispositionComment` requires, for the far more common
+// plain-text mistake -- a reply written as `Accepted — ...` or
+// `Rejected — ...` with no bold markdown at all, so it never satisfies
+// `isDispositionComment` even though it is clearly an attempted
+// disposition. Never consumed by any routing decision -- see the `hint`
+// field's own doc comment on `DispositionEvidenceSummary`.
+export const MALFORMED_DISPOSITION_PREFIX_HINT =
+  'disposition reply is missing the required literal prefix: it must ' +
+  'start with exactly "**Accepted**" or "**Rejected**" (bold markdown, ' +
+  'optionally followed by one of . ! : before the closing **) -- a plain ' +
+  '"Accepted" / "Rejected" without the bold markdown is not recognized';
+// #2491 diagnostic-only hint text, single-sourced like the two hints above:
+// unlike those (a MIS-PHRASED disposition attempt), this fires when a
+// correctly-phrased disposition already exists but the bot later live-edited
+// the SAME comment id in place into a non-review notice, bumping its
+// `updatedAt` past the disposition's own timestamp -- so the disposition no
+// longer postdates the comment and the comment re-appears as missing with no
+// indication a reply was ever posted. Never consumed by any routing decision
+// -- see the `hint` field's own doc comment on `DispositionEvidenceSummary`.
+export const EDITED_AFTER_DISPOSITION_HINT =
+  'comment may have already been dispositioned before the bot live-edited ' +
+  'this same comment id into a non-review notice -- if so, that disposition ' +
+  'now predates the edit and no longer counts; post a fresh disposition ' +
+  'reply in the non-review-notice shape';
 // #1122 CodeRabbit summary-walkthrough auto-disposition classifiers.
 //
 // The CodeRabbit summary walkthrough is a regular comment whose body starts with
@@ -1121,23 +2282,56 @@ export const NON_REVIEW_NOTICE_DISPOSITION_HINT =
 // re-dispositions the CURRENT summary per HEAD rather than carrying an old
 // acceptance forward (a stale carry-forward could mask a finding folded into a
 // later summary body — the "a false positive is a false merge" hazard).
-// True when a regular comment is a CodeRabbit summary walkthrough. Detection is
+// True when a regular comment is a configured advisory bot's review-summary
+// comment (CodeRabbit's summary walkthrough, Codex's review-status comment, or
+// any future bot in `REVIEW_SUMMARY_MARKERS_BY_BOT_IDENTITY`). Detection is
 // start-anchored on the exact single-sourced marker (after trimming leading
-// whitespace) so a comment that merely quotes the marker in prose is not matched.
+// whitespace) so a comment that merely quotes a marker in prose is not
+// matched. The caller is expected to have already filtered by advisory-bot
+// login (as every call site in this file and in
+// `disposition-non-review-notices.mts` does) -- this function only tells
+// apart a summary body from every other body. It does NOT imply the review
+// is complete: Codex edits the same comment in place across its own
+// lifecycle, so this can match while its status table still reads "Running"
+// for the current HEAD -- callers that decide whether to AUTO-ACCEPT (as
+// opposed to merely classifying a comment as needing some disposition) must
+// gate on completion separately, as
+// `disposition-non-review-notices.mts`'s `isCodexReviewSummaryCompleteForHeadSha`
+// does.
+// #2161: a comment that also nests CODERABBIT_SKIP_REVIEW_MARKER carries no
+// review content despite starting with the CodeRabbit summary marker, so it
+// is excluded here too -- never a summary walkthrough, always a non-review
+// notice (see isAdvisoryNonReviewNotice / ADVISORY_NON_REVIEW_NOTICE_PATTERNS).
+// No other configured bot currently has an analogous inner exclusion marker.
 export function isReviewSummaryComment(body) {
-  return String(body ?? '')
-    .trimStart()
-    .startsWith(CODERABBIT_SUMMARY_MARKER);
+  const text = String(body ?? '').trimStart();
+  for (const [identity, marker] of REVIEW_SUMMARY_MARKERS_BY_BOT_IDENTITY) {
+    if (!text.startsWith(marker)) {
+      continue;
+    }
+    if (
+      identity === 'coderabbitai' &&
+      CODERABBIT_SKIP_REVIEW_MARKER_RE.test(text)
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
-// A trusted IDD disposition of a CodeRabbit summary walkthrough: the canonical
-// `**Accepted** — {bot} summary walkthrough …` reply the helper posts. Requires
-// the `**Accepted**` prefix (via `DISPOSITION_ACCEPTED_PREFIX_RE`, so the bounded
-// trailing-punctuation variants like `**Accepted.**` also count; a summary is a
-// completed review, so it is accepted, never rejected) AND the
-// `summary walkthrough` phrase, so an ordinary acceptance of reviewer feedback is
-// excluded. Tightly matched to `buildSummaryDispositionBody` so a loose
-// acceptance can never be miscredited (which would under-post and strand the
-// gate).
+// A trusted IDD disposition of any configured advisory bot's review-summary
+// comment (CodeRabbit's summary walkthrough, Codex's review-status comment,
+// or a future bot): the canonical `**Accepted** — {bot} summary walkthrough
+// …` reply the helper posts. Requires the `**Accepted**` prefix (via
+// `DISPOSITION_ACCEPTED_PREFIX_RE`, so the bounded trailing-punctuation
+// variants like `**Accepted.**` also count; a summary is a completed review,
+// so it is accepted, never rejected) AND the `summary walkthrough` phrase, so
+// an ordinary acceptance of reviewer feedback is excluded. Already
+// bot-agnostic -- the `{bot}` login is free text inside the body, not part of
+// this predicate -- so recognizing a new bot's summary here needs no change,
+// only a new `isReviewSummaryComment` marker entry (#2695). Tightly matched
+// to `buildSummaryDispositionBody` so a loose acceptance can never be
+// miscredited (which would under-post and strand the gate).
 export function isReviewSummaryDisposition(comment) {
   const body = (comment.body ?? '').trimStart();
   return (
@@ -1201,6 +2395,95 @@ export function dispositionNamesAdvisoryBot(
   }
   return span.toLowerCase().includes(token);
 }
+// #2544/#2547: classifies the configured secondary advisory bot's current
+// standing for the CURRENT HEAD into exactly one of three outcomes --
+// still pending, definitively declined, or genuinely settled -- so
+// `buildSecondaryQuietWindowStatus` can give each its own wait treatment
+// (full window / zero-wait / short settled buffer respectively) instead of
+// #2544's original two-way `settled: boolean` collapsing "no evidence yet"
+// and "the bot already, conclusively, declined this exact commit" into the
+// same slow path.
+//
+// - `settled: true` -- the LATEST matching comment for this HEAD is a
+//   genuine (non-notice) comment: #2335's "might still be mid-review"
+//   concern no longer applies, only the narrower "second/later finding"
+//   risk `buildSecondaryQuietWindowStatus`'s settled-buffer branch still
+//   protects against.
+// - `declined: true` -- the LATEST matching comment for this HEAD is a
+//   rate-limit / skip-review notice (`isAdvisoryNonReviewNotice`). #2547's
+//   live investigation (`gh api .../commits/{sha}/statuses` across several
+//   PRs' head commits, corroborated by hours of subsequent silence on the
+//   oldest sampled PR) found every sampled rate-limit decline reaches its
+//   terminal commit-status entry within ~6-16 seconds of being queued and
+//   is never observed to change afterward, even 15+ hours later -- so a
+//   notice for the CURRENT HEAD is itself sufficient, corroborating
+//   commit-status data is not required to treat it as definitive. (An
+//   implementer's judgment call the issue explicitly left open: a notice
+//   with no separately-fetched corroborating commit status still reports
+//   `declined: true` here, not the ambiguous/pending case.)
+// - Neither `settled` nor `declined` -- still pending: no comment from the
+//   bot at or after `headCommittedAt` at all, or an unparseable
+//   `headCommittedAt`/unconfigured `secondaryBotLogin`. #2335's original
+//   full-window protection is unchanged for this case.
+//
+// Only the single latest matching comment is examined -- a notice posted
+// BEFORE a later genuine comment (rate-limited, then recovered) reports
+// `settled: true`, not `declined`, while a notice posted AFTER the latest
+// genuine comment reports `declined: true` as a fresh, terminal decline
+// for this HEAD -- not "might still produce another review" -- purely as
+// a side effect of always picking the latest.
+//
+// Deliberately reuses `comments` only, not `reviews`: this file's existing
+// notice-vs-genuine classification for the secondary bot
+// (`isAdvisoryNonReviewNotice`, `isReviewSummaryComment`,
+// `classifyRegularBotComment`) already operates purely on top-level PR
+// comments -- `ReviewLike` carries no `body` field in this codebase's
+// model, so a PR review object can never carry the marker text this needs.
+//
+// Falls back to `user.login`/`created_at`/`updated_at` alongside
+// `author.login`/`createdAt`/`updatedAt`, matching every other
+// `CommentLike` reader in this file (Copilot review, #2546): a caller that
+// ever passes REST-raw comments straight through, without the CLI layer's
+// own `normalizeComment` pass, must not silently fail-closed here just
+// because it used the other field-name form.
+export function computeSecondaryAdvisoryReviewSettlement(
+  comments,
+  { secondaryBotLogin, headCommittedAt },
+) {
+  const token = advisoryBotIdentityToken(secondaryBotLogin);
+  const headAt = String(headCommittedAt ?? '');
+  if (!token || !isValidIsoTimestamp(headAt)) {
+    return { settled: false, settledAt: null, declined: false };
+  }
+  const matches = comments
+    .filter(
+      (comment) =>
+        advisoryBotIdentityToken(
+          comment.author?.login ?? comment.user?.login ?? '',
+        ) === token,
+    )
+    .map((comment) => ({
+      body: comment.body ?? '',
+      at: effectiveRegularCommentActivityAt({
+        updatedAt: comment.updatedAt ?? comment.updated_at,
+        createdAt: String(comment.createdAt ?? comment.created_at ?? ''),
+      }),
+    }))
+    .filter(
+      (entry) =>
+        isValidIsoTimestamp(entry.at) &&
+        compareIsoTimestamps(entry.at, headAt) >= 0,
+    )
+    .sort((left, right) => compareIsoTimestamps(left.at, right.at));
+  const latest = matches[matches.length - 1];
+  if (!latest) {
+    return { settled: false, settledAt: null, declined: false };
+  }
+  if (isAdvisoryNonReviewNotice(latest.body)) {
+    return { settled: false, settledAt: null, declined: true };
+  }
+  return { settled: true, settledAt: latest.at, declined: false };
+}
 // #1182 Match trusted machine advisory dispositions to the advisory-bot stickies
 // they address, so a disposition posted by a trusted-marker actor who is NOT a
 // resolved IDD agent (e.g. a second trusted session) is honored without being
@@ -1237,7 +2520,6 @@ function matchTrustedAdvisoryStickyDispositions(
   iddAgentLogins,
 ) {
   const dispositionedStickyIndexes = new Set();
-  const consumedDispositionIndexes = new Set();
   const trustedDispositions = comments.filter(
     (comment) =>
       trustedMarkerLogins.has(comment.authorLogin) &&
@@ -1276,9 +2558,16 @@ function matchTrustedAdvisoryStickyDispositions(
       list.push(comment);
       stickiesByBot.set(comment.authorLogin, list);
     }
-    // Sort bot logins so a disposition naming more than one configured bot is
-    // consumed deterministically (by the lexicographically-first bot only).
+    // Sort bot logins for deterministic iteration order only. Consumption is
+    // tracked per bot login (`consumedDispositionIndexes` below, reset on
+    // each iteration of this loop) rather than shared across bots: a single
+    // disposition naming several configured bots (`dispositionNamesAdvisoryBot`
+    // matches each one it names) must be able to clear one sticky per bot it
+    // names, not just the first bot processed. #2475 -- a shared,
+    // loop-wide consumption set previously let only the alphabetically-first
+    // named bot's sticky be credited, stranding the others.
     for (const botLogin of [...stickiesByBot.keys()].sort()) {
+      const consumedDispositionIndexes = new Set();
       const stickies = [...(stickiesByBot.get(botLogin) ?? [])].sort(
         byActivityThenIndex,
       );
@@ -1459,19 +2748,22 @@ export function selectLatestCheckInstance(group) {
  * behavior-identical.
  *
  * Residual known limitation: two genuinely independent producers that
- * share both a `name` and a `type` and both lack a `workflowName` (e.g.
- * two different non-Actions GitHub Apps that each post a check-run
- * directly, rather than through a workflow) remain indistinguishable
+ * share a `name`, a `type`, and (when populated) a `workflowName` AND a
+ * `workflowPath` (e.g. two different non-Actions GitHub Apps that each
+ * post a check-run directly, rather than through a workflow -- neither
+ * has a `workflowPath` to disambiguate with) remain indistinguishable
  * here and will still be grouped together. Closing that fully needs a
  * stronger producer identity (e.g. the owning GitHub App) than
  * `gh`/GraphQL's `statusCheckRollup` exposes today; `ci-wait-state.mts`'s
  * own `(checkName, workflowName)` key has the identical accepted gap.
  */
 /**
- * Group check-run instances by the same `(name, type, workflowName)`
- * producer-identity key `selectLatestCheckPerName` reduces to one
- * representative -- shared here so a caller that needs to inspect the
- * DISCARDED siblings, not just the survivor (see
+ * Group check-run instances by the same `(name, type, workflowName,
+ * workflowPath)` producer-identity key (#2919 added `workflowPath`, see
+ * `CheckLike`'s own doc comment for why `workflowName` alone is
+ * insufficient) `selectLatestCheckPerName` reduces to one representative
+ * -- shared here so a caller that needs to inspect the DISCARDED
+ * siblings, not just the survivor (see
  * {@link findDiscardedNonPassingSiblings}), can never drift out of sync
  * with that grouping.
  */
@@ -1490,7 +2782,10 @@ function groupChecksByProducer(checks) {
     const workflowName = check.workflowName
       ? String(check.workflowName).trim()
       : '';
-    const key = `${String(check.name)}\0${type}\0${workflowName}`;
+    const workflowPath = check.workflowPath
+      ? String(check.workflowPath).trim()
+      : '';
+    const key = `${String(check.name)}\0${type}\0${workflowName}\0${workflowPath}`;
     const group = groups.get(key);
     if (group) {
       group.push(check);
@@ -1518,20 +2813,22 @@ const GENUINELY_NON_PASSING_STATES = new Set([
   'CANCELLED',
 ]);
 /**
- * Detect same-producer `(name, type, workflowName)` groups whose
- * dedup-selected "latest" instance (`selectLatestCheckInstance`) is
- * pass-equivalent (SUCCESS/SKIPPED/NEUTRAL/NOT_APPLICABLE) while a
- * DISCARDED sibling in that same group is genuinely non-passing (see
- * {@link GENUINELY_NON_PASSING_STATES}) -- the live discrepancy PR #1741
- * exhibited (#1745): `classifyCiChecks` reported `success` for a commit
- * whose GitHub `statusCheckRollup.state` was `FAILURE`, because a
- * `CANCELLED` bot-triggered `idd-advisory-convergence` instance existed
- * alongside the `SUCCESS` instance this dedup selected as "latest".
- * Confirming the exact internal GitHub selection is not possible after the
- * fact (see #1745's evidence-durability note), so this reports the
- * discarded-sibling FACT itself -- a same-name non-passing instance existed
- * and was NOT counted -- rather than asserting why GitHub's own rollup
- * disagreed. Pure and read-only: never changes which instance
+ * Detect same-producer `(name, type, workflowName, workflowPath)` groups
+ * (kurone-kito/idd-skill#2919 widened this key from the original 3-tuple
+ * `(name, type, workflowName)` -- see `groupChecksByProducer`'s own doc
+ * comment) whose dedup-selected "latest" instance
+ * (`selectLatestCheckInstance`) is pass-equivalent (SUCCESS/SKIPPED/
+ * NEUTRAL/NOT_APPLICABLE) while a DISCARDED sibling in that same group is
+ * genuinely non-passing (see {@link GENUINELY_NON_PASSING_STATES}) -- the
+ * live discrepancy PR #1741 exhibited (#1745): `classifyCiChecks` reported
+ * `success` for a commit whose GitHub `statusCheckRollup.state` was
+ * `FAILURE`, because a `CANCELLED` bot-triggered `idd-advisory-convergence`
+ * instance existed alongside the `SUCCESS` instance this dedup selected as
+ * "latest". Confirming the exact internal GitHub selection is not possible
+ * after the fact (see #1745's evidence-durability note), so this reports
+ * the discarded-sibling FACT itself -- a same-name non-passing instance
+ * existed and was NOT counted -- rather than asserting why GitHub's own
+ * rollup disagreed. Pure and read-only: never changes which instance
  * `selectLatestCheckPerName` selects, only reports when a discarded sibling
  * makes that selection's "success" verdict less certain than it looks.
  */
@@ -1572,6 +2869,11 @@ export function classifyCiChecks(checks) {
     completedAt: check.completedAt ?? null,
     type: check.type ?? null,
     workflowName: check.workflowName ?? null,
+    // #2919: carried through so a caller that populates it gets the
+    // stronger producer-identity split at this shared dedup/grouping
+    // layer too, not just at the one call site that originally
+    // motivated it -- see `CheckLike`'s own doc comment.
+    workflowPath: check.workflowPath ?? null,
   }));
   // GitHub can report several check-run instances that share the same
   // check `name` (a manual or automatic re-run leaves the earlier instance
@@ -1723,6 +3025,53 @@ export function computeCopilotPendingCoversHead(
     }
   });
   return headIndex !== -1 && requestIndex !== -1 && requestIndex > headIndex;
+}
+/**
+ * #2167: REST `requested_reviewers` can report empty (`{"users":[]}`) even
+ * when Copilot review is still genuinely outstanding for the current HEAD --
+ * observed on this source repository during PR #2158, where REST returned
+ * an empty list (HTTP 200, not a 5xx) while GraphQL `reviewRequests` still
+ * listed the primary bot and `computeCopilotPendingCoversHead` was already
+ * `true`. `isCopilotPending` alone is REST-only and misses that case;
+ * `evaluateAdvisoryWaitOutcome` / `evaluateAdvisoryWaitF3Outcome` and the
+ * AW3 table are unchanged -- callers pass this corrected boolean into
+ * `outcomeInput` exactly where the uncorrected `isCopilotPending` result
+ * used to go, so the corrected pending bit flows through the existing
+ * formulas unmodified.
+ *
+ * Precedence, cheapest signal first:
+ * 1. REST `requestedReviewers` already lists the primary bot -> `true`.
+ * 2. Already-fetched timeline evidence (`copilotPendingCoversHead`) shows
+ *    the primary bot is still requested as of a HEAD the latest Copilot
+ *    review does not cover -> `true`, no extra HTTP call needed.
+ * 3. `graphqlRequestedReviewerLogins` -- an optional, already-fetched
+ *    GraphQL `reviewRequests` login list; `null`/`undefined` means "not
+ *    attempted, or the attempt failed" -- lists the primary bot -> `true`.
+ * 4. Otherwise -> `false`, including when the optional GraphQL check was
+ *    skipped or failed: an absent or failed GraphQL result keeps the
+ *    REST-derived result rather than assuming pending.
+ */
+export function resolveCopilotPending(
+  requestedReviewers,
+  copilotPendingCoversHead,
+  lastCopilotCommit,
+  prHeadSha,
+  graphqlRequestedReviewerLogins,
+  primaryBotLogin = DEFAULT_ADVISORY_PRIMARY_BOT_LOGIN,
+) {
+  if (isCopilotPending(requestedReviewers, primaryBotLogin)) {
+    return true;
+  }
+  if (copilotPendingCoversHead && lastCopilotCommit !== prHeadSha) {
+    return true;
+  }
+  if (graphqlRequestedReviewerLogins) {
+    return isCopilotPending(
+      [...graphqlRequestedReviewerLogins],
+      primaryBotLogin,
+    );
+  }
+  return false;
 }
 /**
  * True when the OPTIONAL secondary advisory bot has already been requested for
@@ -1920,6 +3269,7 @@ export function summarizeAdvisoryWaitMarkers(
   );
   let earliestSameHeadAt = '';
   let trustedSameHeadMarkerCount = 0;
+  let trustedSameHeadRequestMarkerCount = 0;
   let trustedRequestMarkerCount = 0;
   let untrustedSameHeadMarkerCount = 0;
   let untrustedRequestMarkerCount = 0;
@@ -1934,6 +3284,9 @@ export function summarizeAdvisoryWaitMarkers(
     if (isSameHeadMarker) {
       if (trusted) {
         trustedSameHeadMarkerCount += 1;
+        if (isRequestMarker) {
+          trustedSameHeadRequestMarkerCount += 1;
+        }
         const createdAt = String(
           comment?.createdAt ?? comment?.created_at ?? '',
         );
@@ -1958,6 +3311,7 @@ export function summarizeAdvisoryWaitMarkers(
   }
   return {
     sameHeadMarkerPresent: trustedSameHeadMarkerCount > 0,
+    sameHeadRequestMarkerPresent: trustedSameHeadRequestMarkerCount > 0,
     earliestSameHeadAt,
     sameHeadMarkerCount: trustedSameHeadMarkerCount,
     requestMarkerCount: trustedRequestMarkerCount,
@@ -2009,6 +3363,7 @@ export function buildAdvisoryWaitSummary(
     requestedReviewers = [],
     timelineEvents = [],
     comments = [],
+    graphqlRequestedReviewerLogins = null,
   },
   options = {},
 ) {
@@ -2041,10 +3396,17 @@ export function buildAdvisoryWaitSummary(
     reviews,
     primaryBotLogin,
   );
-  const copilotPending = isCopilotPending(requestedReviewers, primaryBotLogin);
   const copilotPendingCoversHead = computeCopilotPendingCoversHead(
     timelineEvents,
     prHeadSha,
+    primaryBotLogin,
+  );
+  const copilotPending = resolveCopilotPending(
+    requestedReviewers,
+    copilotPendingCoversHead,
+    lastCopilotCommit,
+    prHeadSha,
+    graphqlRequestedReviewerLogins,
     primaryBotLogin,
   );
   const {
@@ -2118,6 +3480,7 @@ export function buildAdvisoryWaitSummary(
     capExhaustedRoute,
     elapsedMinutes,
     sameHeadMarkerPresent: markerSummary.sameHeadMarkerPresent,
+    sameHeadRequestMarkerPresent: markerSummary.sameHeadRequestMarkerPresent,
     earliestSameHeadAt: markerSummary.earliestSameHeadAt,
     sameHeadMarkerCount: markerSummary.sameHeadMarkerCount,
     requestMarkerCount: markerSummary.requestMarkerCount,
@@ -2156,9 +3519,17 @@ export function buildActivitySnapshotSummary(
   );
   // An advisory bot can never anchor "dispositions exist": its own
   // **Accepted**/**Rejected**-shaped replies must not start the
-  // post-disposition window that classifies its later acks.
-  for (const login of advisoryBotLogins) {
-    dispositionAuthorLogins.delete(login);
+  // post-disposition window that classifies its later acks. Excludes via
+  // `isConfiguredAdvisoryBotLogin`, not a plain `Set.has`/`.delete`, so a
+  // `[bot]`-suffix mismatch between `dispositionAuthorLogins` and
+  // `advisoryBotLogins` (e.g. one storing GitHub's suffixed `dual-bot[bot]`
+  // author-login form, the other the supported suffixless `dual-bot` form,
+  // #2014) still excludes the shared login -- the same normalized identity
+  // every other advisory-bot recognition in this file already uses.
+  for (const login of [...dispositionAuthorLogins]) {
+    if (isConfiguredAdvisoryBotLogin(login, advisoryBotLogins)) {
+      dispositionAuthorLogins.delete(login);
+    }
   }
   const isAdvisoryBot = (login) =>
     isConfiguredAdvisoryBotLogin(login, advisoryBotLogins);
@@ -2168,6 +3539,39 @@ export function buildActivitySnapshotSummary(
         .trim()
         .toLowerCase(),
     );
+  // #2014: `isDispositionComment` alone (the `**Accepted**`/`**Rejected**`
+  // prefixes) misses the terminal `**Rejection confirmed by maintainer**`
+  // marker (`isRejectionConfirmedDisposition`) that E6
+  // (idd-review-triage.instructions.md) posts instead of a fresh
+  // `**Rejected**` re-post once a maintainer agrees an
+  // `**Awaiting maintainer decision**` item needs no action -- a disposition
+  // is a disposition regardless of which of the two terminal shapes it took.
+  // `classifyThreadAckOnlyPostDisposition` already recognizes both, but ONLY
+  // as a reply on a resolved review thread
+  // (the marker's own contract, `isRejectionConfirmedDisposition`'s doc
+  // comment above). `filteredComments` below are plain top-level PR
+  // comments with no thread/resolved concept at all, so they must keep
+  // using plain `isDispositionComment` -- recognizing the terminal marker
+  // there would accept it as a disposition anchor with no resolved-thread
+  // context to validate it against (Copilot review, #2014 PR #2029).
+  // Thread-scoped variant: recognizes the terminal rejection-confirmed
+  // marker only while its own thread is still resolved, mirroring
+  // `hasFreshDisposition`'s identical `threadResolved` gate above -- once a
+  // thread is reopened, the marker's "nothing more to do here" claim is
+  // stale for that thread. Needed specifically for the cross-thread global
+  // scan below (`dispositionCreatedAts`'s `threads.flatMap`), which pools
+  // every thread's replies into one PR-wide anchor: without this gate, a
+  // stale rejection-confirmed reply on a since-reopened thread could still
+  // anchor the window that misclassifies an unrelated, brand-new
+  // advisory-bot comment elsewhere on the PR as ack-only. This is the ONLY
+  // place the combined (`isDispositionComment` OR
+  // `isRejectionConfirmedDisposition`) recognition applies outside a
+  // thread whose `isResolved` is already independently confirmed true.
+  const isDispositionMarkerComment = (comment) =>
+    isDispositionComment(comment) || isRejectionConfirmedDisposition(comment);
+  const isDispositionMarkerCommentForThread = (comment, threadResolved) =>
+    isDispositionComment(comment) ||
+    (threadResolved && isRejectionConfirmedDisposition(comment));
   const filteredComments = comments.filter((comment) => {
     if (!trustedMarkerLogins.has((comment.author?.login ?? '').toLowerCase())) {
       return true;
@@ -2193,9 +3597,21 @@ export function buildActivitySnapshotSummary(
         .filter(
           (comment) =>
             isDispositionAuthor(comment.author?.login) &&
-            isDispositionComment(comment),
+            isDispositionMarkerCommentForThread(
+              comment,
+              Boolean(thread.isResolved),
+            ),
         )
-        .map((comment) => comment.createdAt),
+        .map((comment) =>
+          // An edited **Rejection confirmed by maintainer** marker anchors by
+          // its effective (updatedAt-preferring) activity, matching
+          // classifyThreadAckOnlyPostDisposition's choice for the same
+          // marker (#2045); ordinary Accepted/Rejected markers keep the
+          // pre-existing createdAt anchor.
+          isRejectionConfirmedDisposition(comment)
+            ? effectiveThreadCommentActivityAt(comment)
+            : comment.createdAt,
+        ),
     ),
   ].filter(isValidIsoTimestamp);
   const latestDispositionAt = maxIsoTimestamp(dispositionCreatedAts) ?? null;
@@ -2229,9 +3645,16 @@ export function buildActivitySnapshotSummary(
           .filter(
             (comment) =>
               isDispositionAuthor(comment.author?.login) &&
-              isDispositionComment(comment),
+              isDispositionMarkerCommentForThread(
+                comment,
+                Boolean(thread.isResolved),
+              ),
           )
-          .map((comment) => comment.createdAt)
+          .map((comment) =>
+            isRejectionConfirmedDisposition(comment)
+              ? effectiveThreadCommentActivityAt(comment)
+              : comment.createdAt,
+          )
           .filter(isValidIsoTimestamp),
       ) ?? null;
     // Per-reply attribution needs the reply timeline: when a caller
@@ -2249,7 +3672,7 @@ export function buildActivitySnapshotSummary(
       if (!isAdvisoryBot(comment.author?.login)) {
         return false;
       }
-      if (isDispositionComment(comment)) {
+      if (isDispositionMarkerComment(comment)) {
         return false;
       }
       const activityAt = effectiveThreadCommentActivityAt(comment);
@@ -2381,6 +3804,11 @@ export function resolveLatestReviewWatermark(comments, options = {}) {
     if (!parsed) {
       continue;
     }
+    // Exact claim-id match is intentional (#2080): a watermark records
+    // what THIS claim-holder verified. A takeover starts a new restore
+    // scope (`idd-review-snapshot.instructions.md`); do not treat the
+    // predecessor `supersedes` id as a match the way
+    // `summarizeExternalCheckWaivers` does for maintainer waivers.
     if (expectedClaimId && parsed.claimId !== expectedClaimId) {
       continue;
     }
@@ -2400,6 +3828,58 @@ export function resolveLatestReviewWatermark(comments, options = {}) {
     }
   }
   return latest;
+}
+/**
+ * Scans the same trusted-author comment stream `resolveLatestReviewWatermark`
+ * consumes for a `review-watermark`/`review-baseline`-shaped comment whose
+ * body fails the strict canonical `pattern` (e.g. a hand-authored note glued
+ * directly to the leading underscore, `_IDD ...` with no space, missing
+ * `OPTIONAL_IDD_VISIBLE_NOTE_PATTERN`'s `\bIDD\b` boundary). Such a comment
+ * already reads as absent to `resolveLatestReviewWatermark` (#2251) -- this
+ * gives the F2 caller a way to tell "malformed marker found" apart from
+ * "no watermark-shaped comment at all" without changing
+ * `resolveLatestReviewWatermark`'s own return shape or selection behavior.
+ *
+ * `options.expectedClaimId`, when set, restricts the scan to a malformed
+ * comment whose own claim-id token (the second token after the marker
+ * label -- both `review-watermark` and `review-baseline` share that
+ * position) matches, mirroring `resolveLatestReviewWatermark`'s own
+ * exact claim-id filtering (#2080). Without this, a different claim's
+ * malformed marker would flip `comparisonReason` to `'malformed-watermark'`
+ * for a claim whose watermark is simply, genuinely absent (#2251 review
+ * follow-up on PR #2387). The claim-id token is pulled directly from the
+ * raw body (not via the full canonical parser, since a malformed comment
+ * by definition fails that parse) -- both marker shapes' `malformedPrefixPattern`
+ * guarantee `\S+\s+\S+` (agent, then claim id) immediately after the label.
+ */
+const MALFORMED_REVIEW_WATERMARK_CLAIM_ID_RE =
+  /^<!--\s*(?:review-watermark|review-baseline):\s+\S+\s+(\S+)/i;
+export function detectMalformedReviewWatermarkComments(comments, options = {}) {
+  const isTrustedAuthor = options.isTrustedAuthor ?? (() => true);
+  const expectedClaimId = String(options.expectedClaimId ?? '').trim();
+  return comments.some((comment) => {
+    if (!isTrustedAuthor(comment.author?.login ?? comment.user?.login ?? '')) {
+      return false;
+    }
+    const body = comment.body ?? '';
+    const label = detectMalformedOperationalMarker(body);
+    if (
+      label !== '<!-- review-watermark:' &&
+      label !== '<!-- review-baseline:'
+    ) {
+      return false;
+    }
+    if (!expectedClaimId) {
+      return true;
+    }
+    // No trimStart: detectMalformedOperationalMarker already matched this
+    // body's raw (untrimmed) bytes against the label's `^`-anchored
+    // malformedPrefixPattern by this point (no leading-whitespace
+    // tolerance, by design -- see that pattern's anti-spoofing note), so
+    // matching raw `body` here stays consistent with that same anchor.
+    const claimId = body.match(MALFORMED_REVIEW_WATERMARK_CLAIM_ID_RE)?.[1];
+    return claimId === expectedClaimId;
+  });
 }
 // Pre-merge gate invariant (unreplied regular comments -> `unrepliedComments`):
 // does NOT feed `computePreMergeReadinessBlockers` (no code-rollup blocker), but
@@ -2579,6 +4059,168 @@ export function summarizeRegularCommentsForGate(comments, options = {}) {
 // Working rule: verify every advisory finding on this code with a byte-exact
 // repro before accepting it. #1182 / PR #1184 cycled through five advisory
 // rounds, each surfacing a distinct fail mode of exactly these gates.
+function isAdvisoryAuthoredThread(thread, advisoryBotLogins) {
+  const originating = (thread.comments?.nodes ?? [])[0];
+  return (
+    isCopilotReviewerLogin(originating?.author?.login) ||
+    isGateAdvisoryBotLogin(originating?.author?.login, advisoryBotLogins)
+  );
+}
+function isIddOriginatedThreadReply(comment, options) {
+  const body = String(comment.body ?? '');
+  if (isIddOriginatedReply(body, options.markerPrefix)) {
+    return true;
+  }
+  const authorLogin = String(comment.author?.login ?? '')
+    .trim()
+    .toLowerCase();
+  if (
+    !authorLogin ||
+    !(
+      options.iddAgentLogins.has(authorLogin) ||
+      options.trustedMarkerLogins.has(authorLogin)
+    )
+  ) {
+    return false;
+  }
+  return (
+    isDispositionComment({ body }) || isRejectionConfirmedDisposition({ body })
+  );
+}
+// #978 advisory-only diagnostic, extracted from `summarizeDispositionEvidenceForGate`
+// (#2618) so both the F2/F3 merge gate and F4's `audit-pr-cleanup` disposition
+// checks share one implementation. A blocking resolved thread is
+// "ack-only-post-disposition" when a thread-local IDD disposition exists and
+// EVERY external comment newer than the disposition (and, when
+// `snapshotBoundaryAt` is supplied, also newer than that boundary) is an
+// advisory-bot, non-disposition courtesy ack. `snapshotBoundaryAt` is
+// optional: F2/F3 passes the review-snapshot watermark so only feedback that
+// re-blocks the gate counts; F4 has no such watermark and omits it, so every
+// post-disposition external comment counts. Fails closed (false) without a
+// thread-local disposition or for an unresolved thread, and never changes
+// any caller's route by itself.
+//
+// #1313: also computes the narrower `inPlaceEditOnly` sibling signal in the
+// same pass (it needs the identical `threadDispositionAt` /
+// `postDispositionBlockingFeedback` groundwork, so folding it into one
+// function avoids recomputing that twice). `inPlaceEditOnly` additionally
+// requires every qualifying comment to be an in-place edit of content that
+// already existed at-or-before the disposition (its own `createdAt` is not
+// newer than the disposition, and its `updatedAt` is strictly newer than its
+// own `createdAt`) rather than a brand-new post-disposition comment.
+// Deliberately advisory-only, like its sibling: GitHub's API exposes no
+// revision diff for an edited comment, so this helper cannot tell a
+// cosmetic append from a substantive change to the finding.
+export function classifyThreadAckOnlyPostDisposition(thread, options = {}) {
+  const none = { ackOnlyPostDisposition: false, inPlaceEditOnly: false };
+  if (!thread.isResolved) {
+    return none;
+  }
+  const snapshotBoundaryAt = isValidIsoTimestamp(options.snapshotBoundaryAt)
+    ? String(options.snapshotBoundaryAt)
+    : null;
+  const iddAgentLogins = new Set(
+    normalizeTrustedMarkerLogins(options.iddAgentLogins ?? []),
+  );
+  const advisoryBotLogins = new Set(
+    normalizeTrustedMarkerLogins(options.advisoryBotLogins ?? []),
+  );
+  const prAuthorLogin = String(options.prAuthorLogin ?? '')
+    .trim()
+    .toLowerCase();
+  // #2014: an advisory bot can never anchor "a disposition exists" -- see
+  // `summarizeDispositionEvidenceForGate`'s identical subtraction (this
+  // file, "An advisory bot can never anchor..."). Scoped to only this
+  // anchor set; the raw `iddAgentLogins` set above stays unchanged
+  // everywhere else, since each caller reacts differently (fail-open vs.
+  // fail-closed) to a global change.
+  const ackAnchorAuthorLogins = new Set(
+    [...iddAgentLogins].filter(
+      (login) => !isConfiguredAdvisoryBotLogin(login, advisoryBotLogins),
+    ),
+  );
+  const nodes = thread.comments?.nodes ?? [];
+  // Recognize the same dispositions `hasFreshDisposition` accepts on a
+  // resolved thread (the gate that already decided this thread blocks): a
+  // `**Accepted**`/`**Rejected**` marker OR the terminal
+  // `**Rejection confirmed by maintainer**` marker, anchored by effective
+  // activity (`updatedAt`-preferring) so an edited disposition is dated
+  // consistently. The thread is already known resolved here.
+  const threadDispositionAt = maxIsoTimestamp(
+    nodes
+      .filter(
+        (comment) =>
+          ackAnchorAuthorLogins.has(
+            String(comment.author?.login ?? '')
+              .trim()
+              .toLowerCase(),
+          ) &&
+          (isDispositionComment({ body: String(comment.body ?? '') }) ||
+            isRejectionConfirmedDisposition({
+              body: String(comment.body ?? ''),
+            })),
+      )
+      .map((comment) => effectiveThreadCommentActivityAt(comment))
+      .filter(isValidIsoTimestamp),
+  );
+  if (!threadDispositionAt) {
+    return none;
+  }
+  // The blocking activity is external feedback newer than the thread
+  // disposition (so already-dispositioned feedback predating the ack does
+  // not disqualify the signal) and, when a snapshot boundary is supplied,
+  // also newer than it (so it actually re-blocks that gate). Without a
+  // boundary, every post-disposition external comment counts.
+  const postDispositionBlockingFeedback = nodes.filter((comment) => {
+    const authorLogin = String(comment.author?.login ?? '')
+      .trim()
+      .toLowerCase();
+    if (
+      !authorLogin ||
+      iddAgentLogins.has(authorLogin) ||
+      authorLogin === prAuthorLogin
+    ) {
+      return false;
+    }
+    const activityAt = effectiveThreadCommentActivityAt(comment);
+    return (
+      isValidIsoTimestamp(activityAt) &&
+      (!snapshotBoundaryAt ||
+        compareIsoTimestamps(activityAt, snapshotBoundaryAt) > 0) &&
+      compareIsoTimestamps(activityAt, threadDispositionAt) > 0
+    );
+  });
+  if (postDispositionBlockingFeedback.length === 0) {
+    return none;
+  }
+  // Each remaining item must be a pure advisory-bot courtesy ack: an
+  // advisory-bot author whose body is neither a `**Accepted**`/`**Rejected**`
+  // marker nor the terminal `**Rejection confirmed by maintainer**` marker,
+  // AND (#2641) matches a known courtesy-acknowledgment template -- author +
+  // shape alone no longer suffice, since a novel substantive comment that
+  // merely doesn't use disposition phrasing must not misclassify as ack-only.
+  const ackOnlyPostDisposition = postDispositionBlockingFeedback.every(
+    (comment) =>
+      isConfiguredAdvisoryBotLogin(comment.author?.login, advisoryBotLogins) &&
+      !isDispositionComment({ body: String(comment.body ?? '') }) &&
+      !isRejectionConfirmedDisposition({ body: String(comment.body ?? '') }) &&
+      isKnownAdvisoryAckTemplate(comment),
+  );
+  if (!ackOnlyPostDisposition) {
+    return none;
+  }
+  const inPlaceEditOnly = postDispositionBlockingFeedback.every((comment) => {
+    const createdAt = String(comment.createdAt ?? '');
+    const updatedAt = String(comment.updatedAt ?? '');
+    return (
+      isValidIsoTimestamp(createdAt) &&
+      compareIsoTimestamps(createdAt, threadDispositionAt) <= 0 &&
+      isValidIsoTimestamp(updatedAt) &&
+      compareIsoTimestamps(updatedAt, createdAt) > 0
+    );
+  });
+  return { ackOnlyPostDisposition, inPlaceEditOnly };
+}
 export function summarizeDispositionEvidenceForGate(
   { comments = [], threads = [] },
   options = {},
@@ -2601,6 +4243,13 @@ export function summarizeDispositionEvidenceForGate(
   const prAuthorLogin = String(options.prAuthorLogin ?? '')
     .trim()
     .toLowerCase();
+  const explicitMarkerPrefix =
+    typeof options.markerPrefix === 'string' ? options.markerPrefix.trim() : '';
+  const configuredMarkerPrefix = String(
+    loadIddConfig()?.markerPrefix ?? '',
+  ).trim();
+  const markerPrefix =
+    explicitMarkerPrefix || configuredMarkerPrefix || undefined;
   const normalizedComments = comments
     .map((comment, inputIndex) => ({
       id: String(comment.id ?? ''),
@@ -2757,6 +4406,23 @@ export function summarizeDispositionEvidenceForGate(
       DISPOSITION_REJECTED_PREFIX_RE.test(comment.body.trimStart()) &&
       !isNonReviewNoticeDisposition({ body: comment.body }),
   );
+  // #2249: a broader "close but not exact" pool, independent of the
+  // #1833 non-review-notice pairing above. Sourced from ALL IDD-agent
+  // comments (not just `dispositionComments`, which already requires
+  // `isDispositionComment` to be true) because the motivating mistake --
+  // a plain `Accepted — ...` / `Rejected — ...` reply with no bold
+  // markdown at all -- never satisfies `isDispositionComment` in the
+  // first place, so it would never appear in `dispositionComments`.
+  // `!isDispositionComment` excludes any comment that is ALREADY a valid
+  // disposition (e.g. `**Accepted**` is well-formed and needs no hint),
+  // so this pool and `wrongPhraseRejectedDispositions` are disjoint by
+  // construction: the latter's members all satisfy `isDispositionComment`.
+  const malformedPrefixDispositions = normalizedComments.filter(
+    (comment) =>
+      iddAgentLogins.has(comment.authorLogin) &&
+      MALFORMED_DISPOSITION_PREFIX_RE.test(comment.body.trimStart()) &&
+      !isDispositionComment({ body: comment.body }),
+  );
   const outstandingNotices = outstandingComments.filter(
     (comment) =>
       isGateAdvisoryBotLogin(comment.authorLogin, advisoryBotLogins) &&
@@ -2770,15 +4436,24 @@ export function summarizeDispositionEvidenceForGate(
     list.push(notice);
     noticesByAuthor.set(notice.authorLogin, list);
   }
-  // Sort the bot logins so disposition consumption is deterministic when a single
-  // disposition body could name more than one configured bot (it is consumed by
-  // the lexicographically-first matching author only).
+  // Sort the bot logins for deterministic iteration order only. Each
+  // author's own `matchingDispositions` is computed independently from the
+  // full `noticeDispositions` pool -- never filtered by another author's
+  // carry -- so a single disposition naming several configured bots
+  // (`dispositionNamesAdvisoryBot` matches each one it names) can carry
+  // forward one notice per bot it names, not just the alphabetically-first
+  // bot processed (#2475). `matchingDispositions.length` still bounds
+  // `carry` per author, so this author's own notices are never
+  // over-credited from a single matching disposition.
+  // `consumedNoticeDispositionIndexes` still accumulates the union of every
+  // disposition consumed across every author -- read again below to
+  // exclude those same comments from the separate generic 1:1 pool, so a
+  // disposition that already carried a notice forward can never also clear
+  // an unrelated regular comment there.
   for (const authorLogin of [...noticesByAuthor.keys()].sort()) {
     const notices = noticesByAuthor.get(authorLogin) ?? [];
-    const matchingDispositions = noticeDispositions.filter(
-      (disposition) =>
-        !consumedNoticeDispositionIndexes.has(disposition.sortedIndex) &&
-        dispositionNamesAdvisoryBot(disposition.body, authorLogin),
+    const matchingDispositions = noticeDispositions.filter((disposition) =>
+      dispositionNamesAdvisoryBot(disposition.body, authorLogin),
     );
     const carry = Math.min(notices.length, matchingDispositions.length);
     for (let index = 0; index < carry; index += 1) {
@@ -2795,14 +4470,28 @@ export function summarizeDispositionEvidenceForGate(
   // Walk the outstanding comments oldest-first and greedily consume the
   // earliest disposition marker strictly newer than each (markers that are not
   // newer than the current comment cannot address it or any later comment).
-  const dispositionTimes = dispositionComments
+  // 1:1 pairing of later IDD-agent replies. Advisory-bot outstanding
+  // comments still require a real disposition prefix. Human outstanding
+  // comments also accept an unmarked later IDD-agent reply (presence-only,
+  // #2139) so "thanks, fixed" clears the human item without hollowing out
+  // Copilot / CodeRabbit pairing.
+  const agentReplyComments = normalizedComments
     .filter(
-      (comment) => !consumedNoticeDispositionIndexes.has(comment.sortedIndex),
+      (comment) =>
+        iddAgentLogins.has(comment.authorLogin) &&
+        !consumedNoticeDispositionIndexes.has(comment.sortedIndex) &&
+        isValidIsoTimestamp(comment.activityAt) &&
+        !isOperationalOrDigestCommentForGate(
+          comment.body,
+          comment.authorLogin,
+          trustedMarkerLogins,
+        ),
     )
-    .map((comment) => comment.activityAt)
-    .filter(isValidIsoTimestamp)
-    .sort((left, right) => Date.parse(left) - Date.parse(right));
-  let markerCursor = 0;
+    .sort((left, right) => {
+      const byTime = compareIsoTimestamps(left.activityAt, right.activityAt);
+      return byTime !== 0 ? byTime : left.sortedIndex - right.sortedIndex;
+    });
+  const usedReplyIndexes = new Set();
   const missing = [];
   for (const comment of outstandingComments) {
     if (
@@ -2811,17 +4500,27 @@ export function summarizeDispositionEvidenceForGate(
     ) {
       continue;
     }
-    while (
-      markerCursor < dispositionTimes.length &&
-      compareIsoTimestamps(
-        dispositionTimes[markerCursor],
-        comment.activityAt,
-      ) <= 0
-    ) {
-      markerCursor += 1;
-    }
-    if (markerCursor < dispositionTimes.length) {
-      markerCursor += 1;
+    const requiresDispositionPrefix = isGateAdvisoryBotLogin(
+      comment.authorLogin,
+      advisoryBotLogins,
+    );
+    const reply = agentReplyComments.find((candidate) => {
+      if (usedReplyIndexes.has(candidate.sortedIndex)) {
+        return false;
+      }
+      if (compareIsoTimestamps(candidate.activityAt, comment.activityAt) <= 0) {
+        return false;
+      }
+      if (
+        requiresDispositionPrefix &&
+        !isDispositionComment({ body: candidate.body })
+      ) {
+        return false;
+      }
+      return true;
+    });
+    if (reply) {
+      usedReplyIndexes.add(reply.sortedIndex);
     } else {
       missing.push(comment);
     }
@@ -2850,6 +4549,62 @@ export function summarizeDispositionEvidenceForGate(
         (disposition) =>
           compareIsoTimestamps(disposition.activityAt, comment.createdAt) > 0,
       );
+    // #2249: generalizes the diagnostic above beyond the notice-specific
+    // wrong-phrase case. Checked only when `hasWrongPhraseAttempt` is
+    // false so the more specific #1833 hint always wins when both could
+    // apply (they cannot in practice -- see `malformedPrefixDispositions`'
+    // disjointness note -- but the precedence keeps the more actionable
+    // hint on top if that ever changes).
+    //
+    // Gated on `isGateAdvisoryBotLogin`, mirroring `isNoticeComment` above
+    // (Copilot review on PR #2383): `requiresDispositionPrefix` in the 1:1
+    // pairing loop above is the ONLY thing that ever requires the exact
+    // `**Accepted**`/`**Rejected**` bold prefix -- a human's outstanding
+    // comment accepts any later IDD-agent reply, presence-only (#2139).
+    // Without this gate, a single malformed reply that legitimately
+    // cleared an earlier human comment (consumed via `usedReplyIndexes`
+    // in that loop, invisible to this global `malformedPrefixDispositions`
+    // pool) could still misleadingly hint a LATER, still-missing human
+    // comment that it needs bold markdown it never required.
+    const hasMalformedPrefixAttempt =
+      !hasWrongPhraseAttempt &&
+      isGateAdvisoryBotLogin(comment.authorLogin, advisoryBotLogins) &&
+      malformedPrefixDispositions.some(
+        (disposition) =>
+          compareIsoTimestamps(disposition.activityAt, comment.createdAt) > 0,
+      );
+    // #2491: neither hint above fires when the existing disposition reply
+    // was itself well-formed and correctly timed -- both look for a
+    // MIS-PHRASED attempt, and this is not one. Instead the bot live-edited
+    // this same comment id in place into a non-review notice afterward,
+    // bumping its `activityAt` past the disposition's own timestamp: the
+    // disposition `<= comment.activityAt` bound is exactly the complement of
+    // the general 1:1 pairing's own success condition above
+    // (`candidate.activityAt > comment.activityAt`), so a disposition
+    // satisfying it is exactly one that FAILS that pairing. Like the two
+    // hints above, this is a plausible-timing heuristic, not a proven
+    // causal link to this specific comment -- `dispositionComments.some`
+    // matches any well-formed disposition in the window, including one a
+    // human/agent posted for a different comment entirely or one already
+    // consumed elsewhere via `usedReplyIndexes`; a false-positive hint here
+    // is a diagnostic inaccuracy at worst, never a routing change. The
+    // `> comment.createdAt` lower bound (mirroring the two hints above)
+    // additionally requires the disposition to postdate the comment's
+    // original appearance. Gated on `isGateAdvisoryBotLogin` +
+    // `isAdvisoryNonReviewNotice`, mirroring `isNoticeComment` above: only a
+    // comment whose CURRENT body is itself a non-review notice from a
+    // configured advisory bot fits the scenario the issue describes.
+    const hasEditedAfterDispositionAttempt =
+      !hasWrongPhraseAttempt &&
+      !hasMalformedPrefixAttempt &&
+      isGateAdvisoryBotLogin(comment.authorLogin, advisoryBotLogins) &&
+      isAdvisoryNonReviewNotice(comment.body) &&
+      dispositionComments.some(
+        (disposition) =>
+          compareIsoTimestamps(disposition.activityAt, comment.activityAt) <=
+            0 &&
+          compareIsoTimestamps(disposition.activityAt, comment.createdAt) > 0,
+      );
     return {
       id: comment.id || `comment-${comment.sortedIndex + 1}`,
       authorLogin: comment.authorLogin || 'unknown',
@@ -2857,119 +4612,13 @@ export function summarizeDispositionEvidenceForGate(
       bodyPreview: buildBodyPreview(comment.body),
       ...(hasWrongPhraseAttempt
         ? { hint: NON_REVIEW_NOTICE_DISPOSITION_HINT }
-        : {}),
+        : hasMalformedPrefixAttempt
+          ? { hint: MALFORMED_DISPOSITION_PREFIX_HINT }
+          : hasEditedAfterDispositionAttempt
+            ? { hint: EDITED_AFTER_DISPOSITION_HINT }
+            : {}),
     };
   });
-  // #978 advisory-only diagnostic: a blocking resolved thread is
-  // "ack-only-post-disposition" when a thread-local IDD disposition exists and
-  // EVERY external comment newer than BOTH the snapshot boundary (so it re-blocks
-  // the gate) AND the disposition is an advisory-bot, non-disposition courtesy
-  // ack. Reuses the review-currency carve-out's recognition shape (advisory-bot
-  // predicate driven by `advisoryBotLogins`, no hard-coded logins;
-  // post-disposition ack). Fails closed (false) without a snapshot boundary,
-  // without a thread-local disposition, or for unresolved threads, and never
-  // changes the gate route.
-  //
-  // #1313: also computes the narrower `inPlaceEditOnly` sibling signal in the
-  // same pass (it needs the identical `threadDispositionAt` /
-  // `postDispositionBlockingFeedback` groundwork, so folding it into one
-  // function avoids recomputing that twice). `inPlaceEditOnly` additionally
-  // requires every qualifying comment to be an in-place edit of content that
-  // already existed at-or-before the disposition (its own `createdAt` is not
-  // newer than the disposition, and its `updatedAt` is strictly newer than
-  // its own `createdAt`) rather than a brand-new post-disposition comment --
-  // the #1313 report's exact scenario (a bot editing its own
-  // already-dispositioned finding in place, e.g. to append a cosmetic
-  // "addressed" badge). Deliberately advisory-only, like its sibling:
-  // GitHub's API exposes no revision diff for an edited comment, so this
-  // helper cannot tell a cosmetic append from a substantive change to the
-  // finding -- an agent that wants to act on this signal must still read the
-  // comment's current body before treating the block as safe to override.
-  const classifyThreadAckOnlyPostDisposition = (thread) => {
-    const none = { ackOnlyPostDisposition: false, inPlaceEditOnly: false };
-    if (!thread.isResolved || !snapshotBoundaryAt) {
-      return none;
-    }
-    const nodes = thread.comments?.nodes ?? [];
-    // Recognize the same dispositions `hasFreshDisposition` accepts on a
-    // resolved thread (the gate that already decided this thread blocks): a
-    // `**Accepted**`/`**Rejected**` marker OR the terminal
-    // `**Rejection confirmed by maintainer**` marker, anchored by effective
-    // activity (`updatedAt`-preferring) so an edited disposition is dated
-    // consistently. The thread is already known resolved here.
-    const threadDispositionAt = maxIsoTimestamp(
-      nodes
-        .filter(
-          (comment) =>
-            iddAgentLogins.has(
-              String(comment.author?.login ?? '')
-                .trim()
-                .toLowerCase(),
-            ) &&
-            (isDispositionComment({ body: String(comment.body ?? '') }) ||
-              isRejectionConfirmedDisposition({
-                body: String(comment.body ?? ''),
-              })),
-        )
-        .map((comment) => effectiveThreadCommentActivityAt(comment))
-        .filter(isValidIsoTimestamp),
-    );
-    if (!threadDispositionAt) {
-      return none;
-    }
-    // The blocking activity is external feedback newer than BOTH the snapshot
-    // boundary (so it actually re-blocks the gate) AND the thread disposition
-    // (so already-dispositioned feedback predating the ack does not disqualify
-    // the signal). When the disposition lands after the boundary, the
-    // post-disposition bound is what isolates the genuine ack.
-    const postDispositionBlockingFeedback = nodes.filter((comment) => {
-      const authorLogin = String(comment.author?.login ?? '')
-        .trim()
-        .toLowerCase();
-      if (
-        !authorLogin ||
-        iddAgentLogins.has(authorLogin) ||
-        authorLogin === prAuthorLogin
-      ) {
-        return false;
-      }
-      const activityAt = effectiveThreadCommentActivityAt(comment);
-      return (
-        isValidIsoTimestamp(activityAt) &&
-        compareIsoTimestamps(activityAt, snapshotBoundaryAt) > 0 &&
-        compareIsoTimestamps(activityAt, threadDispositionAt) > 0
-      );
-    });
-    if (postDispositionBlockingFeedback.length === 0) {
-      return none;
-    }
-    // Each remaining item must be a pure advisory-bot courtesy ack: an
-    // advisory-bot author whose body is neither a `**Accepted**`/`**Rejected**`
-    // marker nor the terminal `**Rejection confirmed by maintainer**` marker.
-    const ackOnlyPostDisposition = postDispositionBlockingFeedback.every(
-      (comment) =>
-        isConfiguredAdvisoryBotLogin(
-          comment.author?.login,
-          advisoryBotLogins,
-        ) &&
-        !isDispositionComment({ body: String(comment.body ?? '') }) &&
-        !isRejectionConfirmedDisposition({ body: String(comment.body ?? '') }),
-    );
-    if (!ackOnlyPostDisposition) {
-      return none;
-    }
-    const inPlaceEditOnly = postDispositionBlockingFeedback.every((comment) => {
-      const createdAt = String(comment.createdAt ?? '');
-      const updatedAt = String(comment.updatedAt ?? '');
-      return (
-        isValidIsoTimestamp(createdAt) &&
-        compareIsoTimestamps(createdAt, threadDispositionAt) <= 0 &&
-        isValidIsoTimestamp(updatedAt) &&
-        compareIsoTimestamps(updatedAt, createdAt) > 0
-      );
-    });
-    return { ackOnlyPostDisposition, inPlaceEditOnly };
-  };
   const missingThreads = (threads ?? [])
     .map((thread, index) => {
       const commentsInThread = thread.comments?.nodes ?? [];
@@ -3002,10 +4651,38 @@ export function summarizeDispositionEvidenceForGate(
               String(login ?? '')
                 .trim()
                 .toLowerCase(),
+            ) ||
+            trustedMarkerLogins.has(
+              String(login ?? '')
+                .trim()
+                .toLowerCase(),
             ),
+          isIddOriginatedBody: (body) =>
+            isIddOriginatedReply(body, markerPrefix),
         })
       ) {
         return null;
+      }
+      // #2139: unmarked later replies on a *human-authored* thread are
+      // presence-only only when no IDD-originated reply exists in the
+      // thread. After a stamped or legacy trusted disposition, later
+      // human feedback still re-opens freshness (#978). Advisory-authored
+      // threads keep marker-first so an unmarked `ok` cannot satisfy
+      // Clause 2.
+      if (!isAdvisoryAuthoredThread(thread, advisoryBotLogins)) {
+        const laterReplies = commentsInThread.slice(1);
+        const hasUnmarkedHumanPresence =
+          laterReplies.length > 0 &&
+          !laterReplies.some((comment) =>
+            isIddOriginatedThreadReply(comment, {
+              iddAgentLogins,
+              trustedMarkerLogins,
+              markerPrefix,
+            }),
+          );
+        if (hasUnmarkedHumanPresence) {
+          return null;
+        }
       }
       // E1 only snapshots UNRESOLVED non-awaiting threads, and E7 only requires
       // dispositions for snapshot items. A thread that is already resolved and
@@ -3036,7 +4713,12 @@ export function summarizeDispositionEvidenceForGate(
           return null;
         }
       }
-      const classification = classifyThreadAckOnlyPostDisposition(thread);
+      const classification = classifyThreadAckOnlyPostDisposition(thread, {
+        iddAgentLogins: options.iddAgentLogins,
+        advisoryBotLogins: options.advisoryBotLogins,
+        prAuthorLogin: options.prAuthorLogin,
+        snapshotBoundaryAt: options.snapshotBoundaryAt,
+      });
       return {
         id: String(thread.id ?? '') || `thread-${index + 1}`,
         isResolved: Boolean(thread.isResolved),
@@ -3305,6 +4987,11 @@ export function summarizeRequiredChecks(
     waivableSelectors = null,
     protectionReadsUnreadable = false,
     trustSourcePinnedRequiredChecks = false,
+    excludeFromWaiverCoverage = null,
+    waiverActiveSinceOverride = null,
+    treatAsCoveredByWaiver = null,
+    treatAsCoveredByWaiverSince = null,
+    identityUnresolvedCheckNames = null,
   } = {},
 ) {
   const branchReviewRequirements = summarizeBranchReviewRequirements(
@@ -3314,35 +5001,130 @@ export function summarizeRequiredChecks(
   const requiredCheckNames = branchReviewRequirements.requiredCheckNames;
   const requiredCheckNameSet = new Set(requiredCheckNames);
   const validWaivers = waivers?.valid ?? [];
-  const SUCCESS_STATES = new Set([
-    'SUCCESS',
-    'SKIPPED',
-    'NEUTRAL',
-    'NOT_APPLICABLE',
-  ]);
   const normalizedChecks = checks.map((check) => {
     const name = String(check.name ?? '');
     const state = String(check.state ?? '').toUpperCase();
+    const completedAt = String(check.completedAt ?? '');
+    // #2353 (Copilot + Codex + CodeRabbit review on PR #2370, round 5):
+    // `isValidIsoTimestamp` alone accepts GitHub's `0001-01-01T00:00:00Z`
+    // zero-value sentinel -- `normalizeStatusCheckRollupEntry` substitutes
+    // it for BOTH an absent `completedAt` (still QUEUED/IN_PROGRESS) and an
+    // absent `startedAt` (not yet started), the same non-nullable-DateTime
+    // convention `isCompletedCiTimestamp` already exists to reject (see its
+    // doc comment / `parseCompletedAt` above). Reusing it here -- despite
+    // its "completed" name -- because the sentinel isn't completion-
+    // specific: it is GitHub's stand-in for "this lifecycle moment hasn't
+    // happened yet," which applies equally to `startedAt`. Without this, an
+    // IN_PROGRESS run (sentinel `completedAt`, but a genuine, fresh
+    // `startedAt`) would pass BOTH `completedAtMs !== null` (the sentinel
+    // parses as a valid, merely very-old, timestamp) and the `startedAt`
+    // freshness cutoff below, reporting a still-running required check
+    // `coveredByWaiver: true` while GitHub's own check is neither passed
+    // nor even finished.
+    const completedAtMs = isCompletedCiTimestamp(completedAt)
+      ? Date.parse(completedAt)
+      : null;
+    const startedAt = String(check.startedAt ?? '');
+    const startedAtMs = isCompletedCiTimestamp(startedAt)
+      ? Date.parse(startedAt)
+      : null;
+    const matchingWaivers = validWaivers.filter((w) =>
+      matchCheckSelectorLocal(name, w.checkSelector),
+    );
+    const activeSinceOverride =
+      typeof waiverActiveSinceOverride === 'function'
+        ? waiverActiveSinceOverride(name)
+        : null;
+    const activeSinceOverrideMs = isValidIsoTimestamp(activeSinceOverride)
+      ? new Date(activeSinceOverride).getTime()
+      : null;
+    // #2034: a matched waiver only covers a check whose live run's
+    // `completedAt` is at or after the moment the waiver became genuinely
+    // active -- otherwise the check was never actually re-run since the
+    // waiver took effect, so reporting it covered here would diverge from
+    // what the real required check (and GitHub's branch protection) still
+    // shows. Fails closed on a missing/unparseable `completedAt` (never run,
+    // still pending) or waiver `createdAt` (`'none'`).
+    const hasFreshWaiverCoverage =
+      completedAtMs !== null &&
+      matchingWaivers.some((w) => {
+        const waiverCreatedAtMs = isValidIsoTimestamp(w.createdAt)
+          ? new Date(w.createdAt).getTime()
+          : null;
+        if (waiverCreatedAtMs === null) return false;
+        const activeSinceMs =
+          activeSinceOverrideMs !== null
+            ? Math.max(waiverCreatedAtMs, activeSinceOverrideMs)
+            : waiverCreatedAtMs;
+        return completedAtMs >= activeSinceMs;
+      });
+    // #2353: an independent positive path -- see `treatAsCoveredByWaiver`'s
+    // own doc comment for why it deliberately bypasses
+    // `excludeFromWaiverCoverage`/`hasFreshWaiverCoverage`/`waivableSelectors`
+    // below rather than feeding into the same conjunction. Still requires
+    // `completedAtMs !== null` (Copilot + Codex review on PR #2370): the
+    // SAME #2034 fail-closed live-run requirement `hasFreshWaiverCoverage`
+    // already enforces -- a check that is still QUEUED/IN_PROGRESS/PENDING
+    // with no parseable `completedAt` has never actually produced a verdict
+    // at all, and treating it as covered would report `success` while
+    // GitHub's own required-check state is still pending, reproducing the
+    // exact "ready but merge blocked" failure mode #2021 fixed for the
+    // direct-waiver path. Also requires the live run to be fresh relative
+    // to `treatAsCoveredByWaiverSince` when the caller supplies one, and
+    // (Codex review on PR #2370, second follow-up) anchors that freshness
+    // check on `startedAt` rather than `completedAt`: a run that began
+    // evaluating state before the cutoff never observed whatever made this
+    // check relieved, even if it happens to finish (and post `completedAt`)
+    // moments after the cutoff passes -- the run's own verdict was already
+    // decided using stale state by then. Requires `startedAtMs !== null`
+    // for the same fail-closed reason as `completedAtMs !== null` above: a
+    // run with no parseable `startedAt` has no evidence it observed
+    // anything at all.
+    const treatAsCoveredByWaiverSinceOverride =
+      typeof treatAsCoveredByWaiverSince === 'function'
+        ? treatAsCoveredByWaiverSince(name)
+        : null;
+    const treatAsCoveredByWaiverSinceMs = isValidIsoTimestamp(
+      treatAsCoveredByWaiverSinceOverride,
+    )
+      ? new Date(treatAsCoveredByWaiverSinceOverride).getTime()
+      : null;
+    const treatedAsCoveredByWaiver =
+      completedAtMs !== null &&
+      startedAtMs !== null &&
+      typeof treatAsCoveredByWaiver === 'function' &&
+      treatAsCoveredByWaiver(name) &&
+      (treatAsCoveredByWaiverSinceMs === null ||
+        startedAtMs >= treatAsCoveredByWaiverSinceMs);
     const coveredByWaiver =
-      !SUCCESS_STATES.has(state) &&
-      validWaivers.some((w) =>
-        matchCheckSelectorLocal(name, w.checkSelector),
-      ) &&
-      // The check must also sit on the policy's waivable surface. A
-      // null/undefined list keeps the legacy behavior with no gate; an empty
-      // configured list covers nothing.
-      (!Array.isArray(waivableSelectors) ||
-        isCheckNameConfiguredWaivable(name, waivableSelectors));
+      !CHECK_PASS_EQUIVALENT_STATES.has(state) &&
+      (treatedAsCoveredByWaiver ||
+        (!(
+          typeof excludeFromWaiverCoverage === 'function' &&
+          excludeFromWaiverCoverage(name)
+        ) &&
+          hasFreshWaiverCoverage &&
+          // The check must also sit on the policy's waivable surface. A
+          // null/undefined list keeps the legacy behavior with no gate; an
+          // empty configured list covers nothing.
+          (!Array.isArray(waivableSelectors) ||
+            isCheckNameConfiguredWaivable(name, waivableSelectors))));
     return {
       name,
       state,
-      completedAt: String(check.completedAt ?? ''),
+      completedAt,
       coveredByWaiver,
       // Producer-identity discriminator (#1483); see `CheckLike` and
       // `selectLatestCheckPerName` for how it disambiguates a same-name
       // rerun from a genuinely independent, differently-sourced check.
       type: check.type ? String(check.type) : '',
       workflowName: check.workflowName ? String(check.workflowName).trim() : '',
+      // #2919: carried through so the PRIMARY required-check gate below
+      // (`classifyCiChecks(effectiveChecks)`) shares the same widened
+      // producer key as every other consumer -- see `CheckLike`'s doc
+      // comment. Absent (`''`) for every check this collector doesn't
+      // resolve a path for, which stays permissive/unchanged.
+      workflowPath: check.workflowPath ? String(check.workflowPath).trim() : '',
     };
   });
   const matchedRequiredChecks = normalizedChecks.filter((check) =>
@@ -3355,6 +5137,27 @@ export function summarizeRequiredChecks(
     (name) => !presentNames.has(name),
   );
   let status = 'unknown';
+  // kurone-kito/idd-skill#2919 (round 5 -- advisor review ahead of PR #2921
+  // round 5's push): `status` right after the missing/`classifyCiChecks`
+  // computation below, BEFORE either the source-pinned or identity-
+  // unresolved downgrade can narrow it. `classifyCiChecks` is called on
+  // `effectiveChecks` -- already waiver-adjusted (`coveredByWaiver` ->
+  // `SKIPPED`) and already deduped per producer via
+  // `selectLatestCheckPerName` -- so this is the EXACT answer to "is there
+  // a genuinely separate, concurrent CI failure reason (an unrelated
+  // required check that is missing/pending/failed/waived) independent of
+  // the two named downgrades below?" `computePreMergeReadinessBlockers`
+  // uses this instead of re-deriving per-check-name pass/fail evidence
+  // from the already-non-deduped, waiver-unaware `checks` array -- an
+  // earlier revision of that blocker-detail fix did exactly that, and
+  // could spuriously append the generic detail for a required check whose
+  // OLDER same-name instance happened to sort after its own already-
+  // superseding SUCCESS in raw array order, or for a genuinely WAIVED
+  // required check (raw state FAILURE, `coveredByWaiver: true`) -- both
+  // cases `classifyCiChecks`'s own dedup+waiver-adjustment already
+  // correctly resolves, so reusing its verdict here is exact by
+  // construction rather than a second, drift-prone reimplementation.
+  let preDowngradeStatus = 'unknown';
   // #1745: discarded non-passing same-name siblings among the REQUIRED
   // checks, e.g. a CANCELLED idd-advisory-convergence instance sitting
   // alongside the SUCCESS instance selectLatestCheckPerName picked as
@@ -3379,6 +5182,23 @@ export function summarizeRequiredChecks(
   // exists but is unnamed." Lets a blocker detail name the cause even when
   // no specific check name can be cited.
   let sourcePinnedUnresolved = false;
+  // kurone-kito/idd-skill#2919 (round 2): the required-check names the
+  // downgrade below actually fired for (empty unless it fired). See
+  // `identityUnresolvedCheckNames`'s own doc comment above.
+  let identityUnresolvedRequiredCheckNames = [];
+  // kurone-kito/idd-skill#2919 (round 4 -- Copilot review on PR #2921):
+  // computed unconditionally (not nested inside the `requiredCheckNames.length
+  // > 0` block below) because `resolvePresentRunConclusion` below needs it
+  // too, and that fallback conclusion is consulted precisely when NO
+  // required checks are configured at all -- see its own doc comment for
+  // why an identity-unresolved check name must never let THAT fallback
+  // read 'all-passing' either, closing the alternate route Copilot found
+  // for reopening the same decoy-masking gap on an unprotected branch.
+  const identityUnresolvedNameSet = new Set(
+    Array.isArray(identityUnresolvedCheckNames)
+      ? identityUnresolvedCheckNames.map((name) => String(name ?? '').trim())
+      : [],
+  );
   if (requiredCheckNames.length > 0) {
     const effectiveChecks = matchedRequiredChecks.map((c) =>
       c.coveredByWaiver ? { ...c, state: 'SKIPPED' } : c,
@@ -3388,6 +5208,7 @@ export function summarizeRequiredChecks(
       missingRequiredCheckNames.length > 0
         ? 'missing'
         : ciClassification.status;
+    preDowngradeStatus = status;
     // #1689: the `trustSourcePinnedRequiredChecks` opt-in only widens the
     // named/resolved case -- an unresolved pinned source (no check name to
     // correlate with a live run at all) always still forces the downgrade,
@@ -3405,6 +5226,37 @@ export function summarizeRequiredChecks(
       ];
       sourcePinnedUnresolved =
         branchReviewRequirements.requiredCheckSourcePinnedUnresolved;
+    }
+    // kurone-kito/idd-skill#2919 (round 3 -- Codex review on PR #2921, P2):
+    // the affected NAMES are computed from `requiredCheckNames` -- the
+    // original classification -- INDEPENDENTLY of whatever `status`
+    // already became from the source-pinned downgrade above, not gated
+    // on `status === 'success'`. An earlier revision gated this whole
+    // block on that condition, so a check that was BOTH source-pinned AND
+    // identity-unresolved silently lost the identity-unresolved evidence
+    // the moment the source-pinned branch above had already downgraded
+    // `status` to `'unknown'` first -- the blocker detail then named only
+    // the source-pinned cause, and once an operator opted into
+    // `ciGate.trustSourcePinnedRequiredChecks` to clear THAT cause, a
+    // later pass would stay blocked with no evidence explaining why.
+    // Mirrors `discardedNonPassingRequiredChecks`'s own "computed
+    // unconditionally ... evidence worth surfacing even when the overall
+    // status already reads non-success for an unrelated cause" precedent
+    // above. The numeric `status` field itself is still only ever
+    // NARROWED when it is currently `'success'` -- this never overrides a
+    // status that is already `'missing'`/`'pending'`/`'failed'`, and
+    // reassigning an already-`'unknown'` status to `'unknown'` again is a
+    // harmless no-op.
+    if (identityUnresolvedNameSet.size > 0) {
+      const affected = requiredCheckNames.filter((name) =>
+        identityUnresolvedNameSet.has(name),
+      );
+      if (affected.length > 0) {
+        identityUnresolvedRequiredCheckNames = affected;
+        if (status === 'success') {
+          status = 'unknown';
+        }
+      }
     }
     // #1753: computed from the RAW matchedRequiredChecks -- deliberately
     // NOT ciClassification.discardedNonPassingInstances above, which is
@@ -3433,7 +5285,10 @@ export function summarizeRequiredChecks(
     // message can name the unreadable-read cause specifically instead of a
     // generic "CI is not all-passing".
     protectionReadsUnreadable,
-    presentRunConclusion: resolvePresentRunConclusion(normalizedChecks),
+    presentRunConclusion: resolvePresentRunConclusion(
+      normalizedChecks,
+      identityUnresolvedNameSet,
+    ),
     requiredCheckCount: requiredCheckNames.length,
     generatedRequiredCheckCount: matchedRequiredChecks.length,
     requiredChecksGenerated:
@@ -3453,6 +5308,19 @@ export function summarizeRequiredChecks(
     // #1689: see the field's own inline comment above -- `false` unless the
     // downgrade fired AND at least one pinned source was unnamed.
     sourcePinnedUnresolved,
+    // kurone-kito/idd-skill#2919 (round 2): see the field's own inline
+    // comment above -- empty unless the identity-unresolved downgrade
+    // actually fired for this call.
+    identityUnresolvedRequiredCheckNames,
+    // kurone-kito/idd-skill#2919 (round 5): see the field's own inline
+    // comment above -- the dedup+waiver-adjusted classification `status`
+    // BEFORE the source-pinned/identity-unresolved downgrades could narrow
+    // it. Lets a caller determine, exactly, whether a genuinely separate
+    // concurrent CI cause exists alongside those two named downgrades,
+    // without re-deriving per-check pass/fail evidence itself. `'unknown'`
+    // when no required checks are configured (mirrors `status`'s own
+    // initial default in that case).
+    preDowngradeStatus,
     checks: normalizedChecks.map((check) => ({
       name: check.name,
       state: check.state,
@@ -3468,18 +5336,72 @@ export function summarizeRequiredChecks(
 // skipped), used for the F2 fallback when no required checks are configured:
 // an unprotected branch must not satisfy CI vacuously, so the gate inspects the
 // real run conclusions instead.
-function resolvePresentRunConclusion(normalizedChecks) {
+function resolvePresentRunConclusion(
+  normalizedChecks,
+  // kurone-kito/idd-skill#2919 (round 4 -- Copilot review on PR #2921):
+  // check NAMES this collection pass could not fully resolve real
+  // `workflowPath` producer identity for -- see `identityUnresolvedCheckNames`
+  // on `summarizeRequiredChecks` for the full rationale this mirrors. This
+  // fallback conclusion is consulted precisely when NO required checks are
+  // configured at all (`noRequiredChecksConfigured`), so an unresolved
+  // identity here must fail closed too: without this, a decoy workflow
+  // file sharing the checker's display name could still dedupe with (and
+  // mask) the real workflow's FAILURE through the unchanged, absent-
+  // `workflowPath` producer key -- reopening the exact bypass #2919 exists
+  // to close, on an unprotected branch, even though the PRIMARY
+  // required-check gate (`summarizeRequiredChecks`'s own `status`) is
+  // already fixed. Default empty set is backward compatible: every caller
+  // that omits it (none of them do after this fix, but a future direct
+  // caller might) sees unchanged pre-#2919 behavior.
+  identityUnresolvedCheckNames = new Set(),
+) {
   if (normalizedChecks.length === 0) {
     return 'none';
+  }
+  if (
+    identityUnresolvedCheckNames.size > 0 &&
+    normalizedChecks.some((check) =>
+      identityUnresolvedCheckNames.has(check.name),
+    )
+  ) {
+    // `'some-failing'`, not `'pending'`: the `#2714` comment above maps a
+    // lone CANCELLED-with-no-successor instance to `'pending'` because
+    // that shape is a plausible rerun-in-progress candidate that can
+    // reasonably resolve on its own without operator action. An
+    // unresolved producer identity has no such self-resolving path -- a
+    // malformed `detailsUrl` or a genuine decoy workflow file will not
+    // become parseable or stop being a decoy on a later poll -- so this
+    // follows the conservative `'some-failing'` default every other
+    // genuinely unrecognized-state `unknown` cause already gets, not the
+    // narrower CANCELLED carve-out.
+    return 'some-failing';
   }
   const effective = normalizedChecks.map((check) =>
     check.coveredByWaiver ? { ...check, state: 'SKIPPED' } : check,
   );
-  const { status } = classifyCiChecks(effective);
-  if (status === 'success') {
+  const classification = classifyCiChecks(effective);
+  if (classification.status === 'success') {
     return 'all-passing';
   }
-  if (status === 'pending') {
+  if (classification.status === 'pending') {
+    return 'pending';
+  }
+  // #2714: a lone CANCELLED instance with no same-producer successor to
+  // dedup against lands in classifyCiChecks's residual `unknown` bucket --
+  // CANCELLED is deliberately excluded from both `failed` and `passing`
+  // (see CI_FAILURE_CONCLUSION_STATES's own doc comment). Map that exact
+  // shape to 'pending' -- a cancelled-with-no-successor run is a plausible
+  // rerun candidate -- rather than folding it into 'some-failing', which
+  // reads as terminal/actionable and reproduces through this fallback
+  // exactly the outcome classifyCiChecks's own CANCELLED exclusion exists
+  // to avoid. Scoped to CANCELLED-only `unknown` entries: an `unknown`
+  // bucket containing any other, genuinely unrecognized state stays
+  // 'some-failing', the conservative default.
+  const unknownChecks = classification.unknown ?? [];
+  if (
+    classification.status === 'unknown' &&
+    unknownChecks.every((check) => check.state === 'CANCELLED')
+  ) {
     return 'pending';
   }
   return 'some-failing';
@@ -4213,7 +6135,24 @@ export function resolveActiveClaimForWriteGate(events, options) {
     isStale: resolveStalePredicate(options.staleAgeMs),
   });
 }
-export function summarizeClaimValidation(claimEvents = [], options = {}) {
+export function summarizeClaimValidation(
+  claimEvents = [],
+  options = {},
+  /**
+   * kurone-kito/idd-skill#2911: optional out-parameter this function
+   * mutates in place with `resolveActiveClaimWithForcedHandoffTrace`'s
+   * `activeSince` (the non-mutable claim-identity-transition anchor --
+   * see that interface's own doc comment for why `ClaimValidationSummary
+   * .activeClaim.createdAt` is unsuitable for this). Deliberately NOT a
+   * new field on `ClaimValidationSummary` itself: that type's shape is
+   * embedded in multiple schemas beyond `pre-merge-readiness.schema.json`
+   * (e.g. `discover-roadmap-union.schema.json`), so widening it would
+   * ripple into unrelated consumers. Every existing caller passes no 3rd
+   * argument and is completely unaffected; `buildPreMergeReadinessSummary`
+   * is the sole caller that supplies one today.
+   */
+  captureTraceInto,
+) {
   const trustedMarkerLogins = new Set(
     normalizeTrustedMarkerLogins(options.trustedMarkerLogins ?? []),
   );
@@ -4250,31 +6189,43 @@ export function summarizeClaimValidation(claimEvents = [], options = {}) {
   // for the same corrected-handoff state (resume `already_owned` vs. merge
   // `claimLost`) by design; both still funnel through the single
   // resolveActiveClaim resolver.
-  const activeClaim = resolveActiveClaim(claimEvents, {
-    isTrustedAuthor: trustedAuthorPredicate,
-    isForcedHandoffEnabled:
-      typeof options.isForcedHandoffEnabled === 'function'
-        ? options.isForcedHandoffEnabled
-        : buildForcedHandoffEnableGate({
-            forcedHandoffEnabled: options.forcedHandoffEnabled === true,
-            expectedLinkedPrReferences,
-            prFirstCommitAt: options.prFirstCommitAt ?? null,
-          }),
-    isAuthorizedForcedHandoff:
-      typeof options.isAuthorizedForcedHandoff === 'function'
-        ? options.isAuthorizedForcedHandoff
-        : (forcedBy) => {
-            if (authorizedForcedHandoffLogins.size === 0) {
-              return false;
-            }
-            return authorizedForcedHandoffLogins.has(
-              String(forcedBy ?? '')
-                .trim()
-                .toLowerCase(),
-            );
-          },
-    isStale: resolveStalePredicate(options.staleAgeMs),
-  });
+  // kurone-kito/idd-skill#2911: switched from the thin `resolveActiveClaim`
+  // wrapper to the full trace, so `captureTraceInto` (when the caller
+  // supplies it) can recover `activeSince` -- the same single-pass
+  // reduction, just no longer discarding the extra field. Every existing
+  // caller only ever read `.activeClaim` off `resolveActiveClaim`'s own
+  // return, so this is behavior-identical for that value.
+  const { activeClaim, activeSince } = resolveActiveClaimWithForcedHandoffTrace(
+    claimEvents,
+    {
+      isTrustedAuthor: trustedAuthorPredicate,
+      isForcedHandoffEnabled:
+        typeof options.isForcedHandoffEnabled === 'function'
+          ? options.isForcedHandoffEnabled
+          : buildForcedHandoffEnableGate({
+              forcedHandoffEnabled: options.forcedHandoffEnabled === true,
+              expectedLinkedPrReferences,
+              prFirstCommitAt: options.prFirstCommitAt ?? null,
+            }),
+      isAuthorizedForcedHandoff:
+        typeof options.isAuthorizedForcedHandoff === 'function'
+          ? options.isAuthorizedForcedHandoff
+          : (forcedBy) => {
+              if (authorizedForcedHandoffLogins.size === 0) {
+                return false;
+              }
+              return authorizedForcedHandoffLogins.has(
+                String(forcedBy ?? '')
+                  .trim()
+                  .toLowerCase(),
+              );
+            },
+      isStale: resolveStalePredicate(options.staleAgeMs),
+    },
+  );
+  if (captureTraceInto) {
+    captureTraceInto.activeSince = activeSince;
+  }
   const expectedNonce = String(options.expectedNonce ?? '').trim();
   let reason = 'match';
   if (!activeClaim) {
@@ -4358,12 +6309,13 @@ function isPreMergeReviewSatisfied(reviewerStates) {
  * ordered blocker list. This is the single source of the merge-gate AND:
  * `buildPreMergeReadinessSummary` embeds `{ ready, blockers }` computed from it,
  * and `idd-merge-execute.evaluateMergeGates` delegates to it, so no caller
- * re-implements the conjunction. The rollup is **strict** — it reads
- * `dispositionEvidence.route === 'proceed'` directly and does NOT apply the
- * `soleCauseAckOnlyPostDisposition` override (a separate flag the F2 checklist
- * layers on top), so the fully-autonomous F3 executor keeps its fail-closed
- * behavior. A gate whose evidence is missing or garbled fails closed (recorded
- * as a blocker) rather than passing vacuously.
+ * re-implements the conjunction. Fail-closed on missing or garbled
+ * evidence. Applies the written F2 ack-only overrides (#2125) so a
+ * `fully_autonomous_merge` F3 session can complete when courtesy
+ * advisory-bot acks are the sole remaining currency or disposition
+ * blocker; any other cause still blocks. A live `BLOCKED` merge state
+ * plus a non-empty discarded required-check sibling list is its own
+ * gate (#2127) and does not take the `--admin` path.
  */
 export function computePreMergeReadinessBlockers(report) {
   const blockers = [];
@@ -4379,10 +6331,19 @@ export function computePreMergeReadinessBlockers(report) {
   }
   const reviewCurrency = preMergeAsRecord(report.reviewCurrency);
   const comparisonRoute = String(reviewCurrency.comparisonRoute ?? '');
-  if (comparisonRoute !== 'proceed') {
+  const comparisonReason = String(reviewCurrency.comparisonReason ?? '');
+  // #2125: F2's ack-only-post-disposition carve-out is now applied here
+  // too, so F3 merge-execute does not livelock on CodeRabbit courtesy acks.
+  if (
+    comparisonRoute !== 'proceed' &&
+    !(
+      comparisonRoute === 'return-to-e1' &&
+      comparisonReason === 'ack-only-post-disposition'
+    )
+  ) {
     blockers.push({
       gate: 'review-currency',
-      detail: `comparisonRoute is "${comparisonRoute}" (expected "proceed"): ${String(reviewCurrency.comparisonReason ?? 'unknown')}`,
+      detail: `comparisonRoute is "${comparisonRoute}" (expected "proceed"): ${comparisonReason || 'unknown'}`,
     });
   }
   const threads = preMergeAsRecord(report.threads);
@@ -4392,6 +6353,24 @@ export function computePreMergeReadinessBlockers(report) {
       gate: 'unresolved-threads',
       detail: `actionableCount is ${actionableCount} (expected 0)`,
     });
+  }
+  // #2335: optional caller-computed evidence -- an entirely absent
+  // `report.secondaryQuietWindow` (a caller that predates this gate, or a
+  // hand-built fixture) never blocks, the same backward-compat precedent
+  // the `copilotUnavailable` gate below uses. A present evidence object
+  // with `elapsed !== true` blocks; `buildSecondaryQuietWindowStatus`
+  // itself already reports `elapsed: true` unconditionally when the
+  // window is off (`0`/absent) or has no activity to anchor on, so this
+  // never fires for an adopter that has not configured
+  // `advisoryWait.secondaryQuietWindow`.
+  if (report.secondaryQuietWindow !== undefined) {
+    const secondaryQuietWindow = preMergeAsRecord(report.secondaryQuietWindow);
+    if (secondaryQuietWindow.elapsed !== true) {
+      blockers.push({
+        gate: 'secondary-quiet-window',
+        detail: `advisoryWait.secondaryQuietWindow (${String(secondaryQuietWindow.minutes ?? 0)} min) has not elapsed since the last substantive activity at "${String(secondaryQuietWindow.anchorAt ?? 'none')}" -- ${String(secondaryQuietWindow.remainingMinutes ?? 'unknown')} minute(s) remaining`,
+      });
+    }
   }
   const advisoryWait = preMergeAsRecord(report.advisoryWait);
   const f3Outcome = String(advisoryWait.f3Outcome ?? '');
@@ -4421,7 +6400,7 @@ export function computePreMergeReadinessBlockers(report) {
     blockers.push({
       gate: 'copilot-terminal-unavailable',
       detail:
-        'Copilot is terminally unavailable on current HEAD (recovery cap exhausted and terminal window elapsed with no current-HEAD review) with no valid maintainer external-check waiver for selector ' +
+        'Copilot is terminally unavailable on current HEAD (recovery cap exhausted and terminal window elapsed with no current-HEAD review) with no valid maintainer external-check waiver and no active provider-outage declaration relief for selector ' +
         `"${DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR}"`,
     });
   }
@@ -4455,15 +6434,262 @@ export function computePreMergeReadinessBlockers(report) {
       sourcePinnedDetail =
         'an unresolvable source-pinned required-check requirement is in force (e.g. a ruleset `workflows` rule); producer verification unavailable, and this cause is never covered by the ciGate.trustSourcePinnedRequiredChecks opt-in';
     }
+    // kurone-kito/idd-skill#2919 (round 2): name the identity-unresolved
+    // cause explicitly -- see `summarizeRequiredChecks`'s
+    // `identityUnresolvedRequiredCheckNames` doc comment. Independent of
+    // (and checked alongside, never exclusively with) the source-pinned
+    // cause above: the two downgrades can fire together.
+    const identityUnresolvedNames = Array.isArray(
+      ci.identityUnresolvedRequiredCheckNames,
+    )
+      ? ci.identityUnresolvedRequiredCheckNames.map((name) =>
+          String(name ?? ''),
+        )
+      : [];
+    const identityUnresolvedDetail =
+      identityUnresolvedNames.length > 0
+        ? `required ${identityUnresolvedNames.length > 1 ? 'checks' : 'check'} ${identityUnresolvedNames.join(', ')} ${identityUnresolvedNames.length > 1 ? 'have' : 'has'} an unresolved workflow-file producer identity (a transient lookup failure, a malformed run reference, or too many distinct reruns to verify this pass); cannot rule out a same-display-name decoy workflow, so this required check cannot be trusted as passing until it resolves cleanly on a later pass`
+        : '';
+    // kurone-kito/idd-skill#2919 (round 4 -- Codex review on PR #2921, P2;
+    // round 5 -- advisor review, replacing an earlier per-check-name
+    // reconstruction here): the specific pinned/identity-unresolved causes
+    // above must never SILENTLY suppress a genuinely separate, concurrent
+    // CI failure reason for a DIFFERENT required check -- e.g. one
+    // required check is source-pinned/identity-unresolved while an
+    // UNRELATED required check is actually FAILING/PENDING/MISSING.
+    // Without this, an operator reading only "check X is identity-
+    // unresolved" would retry expecting that alone to unblock the gate,
+    // when a clean retry would still be blocked by the separate failure.
+    //
+    // Uses `ci.preDowngradeStatus` -- `summarizeRequiredChecks`'s own
+    // dedup+waiver-adjusted classification BEFORE either downgrade could
+    // narrow it -- rather than re-deriving per-check pass/fail evidence
+    // from `ci.checks` here. An earlier revision built a `Map` keyed by
+    // check name from the RAW (non-deduped) `ci.checks` array and read
+    // each entry's raw `state`, which is wrong two ways: `Map` keeps
+    // whichever same-name instance happens to appear LAST in rollup
+    // order, not the dedup-selected latest one (a superseded FAILURE
+    // sorted after its own later SUCCESS would spuriously read as the
+    // "current" state), and it ignored `coveredByWaiver` entirely (a
+    // genuinely WAIVED required check, raw state FAILURE, would
+    // spuriously count as an unexplained concurrent cause). Reusing
+    // `preDowngradeStatus` is exact by construction: `success` there
+    // means every OTHER required check was already fully resolved as
+    // passing (through the SAME dedup/waiver logic `classifyCiChecks`
+    // always applies) before either downgrade ran, so any non-success
+    // `status` can only be attributed to the named causes below.
+    // Every PRE-#2919 caller (no pinned/identity cause at all) and every
+    // pinned-ONLY caller (that downgrade only ever fires when
+    // `preDowngradeStatus` was already `'success'`, so no concurrent
+    // cause can exist) sees byte-identical detail text to before -- this
+    // only widens the detail for the new combined shape.
+    // kurone-kito/idd-skill#2919 (round 5 -- E10 critique, latent-trap
+    // note, not a bug today): on a branch with NO required checks
+    // configured at all (`ci.noRequiredChecksConfigured: true`),
+    // `sourcePinnedNames`/`identityUnresolvedNames` are always empty
+    // (both downgrades live entirely inside `summarizeRequiredChecks`'s
+    // `requiredCheckNames.length > 0` block) and `preDowngradeStatus`
+    // stays its unset `'unknown'` default -- so `hasUnexplainedConcurrentCause`
+    // is spuriously `true` here, but harmlessly: `sourcePinnedDetail` and
+    // `identityUnresolvedDetail` below are ALSO both empty in this case,
+    // so the `[...].filter(Boolean).join('; ') || genericStatusDetail`
+    // expression reduces to `genericStatusDetail` either way (identical to
+    // pre-#2919 behavior for the unprotected-branch path; the gate itself
+    // still correctly blocks via `resolvePresentRunConclusion` above,
+    // which IS called unconditionally). If a future change adds an
+    // identity-unresolved-specific detail sentence for THIS
+    // no-required-checks path too, it must also gate
+    // `hasUnexplainedConcurrentCause` on `ci.requiredCheckCount > 0` (or
+    // equivalent) first, or it will reintroduce the exact spurious-
+    // generic-suffix bug this round fixed for the required-checks-
+    // configured path, just on the opposite branch.
+    const hasUnexplainedConcurrentCause =
+      String(ci.preDowngradeStatus ?? 'unknown') !== 'success';
     // #1377: name the masked-403-as-404 cause explicitly when that is why the
     // gate is not all-passing, matching idd-ci.instructions.md's wording,
     // instead of the generic status/noRequiredChecksConfigured detail below.
-    const detail =
+    const genericStatusDetail = `CI is not all-passing (status="${String(ci.status ?? '')}", noRequiredChecksConfigured=${Boolean(ci.noRequiredChecksConfigured)}, presentRunConclusion="${String(ci.presentRunConclusion ?? '')}")`;
+    let detail =
       ci.protectionReadsUnreadable === true
         ? 'cannot determine required checks: protection/ruleset unreadable'
-        : sourcePinnedDetail ||
-          `CI is not all-passing (status="${String(ci.status ?? '')}", noRequiredChecksConfigured=${Boolean(ci.noRequiredChecksConfigured)}, presentRunConclusion="${String(ci.presentRunConclusion ?? '')}")`;
+        : [
+            sourcePinnedDetail,
+            identityUnresolvedDetail,
+            hasUnexplainedConcurrentCause ? genericStatusDetail : '',
+          ]
+            .filter(Boolean)
+            .join('; ') || genericStatusDetail;
+    // #2021: when the `idd-advisory-convergence` check itself is present,
+    // required, and non-passing, and a posted otherwise-valid waiver exists
+    // for it but is not yet covering the check because its deadline/
+    // terminal precondition has not opened (see
+    // `advisoryConvergenceWaiverPrecondition` in
+    // `buildPreMergeReadinessSummary`), append that evidence -- including
+    // the remaining time-to-deadline -- so an agent reading this blocker
+    // does not have to independently re-derive it or mistake "waiver
+    // posted" for "check covered". Scoped to that specific check (not just
+    // "some ci blocker exists") so an unrelated failing check (e.g. lint)
+    // never gets this note appended.
+    const advisoryConvergencePrecondition = preMergeAsRecord(
+      report.advisoryConvergenceWaiverPrecondition,
+    );
+    const advisoryConvergenceCheckSelector = String(
+      advisoryConvergencePrecondition.checkSelector ?? '',
+    );
+    const advisoryConvergenceCheckNonPassing =
+      advisoryConvergenceCheckSelector &&
+      Array.isArray(ci.checks) &&
+      ci.checks.some(
+        (check) =>
+          check?.required === true &&
+          check?.coveredByWaiver !== true &&
+          !CHECK_PASS_EQUIVALENT_STATES.has(String(check?.state ?? '')) &&
+          matchCheckSelectorLocal(
+            check?.name,
+            advisoryConvergenceCheckSelector,
+          ),
+      );
+    const waiverEvidenceForDetail = preMergeAsRecord(report.waiverEvidence);
+    const waiverEvidenceValidList = Array.isArray(waiverEvidenceForDetail.valid)
+      ? waiverEvidenceForDetail.valid
+      : [];
+    // #2021 (Codex review on PR #2033): distinguish an EXACT-selector waiver
+    // (the only kind `advisory-convergence.mts`'s own gate ever counts, see
+    // `advisoryConvergenceExactWaiverValid` in `buildPreMergeReadinessSummary`)
+    // from a broader glob-only match, so this detail never implies "posting
+    // an exact waiver and waiting out the deadline is sufficient" when the
+    // real cause is that only a glob selector (e.g. `idd-*`) targets this
+    // check -- that never converges no matter how long the deadline waits.
+    const advisoryConvergenceExactWaiverEntries =
+      waiverEvidenceValidList.filter(
+        (entry) =>
+          String(entry?.checkSelector ?? '') ===
+          advisoryConvergenceCheckSelector,
+      );
+    const advisoryConvergenceExactWaiverCount =
+      advisoryConvergenceExactWaiverEntries.length;
+    const advisoryConvergenceAnyWaiverCount = waiverEvidenceValidList.filter(
+      (entry) =>
+        matchCheckSelectorLocal(
+          advisoryConvergenceCheckSelector,
+          entry?.checkSelector,
+        ),
+    ).length;
+    const advisoryConvergencePreconditionOpenForDetail =
+      advisoryConvergencePrecondition.open === true;
+    if (
+      advisoryConvergenceCheckNonPassing &&
+      advisoryConvergenceAnyWaiverCount > 0
+    ) {
+      const deadlineMinutes = Number(
+        advisoryConvergencePrecondition.deadlineMinutes ?? 0,
+      );
+      const elapsedMinutes = advisoryConvergencePrecondition.elapsedMinutes;
+      const remainingMinutes =
+        typeof elapsedMinutes === 'number'
+          ? Math.max(0, deadlineMinutes - elapsedMinutes)
+          : null;
+      const reasons = [];
+      if (!advisoryConvergencePreconditionOpenForDetail) {
+        reasons.push(
+          'its deadline/terminal precondition has not opened -- ' +
+            `deadlineMinutes=${deadlineMinutes}, ` +
+            `elapsedMinutes=${elapsedMinutes ?? 'unknown'}, ` +
+            `remainingMinutes=${remainingMinutes ?? 'unknown'}, ` +
+            `terminalUnavailable=${Boolean(advisoryConvergencePrecondition.terminalUnavailable)}`,
+        );
+      }
+      if (advisoryConvergenceExactWaiverCount === 0) {
+        reasons.push(
+          'no posted waiver has a selector that EXACTLY equals ' +
+            `"${advisoryConvergenceCheckSelector}" (only a broader/glob ` +
+            "selector matches this check by name); advisory-convergence.mts's " +
+            'own gate never counts a glob match for its own selector, so ' +
+            'this check cannot converge via that waiver regardless of the ' +
+            'precondition',
+        );
+      }
+      // #2034: precondition open AND an exact-match waiver exists, yet the
+      // check is still reported non-passing -- the only remaining cause is
+      // the rerun-freshness gate: the check's own live run last completed
+      // before the waiver became genuinely active. Name the stale run's
+      // `completedAt` and the waiver's own `createdAt` explicitly, mirroring
+      // the other two reasons, instead of leaving an agent to re-derive why
+      // an apparently-satisfied waiver still left the check blocked.
+      if (
+        advisoryConvergencePreconditionOpenForDetail &&
+        advisoryConvergenceExactWaiverCount > 0 &&
+        reasons.length === 0
+      ) {
+        const staleCheck = Array.isArray(ci.checks)
+          ? ci.checks.find(
+              (check) =>
+                check?.required === true &&
+                check?.coveredByWaiver !== true &&
+                !CHECK_PASS_EQUIVALENT_STATES.has(String(check?.state ?? '')) &&
+                matchCheckSelectorLocal(
+                  check?.name,
+                  advisoryConvergenceCheckSelector,
+                ),
+            )
+          : undefined;
+        const staleCompletedAt =
+          String(staleCheck?.completedAt ?? '') || 'none';
+        const waiverCreatedAts = advisoryConvergenceExactWaiverEntries
+          .map((entry) => String(entry?.createdAt ?? 'none'))
+          .join(', ');
+        // The deadline path has a real, computable activation override (the
+        // deadline-open moment); the terminal-unavailability path does not,
+        // so the cutoff there is the waiver's own createdAt alone -- naming
+        // both unconditionally would misstate the terminal case.
+        const activeSinceDescription =
+          advisoryConvergencePrecondition.deadlinePassed === true
+            ? `not at or after the waiver's own createdAt (${waiverCreatedAts}) ` +
+              'or the #2021 deadline precondition-open moment, whichever is later'
+            : `not at or after the waiver's own createdAt (${waiverCreatedAts})`;
+        reasons.push(
+          `its live run last completed at "${staleCompletedAt}", which is ` +
+            `${activeSinceDescription} -- rerun the check so its live run ` +
+            'reflects the waiver before trusting this as covered',
+        );
+      }
+      if (reasons.length > 0) {
+        detail +=
+          ` (a posted external-check waiver exists for current HEAD but is ` +
+          `not yet covering "${advisoryConvergenceCheckSelector}": ${reasons.join('; ')})`;
+      }
+    }
     blockers.push({ gate: 'ci', detail });
+  }
+  // kurone-kito/idd-skill#2911: the OPPOSITE direction from the block
+  // above -- CI may currently report `idd-advisory-convergence` PASSING,
+  // but `buildPreMergeReadinessSummary`'s own `staleSelfWaiver` evidence
+  // (see its computation for the full rationale and the six findings this
+  // closes) may show that pass rests on a self-referential-bootstrap-auto
+  // waiver that has since gone stale, with no rerun since. Independent of
+  // (and not gated by) `isPreMergeCiAllPassing` above, since the whole
+  // point is to catch a check that currently LOOKS all-passing.
+  const staleSelfWaiver = preMergeAsRecord(report.staleSelfWaiver);
+  if (staleSelfWaiver.stale === true) {
+    const staleSelfWaiverCheckSelector = String(
+      staleSelfWaiver.checkSelector ?? '',
+    );
+    const staleReasonDetail =
+      staleSelfWaiver.reason === 'wrong-claim'
+        ? `was bound to claim "${String(staleSelfWaiver.waiverClaimId ?? 'unknown')}", which the current claim identity (installed at "${String(report.claimIdentityInstalledAt ?? '') || 'unknown'}") no longer matches, with no rerun since`
+        : `expired at "${String(staleSelfWaiver.expiresAt ?? 'unknown')}" with no rerun since`;
+    blockers.push({
+      gate: 'ci',
+      detail:
+        `"${staleSelfWaiverCheckSelector}" currently reports a passing ` +
+        `conclusion, but the self-referential-bootstrap-auto waiver ` +
+        `posted by github-actions[bot] that may have justified it ` +
+        `${staleReasonDetail} -- GitHub does not automatically ` +
+        're-evaluate a passing check when its supporting waiver comment ' +
+        `stops being valid. Rerun "${staleSelfWaiverCheckSelector}" for ` +
+        'the current HEAD before merging so it reflects the current, ' +
+        'unwaived state.',
+    });
   }
   const reviewerStates = preMergeAsRecord(report.reviewerStates);
   if (!isPreMergeReviewSatisfied(reviewerStates)) {
@@ -4496,13 +6722,22 @@ export function computePreMergeReadinessBlockers(report) {
   }
   const dispositionEvidence = preMergeAsRecord(report.dispositionEvidence);
   // The written F2/F3 gate requires BOTH `route === 'proceed'` AND
-  // `blockingCount === 0`. Fail closed on a non-zero or non-numeric
-  // blockingCount so a missing/garbled count is treated as a blocker.
+  // `blockingCount === 0`, except the documented F2 override when
+  // `soleCauseAckOnlyPostDisposition` is exactly true (#2125). Fail
+  // closed on a non-zero or non-numeric blockingCount otherwise.
   const dispositionRoute = String(dispositionEvidence.route ?? '');
   const dispositionBlockingCount = Number(
     dispositionEvidence.blockingCount ?? -1,
   );
-  if (dispositionRoute !== 'proceed' || dispositionBlockingCount !== 0) {
+  const soleCauseAckOnlyPostDisposition =
+    dispositionEvidence.soleCauseAckOnlyPostDisposition === true &&
+    dispositionRoute === 'return-to-e1' &&
+    Number.isInteger(dispositionBlockingCount) &&
+    dispositionBlockingCount > 0;
+  if (
+    !soleCauseAckOnlyPostDisposition &&
+    (dispositionRoute !== 'proceed' || dispositionBlockingCount !== 0)
+  ) {
     blockers.push({
       gate: 'disposition-evidence',
       detail: `dispositionEvidence.route is "${dispositionRoute || 'missing'}" (expected "proceed"), blockingCount=${dispositionBlockingCount} (expected 0)`,
@@ -4527,6 +6762,66 @@ export function computePreMergeReadinessBlockers(report) {
       gate: 'branch-currency',
       detail: `mergeStateStatus is "BEHIND" and the base branch requires an up-to-date head before merge (requiresUpToDateHeadSource="${String(branchCurrency.requiresUpToDateHeadSource ?? 'unknown')}")`,
     });
+  }
+  // #2127: discarded same-named required-check siblings stay evidence-only
+  // while GitHub is CLEAN/BEHIND (#1745). Combined with live BLOCKED they
+  // are the Rulesets all-instances split (helper latest-wins is green,
+  // GitHub still refuses merge). A non-array or missing list is treated
+  // as absent so a CODEOWNER-only BLOCKED path (#1663) stays silent here.
+  const discardedSiblings = ci.discardedNonPassingRequiredChecks;
+  if (
+    mergeStateStatus === 'BLOCKED' &&
+    Array.isArray(discardedSiblings) &&
+    discardedSiblings.length > 0
+  ) {
+    blockers.push({
+      gate: 'discarded-required-check-siblings',
+      detail: `mergeStateStatus is "BLOCKED" and ci.discardedNonPassingRequiredChecks has ${String(discardedSiblings.length)} discarded same-named required-check sibling(s); recover via rerun-advisory-convergence, do not merge or --admin`,
+    });
+  }
+  // #2272: fail-closed development-branch invariant. Absent entirely
+  // (unmigrated caller / unit fixture) means no gate at all -- distinct
+  // from a present-but-empty-`status` value, which this treats as
+  // `'unavailable'` (fail closed) rather than silently skipping.
+  if (report.developmentBranchTarget) {
+    const developmentBranchTarget = preMergeAsRecord(
+      report.developmentBranchTarget,
+    );
+    // `||`, not `??`: an empty-string status (garbled/absent field) must
+    // fail closed to 'unavailable' too, not pass '' through unmatched.
+    const status = String(developmentBranchTarget.status || 'unavailable');
+    const baseRefName = String(developmentBranchTarget.baseRefName ?? '');
+    if (status === 'invalid') {
+      blockers.push({
+        gate: 'development-branch-target',
+        detail: `configured developmentBranch is invalid: ${String(developmentBranchTarget.reason ?? 'unknown reason')}`,
+      });
+    } else if (status === 'unavailable') {
+      blockers.push({
+        gate: 'development-branch-target',
+        detail:
+          'effective development branch could not be resolved (no developmentBranch policy value and the live repository default branch could not be read)',
+      });
+    } else if (status === 'configured' || status === 'default') {
+      const effectiveBranch = String(developmentBranchTarget.branch ?? '');
+      if (effectiveBranch === '' || effectiveBranch !== baseRefName) {
+        blockers.push({
+          gate: 'development-branch-target',
+          detail: `PR base branch "${baseRefName}" does not match the effective development branch "${effectiveBranch}" (status="${status}")`,
+        });
+      }
+    } else {
+      // Whitelist, not a denylist: an unrecognized status (a typo, a
+      // future enum value this file does not know about yet, or any
+      // other coerced-`String(...)` garbage) must fail closed rather
+      // than fall through to the branch comparison, where a coincidental
+      // `branch === baseRefName` (including both empty) would otherwise
+      // silently pass an invariant this file cannot actually vouch for.
+      blockers.push({
+        gate: 'development-branch-target',
+        detail: `unrecognized developmentBranchTarget.status "${status}" (expected "configured", "default", "invalid", or "unavailable")`,
+      });
+    }
   }
   return blockers;
 }
@@ -4602,14 +6897,47 @@ export function buildPreMergeReadinessSummary(
       dispositionAuthorLogins: iddAgentLogins,
     },
   );
+  // #2544: whether the configured secondary bot has already posted a
+  // genuine (non-notice) comment for the CURRENT HEAD -- reuses
+  // `options.advisoryConvergenceHeadCommittedAt` (the HEAD commit's own
+  // `committedDate`, already resolved by the caller for the unrelated
+  // advisory-convergence-deadline precondition below) rather than a second
+  // fetch, since it is exactly "when did this HEAD land" either way.
+  const secondaryBotLogin = String(options.secondaryBotLogin ?? '')
+    .trim()
+    .toLowerCase();
+  const secondaryReviewSettlement = secondaryBotLogin
+    ? computeSecondaryAdvisoryReviewSettlement(comments, {
+        secondaryBotLogin,
+        headCommittedAt: options.advisoryConvergenceHeadCommittedAt,
+      })
+    : { settled: false, settledAt: null, declined: false };
+  // #2335: stateless secondary-quiet-window gate, anchored on the same
+  // non-ack-only activity ceiling `liveSnapshot.effective` already computes
+  // for the review-currency ack-only carve-out below -- see
+  // `buildSecondaryQuietWindowStatus`'s own doc comment for why this anchor
+  // needs no separate persisted "convergence first observed" timestamp.
+  // #2544: `secondaryBotSettledAt` shortens the required wait to a settled
+  // buffer once that evidence exists. #2547: `secondaryBotDeclined` skips
+  // the wait entirely once the bot has definitively declined this exact
+  // HEAD; see `computeSecondaryAdvisoryReviewSettlement` above for how
+  // both are derived.
+  const secondaryQuietWindow = buildSecondaryQuietWindowStatus({
+    minutes: options.secondaryQuietWindowMinutes,
+    effectiveMaxActivityUpdatedAt: liveSnapshot.effective?.maxActivityUpdatedAt,
+    secondaryBotSettledAt: secondaryReviewSettlement.settledAt,
+    secondaryBotDeclined: secondaryReviewSettlement.declined,
+    now,
+  });
+  const isTrustedWatermarkAuthor = (login) =>
+    trustedMarkerLogins.includes(
+      String(login ?? '')
+        .trim()
+        .toLowerCase(),
+    );
   const watermark = resolveLatestReviewWatermark(comments, {
     expectedClaimId: options.expectedClaimId,
-    isTrustedAuthor: (login) =>
-      trustedMarkerLogins.includes(
-        String(login ?? '')
-          .trim()
-          .toLowerCase(),
-      ),
+    isTrustedAuthor: isTrustedWatermarkAuthor,
   });
   const reviewCurrency = watermark
     ? diffReviewSnapshot(
@@ -4624,7 +6952,12 @@ export function buildPreMergeReadinessSummary(
           ...liveSnapshot,
         },
       )
-    : { route: 'return-to-e1', reason: 'missing-watermark' };
+    : detectMalformedReviewWatermarkComments(comments, {
+          isTrustedAuthor: isTrustedWatermarkAuthor,
+          expectedClaimId: options.expectedClaimId,
+        })
+      ? { route: 'return-to-e1', reason: 'malformed-watermark' }
+      : { route: 'return-to-e1', reason: 'missing-watermark' };
   const threadSummary = summarizeReviewThreadsForGate(threads, {
     iddAgentLogins,
     prAuthorLogin,
@@ -4702,50 +7035,682 @@ export function buildPreMergeReadinessSummary(
       primaryBotLogin: options.primaryBotLogin,
     },
   );
-  const claim = summarizeClaimValidation(claimEvents, {
-    trustedMarkerLogins,
-    forcedHandoffEnabled: options.forcedHandoffEnabled === true,
-    expectedLinkedPrs: options.expectedLinkedPrs ?? [],
-    prFirstCommitAt: options.prFirstCommitAt ?? null,
-    authorizedForcedHandoffLogins: options.authorizedForcedHandoffLogins,
-    isAuthorizedForcedHandoff: options.isAuthorizedForcedHandoff,
-    isForcedHandoffEnabled: options.isForcedHandoffEnabled,
-    expectedClaimId: options.expectedClaimId,
-    expectedAgentId: options.expectedAgentId,
-    expectedNonce: options.expectedNonce,
-    staleAgeMs: options.staleAgeMs,
-  });
+  // kurone-kito/idd-skill#2911: captures `resolveActiveClaimWithForcedHandoff
+  // Trace`'s `activeSince` (the non-mutable claim-identity-transition
+  // anchor `summarizeClaimValidation`'s own `captureTraceInto` parameter
+  // exposes) without widening `ClaimValidationSummary` -- see that
+  // parameter's own doc comment. Left `{}` (never populated) on the
+  // `claimless` branch below, matching that branch's own synthetic,
+  // not-applicable claim shape.
+  const claimTrace = {};
+  const claim = options.claimless
+    ? {
+        expectedClaimId: 'none',
+        expectedAgentId: '',
+        activeClaimPresent: false,
+        activeClaim: {
+          agentId: '',
+          claimId: 'none',
+          supersedes: '',
+          branch: '',
+          createdAt: '',
+        },
+        matchesExpectedClaim: true,
+        claimLost: false,
+        reason: 'not-applicable',
+      }
+    : summarizeClaimValidation(
+        claimEvents,
+        {
+          trustedMarkerLogins,
+          forcedHandoffEnabled: options.forcedHandoffEnabled === true,
+          expectedLinkedPrs: options.expectedLinkedPrs ?? [],
+          prFirstCommitAt: options.prFirstCommitAt ?? null,
+          authorizedForcedHandoffLogins: options.authorizedForcedHandoffLogins,
+          isAuthorizedForcedHandoff: options.isAuthorizedForcedHandoff,
+          isForcedHandoffEnabled: options.isForcedHandoffEnabled,
+          expectedClaimId: options.expectedClaimId,
+          expectedAgentId: options.expectedAgentId,
+          expectedNonce: options.expectedNonce,
+          staleAgeMs: options.staleAgeMs,
+        },
+        claimTrace,
+      );
+  // kurone-kito/idd-skill#2911: `''` when no event ever produced an active
+  // claim (including the `claimless` branch above) -- every consumer of
+  // this field must treat that the same as "no anchor available" and fail
+  // closed (never treat an empty string as "installed at the epoch").
+  const claimIdentityInstalledAt = claimTrace.activeSince ?? '';
   const waivableCheckSelectors = options.waivableCheckSelectors ?? null;
   const waiverEvidence = summarizeExternalCheckWaivers(comments, {
     prHeadSha,
     activeClaimId: claim.activeClaim?.claimId ?? options.activeClaimId ?? '',
+    activeClaimSupersedes: claim.activeClaim?.supersedes ?? '',
     trustedMarkerLogins,
     now,
     waivableSelectors: waivableCheckSelectors,
     maxValidity: options.externalCheckWaiverMaxValidity ?? '',
+    mode: options.externalCheckWaiverMode ?? '',
   });
+  // kurone-kito/idd-skill#2911: a THIRD authorized `allowSelfReferential-
+  // BootstrapAuto` call site -- see that option's own doc comment in this
+  // file (`summarizeExternalCheckWaivers`) for the full list and why every
+  // other caller must leave it unset. Read-only, feeding only the
+  // `staleSelfWaiver` blocker evidence below; never satisfies a gate or
+  // makes `ready` true. `trustedMarkerLogins` extended with
+  // `github-actions[bot]` identically to `advisory-convergence.mts`'s own
+  // gate-decision call, so a self-referential-bootstrap-auto marker this
+  // repository's own posting job creates is visible to both.
+  const autoWaiverEvidence = summarizeExternalCheckWaivers(comments, {
+    prHeadSha,
+    activeClaimId: claim.activeClaim?.claimId ?? options.activeClaimId ?? '',
+    activeClaimSupersedes: claim.activeClaim?.supersedes ?? '',
+    trustedMarkerLogins: [...trustedMarkerLogins, 'github-actions[bot]'],
+    now,
+    waivableSelectors: waivableCheckSelectors,
+    maxValidity: options.externalCheckWaiverMaxValidity ?? '',
+    mode: options.externalCheckWaiverMode ?? '',
+    allowSelfReferentialBootstrapAuto: true,
+  });
+  // #1570: the caller-supplied terminal-unavailability verdict, reused below
+  // both for the dedicated `copilot-terminal-unavailable` blocker and (#2021)
+  // as one of the two preconditions that must open before an
+  // `idd-advisory-convergence` waiver counts toward `ci.coveredByWaiver`.
+  const copilotUnavailable = options.copilotUnavailable === true;
+  // #2021: `advisory-convergence.mts`'s own gate never treats a posted
+  // `idd-advisory-convergence` waiver as active until ONE of two independent
+  // preconditions is ALSO true -- a 24h deadline anchored on the current HEAD
+  // commit's own `committedDate`, or proven terminal Copilot unavailability
+  // (`copilotUnavailable` above). Reported truthfully in `waiverEvidence`
+  // itself either way (the marker is real and otherwise valid), but a check
+  // only becomes `coveredByWaiver` here once this SAME precondition has
+  // opened -- otherwise this helper reports `coveredByWaiver: true` before
+  // `advisory-convergence.mts` itself would ever call the waiver `waived`,
+  // sending an otherwise-correct session into a `gh pr merge` GitHub rejects
+  // outright (root cause: kurone-kito/idd-skill#2021).
+  const advisoryConvergencePreconditionResult =
+    buildAdvisoryConvergenceWaiverPrecondition({
+      headCommittedAt: options.advisoryConvergenceHeadCommittedAt,
+      deadlineMinutes: options.advisoryConvergenceDeadlineMinutes,
+      terminalUnavailable: copilotUnavailable,
+      now,
+    });
+  const advisoryConvergenceWaiverPrecondition =
+    advisoryConvergencePreconditionResult.precondition;
+  const advisoryConvergenceDeadlinePassed =
+    advisoryConvergenceWaiverPrecondition.deadlinePassed;
+  const advisoryConvergencePreconditionOpen =
+    advisoryConvergenceWaiverPrecondition.open;
+  const advisoryConvergenceDeadlineOpensAt =
+    advisoryConvergencePreconditionResult.deadlineOpensAt;
+  // #2021 (Codex review on PR #2033, two findings): `advisory-convergence.mts`'s
+  // own `waived` computation only counts a waiver whose `checkSelector` is an
+  // EXACT match to its selector constant (`entry.checkSelector ===
+  // waiverCheckSelector`, advisory-convergence.mts line ~1108) -- never a
+  // glob. A glob waiver such as `idd-*` (permitted when
+  // `waivableCheckSelectors` allows it) would still glob-match the
+  // `idd-advisory-convergence` CHECK NAME via `summarizeRequiredChecks`'s
+  // `matchCheckSelectorLocal`, so treating "precondition open" as sufficient
+  // to fall back to the raw, unfiltered `waiverEvidence` (as an earlier
+  // revision of this fix did) would report `coveredByWaiver: true` for a
+  // selector that gate would never itself accept -- reproducing this same
+  // issue's false-`ready` class for a different trigger. `genuinelyCovered`
+  // requires BOTH the precondition open AND an EXACT-match valid entry.
+  const advisoryConvergenceExactWaiverValid = waiverEvidence.valid.some(
+    (entry) =>
+      entry.checkSelector === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+  );
+  const advisoryConvergenceGenuinelyCovered =
+    advisoryConvergencePreconditionOpen && advisoryConvergenceExactWaiverValid;
+  // #2353: the caller-precomputed provider-outage-declaration relief
+  // verdict, re-ANDed here with the SAME precondition-open evidence the
+  // direct-waiver path above requires -- cheap insurance against a future
+  // caller passing a relief verdict that was somehow computed without the
+  // precondition it logically implies (evaluateProviderOutageRelief's own
+  // `prTerminalUnavailable` requirement already implies `terminalUnavailable`,
+  // which already implies `advisoryConvergencePreconditionOpen` via the OR,
+  // so this is redundant today, not a new gate).
+  const advisoryConvergenceOutageRelieved =
+    advisoryConvergencePreconditionOpen &&
+    options.advisoryConvergenceOutageRelieved === true;
   const ci = summarizeRequiredChecks(checks, branchRules, branchProtection, {
+    // Raw, UNFILTERED `waiverEvidence` -- deliberately not a caller-side
+    // pre-filtered copy. A pre-filter that removed a whole `valid` entry
+    // (e.g. every occurrence of a glob waiver covering
+    // `idd-advisory-convergence`) would also strip that SAME entry's
+    // coverage of any OTHER check it glob-matches (e.g. a configured
+    // `idd-security`), turning a convergence-specific restriction into an
+    // unintended block on unrelated checks (Codex review finding on PR
+    // #2033). `excludeFromWaiverCoverage` below applies the restriction
+    // surgically, per check name, instead.
     waivers: waiverEvidence,
     waivableSelectors: waivableCheckSelectors,
     protectionReadsUnreadable,
     trustSourcePinnedRequiredChecks:
       options.trustSourcePinnedRequiredChecks === true,
+    excludeFromWaiverCoverage: (name) =>
+      name === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR &&
+      !advisoryConvergenceGenuinelyCovered,
+    // #2034: only override the cutoff for `idd-advisory-convergence` itself,
+    // and only on the deadline path -- an unrelated check's waiver stays
+    // anchored on its own comment's `createdAt`.
+    waiverActiveSinceOverride: (name) =>
+      name === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR &&
+      advisoryConvergenceDeadlineOpensAt
+        ? advisoryConvergenceDeadlineOpensAt
+        : null,
+    // #2353: a repository-scoped provider-outage declaration relieves
+    // `idd-advisory-convergence` specifically, through a positive path
+    // that bypasses `excludeFromWaiverCoverage` above entirely -- see
+    // `treatAsCoveredByWaiver`'s own doc comment for why.
+    treatAsCoveredByWaiver: (name) =>
+      name === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR &&
+      advisoryConvergenceOutageRelieved,
+    // #2353 (Codex review on PR #2370): the declaration's own `startedAt`
+    // -- a required check's live run must have completed at or after this
+    // moment, or a stale pre-declaration failed run would be reported
+    // covered without ever having actually rerun under the outage window.
+    treatAsCoveredByWaiverSince: (name) =>
+      name === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR &&
+      options.advisoryConvergenceOutageRelievedSince
+        ? options.advisoryConvergenceOutageRelievedSince
+        : null,
+    // kurone-kito/idd-skill#2919 (round 2): only `idd-advisory-convergence`
+    // is a candidate -- it is the sole check name this collector ever
+    // attempts `workflowPath` resolution for (see `pre-merge-readiness.mts`).
+    identityUnresolvedCheckNames:
+      options.advisoryConvergenceIdentityUnresolved === true
+        ? [DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR]
+        : null,
   });
-  // #1570: reuse the SAME waiver evidence above (already validated for
+  // kurone-kito/idd-skill#2911: the OPPOSITE direction from the CI blocker
+  // below -- CI may currently report `idd-advisory-convergence` PASSING,
+  // but that pass may rest on a self-referential-bootstrap-auto marker
+  // that has since gone stale (expired, or claim-invalid across a genuine
+  // claim transition) with no rerun since. GitHub never reruns an
+  // already-successful check merely because its supporting comment stops
+  // being valid, so without this a PR could merge on a stale pass with no
+  // genuine advisory review (or fresh waiver) ever having covered it.
+  // Consumed by `computePreMergeReadinessBlockers` via
+  // `report.staleSelfWaiver` -- independent of, and never gated by,
+  // `isPreMergeCiAllPassing` there, since the whole point is to catch a
+  // check that currently LOOKS all-passing.
+  //
+  // This re-implements the blocker `9ecc9954`/`863c5249`/`337f4369`
+  // introduced and PR #2895's own review then retired across three more
+  // rounds (kurone-kito/idd-skill#2911's own "Findings" history), fixing
+  // every root cause in one pass rather than live-patching this call site
+  // again:
+  // - Deduplicated newest check instance (`selectLatestCheckInstance`),
+  //   not a raw `.find()` over the full (possibly multi-instance)
+  //   `ci.checks` list (round 15, Codex P1).
+  // - Scans BOTH `expired` and `wrongClaim` (round 14, Codex P1) --
+  //   `wrongClaim` never carries a comparable expiry, so it needs the
+  //   claim-identity-transition anchor below instead.
+  // - Correlates `wrongClaim` against `claimIdentityInstalledAt` (a
+  //   non-mutable claim-identity-transition anchor -- see that field's own
+  //   doc comment), never the mutable `claim.activeClaim.createdAt`
+  //   heartbeat clock (round 15, Codex P2).
+  // - Trusts a candidate marker only after `options.autoWaiverRunVerified`
+  //   confirms the SAME run-bound trust conditions
+  //   `verifySelfReferentialBootstrapWaiverRun` already applies (reused
+  //   verbatim, not reimplemented) AND `options.touchesSelfReferential-
+  //   Allowlist` independently confirms this PR's own diff touches the
+  //   checker allowlist (round 15, Copilot -- the decisive finding: a
+  //   same-repository `pull_request`-triggered workflow with
+  //   `issues: write` could otherwise cite a real, unrelated run (e.g.
+  //   this PR's own required-check instance of `idd-advisory-
+  //   convergence.yml`, which runs for EVERY PR regardless of allowlist
+  //   touch) to forge a marker that blocks a completely unrelated PR's
+  //   merge). Both booleans are precomputed by the collector
+  //   (`pre-merge-readiness.mts`), which does the actual `getWorkflowRun`/
+  //   changed-file I/O -- this function cannot perform it directly without
+  //   an import cycle back through `advisory-convergence.mts` (which
+  //   already imports FROM this file).
+  //
+  // Fail-closed/fail-open asymmetry, by design: an unverified run
+  // (`autoWaiverRunVerified[runId]` false/absent, including a transient
+  // `getWorkflowRun` failure) makes the candidate marker untrusted and
+  // therefore SUPPRESSES this blocker -- the safe direction for the
+  // decisive finding above (a forged-or-unresolvable citation must never
+  // become a merge-denial vector), even though it is the opposite of this
+  // file's usual fail-closed default elsewhere. `touchesSelfReferential-
+  // Allowlist` not `true` (including simply omitted by an older caller)
+  // suppresses the blocker unconditionally, for the identical reason.
+  //
+  // `autoWaiverEvidence` itself (computed just above, alongside the
+  // ordinary `waiverEvidence`) is deliberately NOT added to the returned
+  // `summary`: only this derived `staleSelfWaiver` verdict is schema-
+  // locked, so the raw per-marker bucket shape stays free to evolve
+  // (kurone-kito/idd-skill#2912's own bearer-evidence-vs-provenance work
+  // is a plausible future consumer) without forcing a fixture cascade
+  // across every `fixtures/pre-merge-readiness/*.json` file.
+  //
+  // Residual (documented, not fixed here): the run-id trust check above
+  // proves the cited run has the right shape, never that it actually
+  // posted the marker citing it (kurone-kito/idd-skill#2912 tracks
+  // closing that bearer-evidence gap -- see the identical residual note
+  // on `SELF_REFERENTIAL_WAIVER_TRIGGER_FILES` in advisory-convergence.mts,
+  // ~L277-303). `touchesSelfReferentialAllowlist` bounds the blast radius
+  // to PRs that already, genuinely touch the checker allowlist -- it does
+  // not fully close repeated same-repository forgery against ONE such PR
+  // (each round costs that PR one avoidable rerun, never a bypass).
+  const staleSelfWaiverCheckSelector =
+    DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR;
+  let staleSelfWaiver = {
+    stale: false,
+    checkSelector: staleSelfWaiverCheckSelector,
+    reason: null,
+    expiresAt: '',
+    waiverClaimId: '',
+  };
+  // kurone-kito/idd-skill#2911 (Medium, self-critique against the merged
+  // #2657 gate decision): `summarizeExternalCheckWaivers` classifies a
+  // marker into `expired`/`wrongClaim` BEFORE its own `notConfigured`/
+  // `modeDisabled` checks ever run (both come later in that function's own
+  // pipeline), so those two buckets are populated regardless of
+  // `ciGate.externalCheckWaivers.mode`/`waivableSelectors` policy --
+  // unlike `valid`, which `autoWaiverValid` (advisory-convergence.mts) can
+  // only ever reach once mode/waivable ALREADY gated it. Gate this
+  // blocker on the identical precondition, so an adopter whose policy
+  // (the schema default: `mode: "disabled"`) could never have made this
+  // mechanism's waiver `valid` in the first place never sees a blocker
+  // from its `expired`/`wrongClaim` shadow either.
+  const staleSelfWaiverModeOpen =
+    (options.externalCheckWaiverMode ?? '') === '' ||
+    options.externalCheckWaiverMode === 'maintainer-authorized';
+  const staleSelfWaiverSelectorWaivable =
+    !Array.isArray(waivableCheckSelectors) ||
+    isCheckNameConfiguredWaivable(
+      staleSelfWaiverCheckSelector,
+      waivableCheckSelectors,
+    );
+  if (
+    options.touchesSelfReferentialAllowlist === true &&
+    staleSelfWaiverModeOpen &&
+    staleSelfWaiverSelectorWaivable
+  ) {
+    // kurone-kito/idd-skill#2911 (Codex review on PR #2915, P1): the
+    // pre-fix version filtered `ci.checks` -- already reduced by
+    // `summarizeRequiredChecks` and stripped of its `type`/`workflowName`
+    // producer-identity fields -- and picked a single "latest" instance
+    // with `selectLatestCheckInstance` directly over that flattened list.
+    // When two distinct PRODUCERS (e.g. an Actions check-run and a legacy
+    // status context) share the `idd-advisory-convergence` name, that
+    // flattening could let a later, genuinely-passing instance from an
+    // UNRELATED producer mask an earlier instance from the checker's own
+    // producer that is still resting on a stale waiver, since only the
+    // single most-recent-across-all-producers instance was ever
+    // inspected. Group by producer instead, over the RAW `checks`
+    // parameter (which still carries `type`/`workflowName`, unlike
+    // `ci.checks`), using `selectLatestCheckPerName` -- the identical
+    // producer-identity grouping `classifyCiChecks`/
+    // `findDiscardedNonPassingSiblings` already establish for the same
+    // reason (#1483) -- then evaluate EACH producer's own latest instance
+    // independently below (loop, `break` on the first stale match), so a
+    // fresh pass from one producer can never hide a stale pass from
+    // another.
+    const selfConvergenceRawInstances = checks
+      .filter((check) =>
+        matchCheckSelectorLocal(check.name, staleSelfWaiverCheckSelector),
+      )
+      .map((check) => ({
+        name: String(check.name ?? ''),
+        // Also observed (Copilot, PR #2915, kurone-kito/idd-skill#2919):
+        // case-normalized here (matching `summarizeRequiredChecks`'s own
+        // normalization, which has not run yet at this raw `checks`
+        // read) so a lowercase live `state` can never make the
+        // `CHECK_PASS_EQUIVALENT_STATES` filter below (populated with
+        // uppercase literals) find zero candidates and silently skip
+        // this blocker even while `ci.status` reads passing. Real
+        // GitHub GraphQL enums are already uppercase, so this is
+        // defensive rather than a live behavior change.
+        state: String(check.state ?? '').toUpperCase(),
+        completedAt: check.completedAt ?? null,
+        // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P1): also
+        // carried through for the wrongClaim claim-installation
+        // comparison below, which anchors on this instead of
+        // `completedAt` -- see that comparison's own doc comment.
+        startedAt: check.startedAt ?? null,
+        type: check.type ?? null,
+        workflowName: check.workflowName ?? null,
+        // kurone-kito/idd-skill#2919: carried through for the
+        // workflow-FILE-path filter below, which closes the gap
+        // `workflowName` alone leaves open -- two different workflow
+        // FILES can declare the identical `name:` display string (see
+        // `CheckLike`'s own doc comment).
+        workflowPath: check.workflowPath ?? null,
+      }))
+      .filter((check) => ci.requiredCheckNames.includes(check.name));
+    // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P1, fresh
+    // evidence against THIS revision's own new per-producer loop): the
+    // producer grouping above intentionally keeps every distinct
+    // producer separate, but a non-Actions producer sharing this name
+    // (e.g. a legacy status context) can never legitimately be covered
+    // by a self-referential-bootstrap-auto marker in the first place --
+    // that marker only ever cites a workflow RUN
+    // (`verifySelfReferentialBootstrapWaiverRun` checks `path`/`event`
+    // against an Actions run), which a status-context producer has none
+    // of. Worse, such a producer typically has no parseable
+    // `completedAt`, which would otherwise hit this loop's stale-leaning
+    // `passingCompletedAtMs === null` branch below and flag a false
+    // positive even while the REAL convergence workflow's own instance
+    // is genuinely fresh. Exclude any producer whose `type` is populated
+    // and is not `'check-run'` before it ever becomes a candidate -- an
+    // absent `type` (the pre-#1483 data shape, including this fixture's
+    // own base checker instance) still passes through unaffected, same
+    // as `groupChecksByProducer`'s own no-conflicting-signal fallback.
+    // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P1, fresh
+    // evidence against the type-only filter immediately above): a check
+    // is `type: 'check-run'` for ANY Actions workflow, not only the real
+    // checker -- a second, unrelated workflow file that happens to
+    // publish a check-run under the identical `idd-advisory-convergence`
+    // name would still pass the type filter alone. Declared independently
+    // here (mirroring `MAX_PRE_MERGE_AUTO_WAIVER_RUN_LOOKUPS`'s own
+    // rationale above) rather than importing a shared constant from
+    // `advisory-convergence.mts`, to avoid a rebase collision with
+    // #2912's concurrent work there; a dedicated test pins this literal
+    // against the workflow file's own `name:` field so the two can never
+    // silently drift apart. `workflowName` absent (`''`, the pre-#1483
+    // data shape most fixtures in this suite still use) still passes
+    // through unaffected, same as the type filter's own fallback --
+    // narrowing further only excludes a POSITIVELY different workflow
+    // identity, never an unlabeled one.
+    const ADVISORY_CONVERGENCE_WORKFLOW_DISPLAY_NAME =
+      'IDD advisory-convergence gate';
+    // kurone-kito/idd-skill#2919: this issue's own motivating gap --
+    // `ADVISORY_CONVERGENCE_WORKFLOW_DISPLAY_NAME` above is only the
+    // workflow YAML's top-level `name:` string, which a DIFFERENT
+    // workflow file can declare identically (Copilot review, PR #2915:
+    // this repository's own `idd-advisory-convergence.yml` documents
+    // running both `pull_request` and `pull_request_target` instances
+    // of the SAME file simultaneously during its Phase 1 transition
+    // window -- a legitimate same-file case this filter must keep
+    // passing, not the gap this constant closes). Declared as an
+    // independent local literal rather than importing
+    // `ADVISORY_CONVERGENCE_WORKFLOW_PATH` from `advisory-convergence.mts`
+    // -- that file already imports FROM this one (`protocol-helpers.mts`),
+    // so the reverse import would cycle -- mirroring
+    // `ADVISORY_CONVERGENCE_WORKFLOW_DISPLAY_NAME`'s own documented
+    // rationale for doing the same thing just above. A dedicated test
+    // (`tests/pre-merge-readiness.test.mts`) imports the real constant
+    // and pins this literal against it so the two can never silently
+    // drift apart.
+    const ADVISORY_CONVERGENCE_WORKFLOW_FILE_PATH =
+      '.github/workflows/idd-advisory-convergence.yml';
+    const selfConvergenceProducerCandidates = selectLatestCheckPerName(
+      selfConvergenceRawInstances,
+    ).filter(
+      (check) =>
+        CHECK_PASS_EQUIVALENT_STATES.has(check.state) &&
+        (!check.type || check.type === 'check-run') &&
+        (!check.workflowName ||
+          check.workflowName === ADVISORY_CONVERGENCE_WORKFLOW_DISPLAY_NAME) &&
+        // #2919: `workflowName` alone lets a decoy workflow FILE that
+        // happens to share the real checker's display name masquerade
+        // as a genuine candidate (this issue's own Background). Absent
+        // `workflowPath` (every caller/fixture that doesn't resolve it)
+        // stays permissive, identical to the `workflowName` fallback
+        // just above -- only a POSITIVELY different, resolved path is
+        // ever excluded.
+        (!check.workflowPath ||
+          check.workflowPath === ADVISORY_CONVERGENCE_WORKFLOW_FILE_PATH),
+    );
+    for (const latestSelfConvergenceCheck of selfConvergenceProducerCandidates) {
+      const autoWaiverRunVerified = options.autoWaiverRunVerified ?? {};
+      // kurone-kito/idd-skill#2911 (CodeRabbit + Copilot review, PR #2915,
+      // Major): `autoWaiverRunVerified` is keyed by `runId` alone. Without
+      // also requiring `checkSelector === staleSelfWaiverCheckSelector`
+      // here, a DIFFERENT-selector marker (this function's own
+      // `autoWaiverEvidence` is never filtered to one selector -- see its
+      // own call site above) that happens to reuse an already-verified
+      // `idd-advisory-convergence` run-id would be accepted as if it were
+      // evidence about THIS check, letting an unrelated check's waiver
+      // wrongly set `staleSelfWaiver` (`hasCoveringValidMarker` is already
+      // selector-scoped and cannot compensate for this gap on its own).
+      const isRunVerifiedSelfWaiverMarker = (entry) =>
+        entry.authorLogin === 'github-actions[bot]' &&
+        entry.checkSelector === staleSelfWaiverCheckSelector &&
+        entry.reason === SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON &&
+        entry.runId !== '' &&
+        autoWaiverRunVerified[entry.runId] === true;
+      // A missing/unparseable `completedAt` on the SELECTED instance
+      // fails closed (treated as stale) here, same as the pre-#2911
+      // attempt: a real rerun always posts a parseable `completedAt`, so
+      // this only ever costs one extra, avoidable rerun on malformed
+      // evidence, never a false "not stale".
+      const passingCompletedAtMs = parseCompletedAt(
+        latestSelfConvergenceCheck.completedAt,
+      );
+      // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P1): a
+      // long-running check job observes state (fetches comments/waiver
+      // evidence) starting near its OWN `startedAt`, not its later
+      // `completedAt` -- a claim handoff that lands strictly between
+      // those two moments means the run still evaluated the OLD claim's
+      // waiver even though its `completedAt` now reads after the
+      // handoff. Used only by the wrongClaim claim-installation
+      // comparison below (never the createdAt/expiresAt window checks,
+      // which are about the marker's own lifecycle relative to when the
+      // check's result was finalized, a different question). Falls back
+      // to `passingCompletedAtMs` when `startedAt` is missing/unparseable
+      // (legacy data shape) rather than weakening the comparison.
+      const passingStartedAtMs =
+        parseCompletedAt(latestSelfConvergenceCheck.startedAt) ??
+        passingCompletedAtMs;
+      // kurone-kito/idd-skill#2911 (acceptance criterion 2, self-critique
+      // against round 13's own commit message -- `git show 863c5249`
+      // promised "correlation to the passing check's own completedAt OR
+      // to a newer valid marker" but its diff only ever implemented the
+      // first half): a candidate `expired`/`wrongClaim` marker proves
+      // nothing when a DIFFERENT, currently-valid, run-verified
+      // self-referential marker's own `[createdAt, expiresAt]` window
+      // already covers the moment the check last completed -- that is
+      // exactly "a fresh rerun under a new valid marker...has already
+      // superseded a stale marker." This is a time-window correlation
+      // over evidence this SAME call site's own `autoWaiverEvidence`
+      // already computed, not a use of `valid` to satisfy or relax the
+      // OVERALL gate (that direction stays exclusively `autoWaiverValid`'s,
+      // per `allowSelfReferentialBootstrapAuto`'s own ADD-only contract) --
+      // it only ever prevents THIS blocker from mis-firing on a pass that
+      // a fresh marker already, genuinely covers; it can never clear a
+      // blocker any OTHER evidence in this file raised.
+      //
+      // kurone-kito/idd-skill#2911 (design model, stated once here so a
+      // future review pass reads it instead of re-deriving it): the
+      // underlying question for ALL THREE finders below is interval
+      // overlap -- could this marker's own validity window,
+      // `[createdAt, expiresAt]`, have overlapped the run's observation
+      // window, `[startedAt, completedAt]`? That is
+      // `createdAt <= completedAt && expiresAt >= startedAt`. The LOWER
+      // bound stays anchored on `completedAt` (not `startedAt`)
+      // deliberately: the marker is posted BY the run itself, so its
+      // `createdAt` falls somewhere mid-run, between the run's own
+      // `startedAt` and `completedAt` -- anchoring the lower bound on
+      // `startedAt` instead would make a run's own marker unable to
+      // cover its own pass, breaking acceptance criterion 2 outright.
+      // The UPPER bound anchors on `startedAt` (via `passingStartedAtMs`,
+      // falling back to `passingCompletedAtMs` when unparseable): the run
+      // reads waiver evidence near its own start, so a marker that was
+      // still valid then, but expires before the run's slower
+      // `completedAt`, must not be misread as "expired before this pass"
+      // (Codex review, PR #2915, round 7, P2) -- the accepted residual is
+      // that a marker which expired early in the run, strictly before the
+      // run's own evidence-fetch instant (which this code cannot observe
+      // directly), still gets flagged and costs one avoidable rerun,
+      // never a false "not stale": the alternative of anchoring on
+      // `completedAt` instead risks the false negative Codex identified,
+      // which is the worse failure for a security-relevant blocker.
+      const hasCoveringValidMarker =
+        passingCompletedAtMs !== null &&
+        autoWaiverEvidence.valid.some((entry) => {
+          if (
+            entry.authorLogin !== 'github-actions[bot]' ||
+            entry.reason !== SELF_REFERENTIAL_BOOTSTRAP_AUTO_REASON ||
+            entry.checkSelector !== staleSelfWaiverCheckSelector ||
+            entry.runId === '' ||
+            autoWaiverRunVerified[entry.runId] !== true
+          ) {
+            return false;
+          }
+          const createdAtMs = Date.parse(entry.createdAt);
+          const expiresAtMs = Date.parse(entry.expiresAt);
+          return (
+            !Number.isNaN(createdAtMs) &&
+            !Number.isNaN(expiresAtMs) &&
+            createdAtMs <= passingCompletedAtMs &&
+            passingCompletedAtMs <= expiresAtMs
+          );
+        });
+      // kurone-kito/idd-skill#2911 (Copilot review, PR #2915): checking
+      // only `expiresAt >= ...` (the upper bound) is not enough on its
+      // own -- a marker CREATED after the check already completed could
+      // not possibly have justified that earlier pass no matter how far
+      // its `expiresAt` reaches, so the LOWER bound
+      // (`createdAt <= passingCompletedAtMs`) must also hold before an
+      // entry counts as having plausibly covered the pass. An unparseable
+      // boundary on either side still counts (stale-leaning, matching this
+      // blocker's established fail-toward-flagging asymmetry) -- only a
+      // POSITIVE, parseable `createdAt` strictly after the pass excludes
+      // an entry.
+      //
+      // kurone-kito/idd-skill#2911 (Codex review, PR #2915, round 7, P2):
+      // the UPPER bound anchors on `passingStartedAtMs` (falling back to
+      // `passingCompletedAtMs`), not `passingCompletedAtMs` directly --
+      // see the interval-overlap model documented above
+      // `hasCoveringValidMarker`. A marker that was still valid when the
+      // run observed it near its own start, but expires before the run's
+      // slower `completedAt`, must not be misread as having expired
+      // before the pass it actually covered.
+      const staleExpiredEntry = hasCoveringValidMarker
+        ? undefined
+        : autoWaiverEvidence.expired.find((entry) => {
+            if (!isRunVerifiedSelfWaiverMarker(entry)) return false;
+            if (passingCompletedAtMs === null) return true;
+            const entryExpiresAtMs = Date.parse(entry.expiresAt);
+            const entryCreatedAtMs = Date.parse(entry.createdAt);
+            const runObservationBoundMs =
+              passingStartedAtMs ?? passingCompletedAtMs;
+            return (
+              (Number.isNaN(entryExpiresAtMs) ||
+                entryExpiresAtMs >= runObservationBoundMs) &&
+              (Number.isNaN(entryCreatedAtMs) ||
+                entryCreatedAtMs <= passingCompletedAtMs)
+            );
+          });
+      // kurone-kito/idd-skill#2911 (Copilot review, PR #2915): the
+      // identical lower-bound reasoning as `staleExpiredEntry` above --
+      // a `wrongClaim` marker created AFTER the check already completed
+      // could not have justified that pass either, regardless of the
+      // claim-installation comparison below. Same stale-leaning
+      // treatment of an unparseable `createdAt`.
+      //
+      // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P2): ALSO
+      // requires the upper bound, mirroring `staleExpiredEntry`'s own
+      // two-sided window check -- without it, a marker that had ALREADY
+      // expired before the check even completed (a real scenario here
+      // specifically: this function's own `wrongClaim` classification
+      // runs BEFORE the expiry check, so a marker can be both
+      // wrong-claim AND already-expired yet only ever reach this bucket,
+      // never `expired`) gets treated as if it could have justified a
+      // LATER, genuinely unrelated pass, purely because the claim
+      // identity also happened to change again even later -- an
+      // unnecessary blocker with no real evidence behind it.
+      //
+      // kurone-kito/idd-skill#2911 (Codex review, PR #2915, round 7, P2):
+      // the upper-bound comparison anchors on `passingStartedAtMs`
+      // (falling back to `passingCompletedAtMs`), the same
+      // run-observation-bound reasoning as `staleExpiredEntry` above --
+      // see the interval-overlap model documented above
+      // `hasCoveringValidMarker`.
+      const staleWrongClaimEntry =
+        staleExpiredEntry || hasCoveringValidMarker
+          ? undefined
+          : autoWaiverEvidence.wrongClaim.find((entry) => {
+              if (!isRunVerifiedSelfWaiverMarker(entry)) return false;
+              if (passingCompletedAtMs === null) return true;
+              const entryCreatedAtMs = Date.parse(entry.createdAt);
+              const entryExpiresAtMs = Date.parse(entry.expiresAt);
+              const runObservationBoundMs =
+                passingStartedAtMs ?? passingCompletedAtMs;
+              if (
+                !Number.isNaN(entryCreatedAtMs) &&
+                entryCreatedAtMs > passingCompletedAtMs
+              ) {
+                return false;
+              }
+              if (
+                !Number.isNaN(entryExpiresAtMs) &&
+                entryExpiresAtMs < runObservationBoundMs
+              ) {
+                return false;
+              }
+              if (!claimIdentityInstalledAt) return true;
+              const installedAtMs = Date.parse(claimIdentityInstalledAt);
+              // kurone-kito/idd-skill#2911 (Codex review, PR #2915, P1):
+              // anchors on `passingStartedAtMs`, not `passingCompletedAtMs`
+              // -- see that variable's own doc comment. A claim handoff
+              // landing strictly between the run's start and its
+              // completion still means the run's own evidence-fetch
+              // observed the OLD claim, so this must flag stale even
+              // though the check's `completedAt` now reads after the
+              // handoff.
+              //
+              // kurone-kito/idd-skill#2911 (Codex review, PR #2915,
+              // round 7, P1): uses `<=`, not `<` -- when the run's own
+              // observation bound and the claim-installation instant
+              // serialize to the EXACT same timestamp, there is no
+              // positive evidence the run's evidence-fetch actually
+              // happened after the handoff (a run can begin and read the
+              // old claim immediately before a handoff inside the same
+              // timestamp interval), so a tie must be treated as stale,
+              // not fresh.
+              return (
+                Number.isNaN(installedAtMs) ||
+                runObservationBoundMs <= installedAtMs
+              );
+            });
+      if (staleExpiredEntry) {
+        staleSelfWaiver = {
+          stale: true,
+          checkSelector: staleSelfWaiverCheckSelector,
+          reason: 'expired',
+          expiresAt: staleExpiredEntry.expiresAt,
+          waiverClaimId: '',
+        };
+        break;
+      } else if (staleWrongClaimEntry) {
+        staleSelfWaiver = {
+          stale: true,
+          checkSelector: staleSelfWaiverCheckSelector,
+          reason: 'wrong-claim',
+          expiresAt: '',
+          waiverClaimId: staleWrongClaimEntry.waiverClaimId,
+        };
+        break;
+      }
+    }
+  }
+  // #1570: reuse the SAME raw waiver evidence above (already validated for
   // selector/HEAD/claim/authority/expiry) to decide whether the caller-
   // supplied terminal-unavailability verdict is also validly waived, filtered
   // to the `idd-advisory-convergence` selector -- the identical selector
   // advisory-convergence.mts's own terminal-waiver path consumes, so a single
   // maintainer-posted waiver marker satisfies whichever gate (the CI
   // required-check, or this direct F2/F3 evidence collector) is currently
-  // asking.
-  const copilotUnavailable = options.copilotUnavailable === true;
+  // asking. Deliberately reads the RAW `waiverEvidence`, not
+  // `ciWaiverEvidence`: this blocker is itself gated on
+  // `copilotUnavailable === true` (the terminal precondition already proven),
+  // so the deadline-vs-terminal precondition split above would be redundant
+  // here.
   const copilotUnavailableWaived =
     copilotUnavailable &&
-    waiverEvidence.valid.some(
+    (waiverEvidence.valid.some(
       (entry) =>
         entry.checkSelector === DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
-    );
+    ) ||
+      // #2353: a repository-scoped provider-outage declaration also clears
+      // this dedicated blocker, same as a direct maintainer waiver.
+      advisoryConvergenceOutageRelieved);
   const dispositionEvidence = options.includeDispositionEvidence
     ? summarizeDispositionEvidenceForGate(
         { comments, threads },
@@ -4786,6 +7751,7 @@ export function buildPreMergeReadinessSummary(
       comparisonRoute: reviewCurrency.route,
       comparisonReason: reviewCurrency.reason,
     },
+    secondaryQuietWindow,
     threads: {
       unresolvedCount: threads.filter((thread) => !thread.isResolved).length,
       actionableCount: threadSummary.actionableCount,
@@ -4821,15 +7787,45 @@ export function buildPreMergeReadinessSummary(
     ci,
     claim,
     waiverEvidence,
+    // #2021: the deadline/terminal precondition evaluated above, reported
+    // unconditionally as its own field (never folded into `waiverEvidence`,
+    // whose shape is the schema-locked `ExternalCheckWaiverEvidence`) so a
+    // blocker detail or a resuming agent can cite the remaining
+    // time-to-deadline without re-deriving it.
+    advisoryConvergenceWaiverPrecondition,
+    // kurone-kito/idd-skill#2911: reported unconditionally (never omitted),
+    // matching this file's own convention for evidence fields
+    // `computePreMergeReadinessBlockers` consumes -- see `staleSelfWaiver`'s
+    // own computation above for the full contract. Deliberately outside
+    // `claim` (not `claim.activeClaimInstalledAt`): `ClaimValidationSummary`'s
+    // shape is embedded in schemas beyond this one (e.g.
+    // `discover-roadmap-union.schema.json`), so this stays a top-level,
+    // pre-merge-readiness-only field instead.
+    claimIdentityInstalledAt,
+    staleSelfWaiver,
     branchCurrency,
   };
   if (dispositionEvidence) {
     summary.dispositionEvidence = dispositionEvidence;
   }
+  // #2323: informational only -- never a blocker input, and omitted
+  // entirely (not even `null`) when the caller does not pass it, mirroring
+  // `dispositionEvidence` above so every pre-#2323 fixture/caller output is
+  // byte-for-byte unchanged. See the option's doc comment above for why
+  // this can never change `ready`/`blockers`.
+  if (options.localValidationEvidenceSummary) {
+    summary.localValidationEvidence = options.localValidationEvidenceSummary;
+  }
+  // #2272: omitted entirely (not even `null`) when the caller does not
+  // pass it, so `computePreMergeReadinessBlockers` below can distinguish
+  // "no gate" from "gate present" -- see the option's doc comment above.
+  if (options.developmentBranchTarget) {
+    summary.developmentBranchTarget = options.developmentBranchTarget;
+  }
   // Top-level rollup so a consumer reads one `ready` boolean + `blockers[]`
   // instead of hand-ANDing ~8 nested gates (a dropped clause would fail open).
-  // Strict by construction (see `computePreMergeReadinessBlockers`): the F2
-  // checklist applies the ack-only override on top of this, not inside it.
+  // Includes the F2 ack-only overrides (#2125) so a fully-autonomous F3
+  // session does not livelock on courtesy advisory-bot acks.
   const blockers = computePreMergeReadinessBlockers(summary);
   summary.ready = blockers.length === 0;
   summary.blockers = blockers;
@@ -4963,9 +7959,14 @@ function isStrictlyBeforeIso(left, right) {
   }
   return leftTime < rightTime;
 }
-export function resolveActiveClaim(events, isTrustedAuthor = () => true) {
-  const options = normalizeClaimResolutionOptions(isTrustedAuthor);
-  const orderedEvents = events
+/**
+ * Chronological ordering `resolveActiveClaim` and
+ * `resolveActiveClaimWithForcedHandoffTrace` both reduce over: by GitHub
+ * `created_at` second, tie-broken by claim-id (same-second contenders),
+ * then by sub-second time, then by original array index.
+ */
+function sortClaimEvents(events) {
+  return events
     .map((event, index) => {
       const claim = parseClaimComment(event.body ?? '', event.createdAt ?? '');
       return {
@@ -5009,11 +8010,68 @@ export function resolveActiveClaim(events, isTrustedAuthor = () => true) {
       return left.index - right.index;
     })
     .map(({ event }) => event);
+}
+/**
+ * Same reduction as {@link resolveActiveClaim}, but also tracks which
+ * specific forced-handoff marker (if any) produced the final active
+ * claim's identity. `resolveActiveClaim`'s state machine has no memory of
+ * *why* the active claim changed, so a caller that needs forced-handoff
+ * provenance (`resume-claim-routing.mts`'s `evidence.forced_handoff`,
+ * kurone-kito/idd-skill#2178) cannot reconstruct it safely by
+ * independently re-scanning events for a `new*`-field match against the
+ * final active claim: a stale or never-applied forced-handoff marker
+ * whose `new*` fields merely coincide with the real active claim's
+ * identity (for example a duplicate/retried handoff attempt posted after
+ * a first one already succeeded) would misattribute the wrong `old*`
+ * fields as evidence. Replaying the identical single-pass reduction here
+ * -- the one place that already knows the true before/after state at each
+ * step -- is what answers "which marker actually caused this transition"
+ * correctly.
+ */
+export function resolveActiveClaimWithForcedHandoffTrace(
+  events,
+  isTrustedAuthor = () => true,
+) {
+  const options = normalizeClaimResolutionOptions(isTrustedAuthor);
+  const orderedEvents = sortClaimEvents(events);
   let active = null;
+  let appliedForcedHandoff = null;
+  let activeSince = '';
   for (const event of orderedEvents) {
-    active = applyClaimEvent(active, event, options);
+    const previous = active;
+    const next = applyClaimEvent(previous, event, options);
+    const identityChanged =
+      (next?.claimId ?? null) !== (previous?.claimId ?? null) ||
+      (next?.agentId ?? null) !== (previous?.agentId ?? null);
+    if (identityChanged) {
+      const candidate = previous
+        ? parseForcedHandoffComment(event.body ?? '', event.createdAt ?? '')
+        : null;
+      appliedForcedHandoff =
+        candidate &&
+        next &&
+        previous &&
+        candidate.oldAgentId === previous.agentId &&
+        candidate.oldClaimId === previous.claimId &&
+        candidate.branch === previous.branch &&
+        candidate.newAgentId === next.agentId &&
+        candidate.newClaimId === next.claimId
+          ? candidate
+          : null;
+      // kurone-kito/idd-skill#2911: record the transition's own event
+      // timestamp -- see `ActiveClaimResolution.activeSince`'s doc comment
+      // for why this must be captured here (at the identity-changing step
+      // itself) rather than read back from `next.createdAt`, which a LATER
+      // same-claim heartbeat mutates in place.
+      activeSince = String(event.createdAt ?? '');
+    }
+    active = next;
   }
-  return active;
+  return { activeClaim: active, appliedForcedHandoff, activeSince };
+}
+export function resolveActiveClaim(events, isTrustedAuthor = () => true) {
+  return resolveActiveClaimWithForcedHandoffTrace(events, isTrustedAuthor)
+    .activeClaim;
 }
 export function applyClaimEvent(activeClaim, event, options = {}) {
   const normalizedOptions = normalizeClaimResolutionOptions(options);
@@ -5362,7 +8420,7 @@ function maxIsoTimestamp(values) {
   }
   return latest;
 }
-function summarizeRequiredCheckMetadata(parameters) {
+export function summarizeRequiredCheckMetadata(parameters) {
   const names = new Set();
   // #1689: the SPECIFIC subset of `names` whose rule entry is itself
   // source-pinned -- distinct from the aggregate `sourcePinned` flag below,

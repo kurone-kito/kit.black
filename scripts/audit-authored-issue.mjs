@@ -10,13 +10,18 @@
 // marker's exactly-one/coherent-value rule, its cross-field agreement with
 // the configured blocked-by-human label, markerPrefix consistency across
 // every authoring marker, the declared shape's required section headings,
-// the roadmap-id/blocked-by dependency-marker rules, visible/hidden line
-// agreement for the suitability and effort footers, and an advisory
-// warning-severity check that flags an issue/PR reference used near
-// coordination language (e.g. "before", "once", "requires") with no
-// corresponding Blocked-by/Depends-on/task-list dependency encoding. The
-// advisory check never fails the report or changes the exit code — see
-// checkProseOnlyDependency.
+// the roadmap shape's `## Tracks` checkbox lines actually resolving to a
+// child issue reference, the roadmap-id/blocked-by dependency-marker
+// rules, visible/hidden line agreement for the suitability and effort
+// footers, an advisory warning-severity check that flags an issue/PR
+// reference used near coordination language (e.g. "before", "once",
+// "requires") with no corresponding Blocked-by/Depends-on/task-list
+// dependency encoding (see checkProseOnlyDependency), and (given
+// pre-fetched comment data) a mechanical count of eligible,
+// not-yet-minimized superseded authoring-owner / authoring-publication-intent
+// marker comments (see checkAuthoringMarkerMinimizationBacklog, #2896).
+// Every advisory/count-only check always reports `result: 'pass'` and
+// never changes the exit code.
 //
 // All marker value parsing is delegated to the existing
 // autopilot-suitability.mts / effort.mts / marker-regex.mts /
@@ -32,23 +37,63 @@ import {
   extractBlockedByRoadmapMarkers,
   extractDependencyIssueNumbers,
 } from './discover-readiness-check.mjs';
-import { extractRoadmapMarkerId } from './discover-roadmap-graph.mjs';
+import {
+  extractRoadmapMarkerId,
+  extractTaskListReferences,
+  isTaskListBlockBoundary,
+  isTaskListCheckboxLine,
+} from './discover-roadmap-graph.mjs';
 import { parseEffortMarker } from './effort.mjs';
-import { loadIddConfig, loadPolicyConfig } from './idd-config.mjs';
+import {
+  isUpstreamEscalationEnabled,
+  loadIddConfig,
+  loadPolicyConfig,
+} from './idd-config.mjs';
 import { stripMarkdownCodeRegions } from './markdown-code.mjs';
+import {
+  classifyAuthoringMarkerFamily,
+  parseAuthoringOwnerComment,
+  parseAuthoringPublicationComment,
+  parseAuthoringPublicationIntentComment,
+} from './marker-helpers.mjs';
 import { createMarkerRegex, escapeRegex } from './marker-regex.mjs';
 import { normalizePolicyConfig, POLICY_DEFAULTS } from './policy-helpers.mjs';
+import { resolveTrustedMarkerActors } from './protocol-helpers.mjs';
 
 const DEFAULT_MARKER_PREFIX = 'idd-skill';
-// The four authoring-marker suffixes defined in the contract. Operational
-// markers (claimed-by, review-watermark, ...) never take this
-// `{prefix}-{suffix}` shape, so they cannot collide with this scan.
+// Shared "skip" detail for every ready-shape-only check when
+// `--expect-bucket` is set (#2648 review, Codex): a needs-decision/
+// blocked-by-human body uses its own distinct heading/footer shape
+// (see skills/issue-authoring/references/draft-patterns.md's
+// blocked-by-human example), not the ready orphan/roadmap/child shapes
+// these checks validate, so running them against a bucket audit would
+// fail a correctly-formed bucket body instead of reading as
+// not-applicable.
+const NOT_APPLICABLE_BUCKET_AUDIT_DETAIL =
+  'not applicable: auditing a needs-decision/blocked-by-human bucket publish (--expect-bucket), not a ready-shape body';
+// The authoring-marker suffixes this file checks for prefix consistency.
+// Most are defined in the contract (skills/issue-authoring/references/
+// contract.md); `upstream-candidate` is defined by roadmap #2700 and
+// documented there pending #2702. Operational markers (claimed-by,
+// review-watermark, ...) never take this `{prefix}-{suffix}` shape, so
+// they cannot collide with this scan.
 const AUTHORING_MARKER_SUFFIXES = [
   'roadmap-id',
   'blocked-by',
   'autopilot-suitability',
   'effort',
+  'authoring-bucket',
+  'upstream-candidate',
 ];
+/**
+ * The fixed GitHub label paired with the
+ * `<!-- {prefix}-upstream-candidate: true -->` marker (roadmap #2700's
+ * "Naming" section). Unlike `blockedByHumanLabelName` /
+ * `needsDecisionLabelName`, this name is fixed by the roadmap itself, not
+ * policy-configurable -- every adopter that opts in via
+ * `upstreamEscalation.enabled` uses the same literal label.
+ */
+const UPSTREAM_CANDIDATE_LABEL_NAME = 'status:upstream-candidate';
 const SHAPE_HEADING_REQUIREMENTS = {
   orphan: [
     { anyOf: ['Background', 'Goal'] },
@@ -84,6 +129,53 @@ const PROSE_DEPENDENCY_KEYWORDS = [
   'requires',
   'lands first',
 ];
+// Matches a `Refs #NNN (non-blocking)` reference (and multi-target variants
+// like `Refs #201, #202 (non-blocking)`) anywhere on a line — the visible
+// encoding discover-roadmap-graph.mts's `extractKeywordReferences`
+// recognizes as `relationship: 'non-blocking-reference'` (#2236): a
+// deliberately informational reference that must never become an A1.5
+// closure-audit blocker. Recognized here too so this check's `encoded` set
+// treats it as already-documented, the same as the three
+// Blocked-by/Depends-on/task-list forms, instead of flagging it as an
+// undocumented prose-only dependency. The captured group (everything
+// between the Refs/Ref keyword and the `(non-blocking)` annotation) is
+// parsed for its `#N` reference list by `consumeNonBlockingRefList` below,
+// mirroring the separator-tolerant list parsing
+// discover-readiness-check.mts's own `consumeDependencyRefList` already
+// uses for the same comma/`and`/whitespace-separated shape (duplicated
+// rather than imported: this repository's existing precedent for the same
+// textual encoding recognized by two independent modules for two different
+// purposes, see that function's own doc comment).
+const NON_BLOCKING_REFERENCE_LINE_PATTERN =
+  /\bRefs?\b\s*:?\s*([^.\n(]*?)\s*\(non-blocking\)/gi;
+function consumeNonBlockingRefList(segment) {
+  const numbers = [];
+  let remaining = segment;
+  while (remaining) {
+    const refMatch = remaining.match(/^#(\d+)\b/);
+    if (!refMatch) {
+      break;
+    }
+    numbers.push(Number.parseInt(refMatch[1], 10));
+    remaining = remaining.slice(refMatch[0].length);
+    const separatorMatch = remaining.match(
+      /^(?:\s*,\s*(?:and\s+)?|\s+and\s+|\s+)/i,
+    );
+    if (!separatorMatch) {
+      break;
+    }
+    remaining = remaining.slice(separatorMatch[0].length);
+  }
+  return numbers;
+}
+function extractNonBlockingReferenceIssueNumbers(text) {
+  const stripped = stripMarkdownCodeRegions(text);
+  const numbers = [];
+  for (const match of stripped.matchAll(NON_BLOCKING_REFERENCE_LINE_PATTERN)) {
+    numbers.push(...consumeNonBlockingRefList(match[1]));
+  }
+  return [...new Set(numbers)];
+}
 // Matches a Markdown link whose target is a full GitHub issue/PR URL (e.g.
 // `[PR #1391](https://github.com/owner/repo/pull/1391)`), a bare `#123`
 // issue/PR reference, a bare full GitHub issue/PR URL, or a local
@@ -217,9 +309,54 @@ const AUDIT_AUTHORED_ISSUE_FLAG_SPEC = {
   '--marker-prefix': { type: 'string' },
   '--config': { type: 'string' },
   '--current-repo': { type: 'string' },
+  '--issue': { type: 'string' },
   '--label': { type: 'string', multiple: true },
+  '--expect-bucket': { type: 'string' },
+  '--comments-file': { type: 'string' },
+  '--journal-comments-file': { type: 'string' },
+  '--new-issue': { type: 'boolean', default: false },
+  '--trusted-marker-logins': { type: 'string' },
   '--format': { type: 'string', default: 'json' },
 };
+// Declared here (alongside the flag spec above), not next to
+// checkAuthoringOwnerMarkerTrail further down: the import.meta.main trigger
+// immediately below calls main() -> auditAuthoredIssue() ->
+// checkAuthoringOwnerMarkerTrail() synchronously at module-evaluation time,
+// and a `const` declared after that point is still in the temporal dead
+// zone when the trigger fires (same TDZ hazard as AUDIT_AUTHORED_ISSUE_FLAG_SPEC
+// itself and the LIST_ITEM_MARKER_PATTERN family further down this file).
+const AUTHORING_OWNER_QUALIFYING_MODES = new Set([
+  'acquire',
+  'bootstrap',
+  'resume',
+]);
+const AUTHORING_PUBLICATION_INTENT_MEMBER_OR_LATER = new Set([
+  'member',
+  'cleanup',
+  'abandoned',
+]);
+// A real issue reference has the shape `owner/repo#number` -- the same
+// shape the issueAuthoring.journalIssue schema pattern requires, kept
+// in sync with it deliberately (word/dot/hyphen segments either side
+// of exactly one `/`, a `#`, then a non-zero-leading number; #2681
+// review, Copilot). An opaque bootstrap placeholder (e.g.
+// `target-<hex>`, `anchor-<hex>`) never matches this shape, so it
+// distinguishes "this publication marker named an already-known real
+// anchor" from "this publication marker was minted before any anchor
+// existed" without depending on the two opaque IDs being textually
+// identical (#2681: real authoring sessions mint distinct opaque
+// `target`/`anchor` values even for a genuinely self-anchored issue).
+// Same TDZ hazard as the two sets above -- declared here, ahead of the
+// import.meta.main trigger, not next to
+// ownerMarkerAnchorMatchesPublication()/checkAuthoringOwnerMarkerTrail()
+// further down.
+// Exported so tests/schema-type-reconciliation.test.mts can assert this
+// stays textually in sync with schemas/policy.schema.json's
+// issueAuthoring.journalIssue pattern (#2681 review, CodeRabbit) --
+// deliberately using `[0-9]` rather than `\d` so the only normalization
+// needed against the JSON schema string is the regex literal's escaped
+// `/`.
+export const REAL_ISSUE_REFERENCE_PATTERN = /^[\w.-]+\/[\w.-]+#[1-9][0-9]*$/;
 if (import.meta.main) {
   main();
 }
@@ -227,10 +364,13 @@ if (import.meta.main) {
  * Audit a drafted issue body against the issue-authoring contract's
  * structural expectations for the declared shape. Every check runs
  * independently (no short-circuit), so one report surfaces every problem
- * at once instead of stopping at the first failure. One check
- * (`prose-dependency`) is advisory-only: it always reports `result:
- * 'pass'` and only ever adds a `severity: 'warning'` marker plus detail,
- * so it never affects `passed` or the caller's exit code.
+ * at once instead of stopping at the first failure. Three checks
+ * (`prose-dependency`, `roadmap-tracks-parse`, and
+ * `authoring-marker-minimization-backlog`) are advisory-only: each
+ * always reports `result: 'pass'` and only ever adds a `severity:
+ * 'warning'` marker plus detail on the specific condition it flags, so
+ * none of the three ever affects `passed` or the caller's exit code. See
+ * {@link AuditFinding.severity}.
  */
 export function auditAuthoredIssue(body, options) {
   const rawText = typeof body === 'string' ? body : String(body ?? '');
@@ -249,6 +389,11 @@ export function auditAuthoredIssue(body, options) {
     options.blockedByHumanLabelName.length > 0
       ? options.blockedByHumanLabelName
       : POLICY_DEFAULTS.labels.blockedByHumanLabelName;
+  const needsDecisionLabelName =
+    typeof options.needsDecisionLabelName === 'string' &&
+    options.needsDecisionLabelName.length > 0
+      ? options.needsDecisionLabelName
+      : POLICY_DEFAULTS.labels.needsDecisionLabelName;
   const labels = (options.labels ?? []).map((label) =>
     String(label).trim().toLowerCase(),
   );
@@ -258,19 +403,49 @@ export function auditAuthoredIssue(body, options) {
     markerPrefix,
     'autopilot-suitability',
   );
+  const authoringBucket = parseAuthoringBucketMarker(text, markerPrefix);
+  const isBucketAudit = options.expectedAuthoringBucket !== undefined;
   const findings = [
-    checkSuitabilityMarker(suitabilityCount, suitability),
+    checkSuitabilityMarker(suitabilityCount, suitability, isBucketAudit),
     checkSuitabilityBlockedByHuman(
       suitability,
+      authoringBucket,
       labels,
       blockedByHumanLabelName,
     ),
-    checkMarkerPrefixConsistency(text, markerPrefix),
-    checkRequiredHeadings(text, shape),
+    checkAuthoringBucketNeedsDecision(
+      authoringBucket,
+      labels,
+      needsDecisionLabelName,
+    ),
+    checkAuthoringBucketMarkerRequired(
+      authoringBucket,
+      options.expectedAuthoringBucket,
+    ),
+    checkMarkerPrefixConsistency(
+      text,
+      markerPrefix,
+      options.upstreamEscalationEnabled === true,
+    ),
+    checkRequiredHeadings(text, shape, isBucketAudit),
+    checkRoadmapTracksParse(
+      text,
+      shape,
+      isBucketAudit,
+      normalizeCurrentRepo(options.currentRepo),
+    ),
     checkDependencyMarkerRule(text, markerPrefix, shape),
     checkSuitabilityVisibleLineAgreement(text, markerPrefix, suitability),
     checkEffortVisibleLineAgreement(text, markerPrefix),
     checkProseOnlyDependency(text, normalizeCurrentRepo(options.currentRepo)),
+    checkAuthoringOwnerMarkerTrail(text, markerPrefix, labels, options),
+    checkAuthoringMarkerMinimizationBacklog(markerPrefix, options),
+    checkUpstreamCandidateMarkerLabel(
+      text,
+      markerPrefix,
+      labels,
+      options.upstreamEscalationEnabled === true,
+    ),
   ];
   return {
     shape,
@@ -279,9 +454,12 @@ export function auditAuthoredIssue(body, options) {
     findings,
   };
 }
-function checkSuitabilityMarker(count, suitability) {
+function checkSuitabilityMarker(count, suitability, isBucketAudit) {
   const id = 'suitability-marker';
   const name = 'Exactly one coherent autopilot-suitability marker (1-5)';
+  if (isBucketAudit) {
+    return pass(id, name, NOT_APPLICABLE_BUCKET_AUDIT_DETAIL);
+  }
   if (count === 0) {
     return fail(id, name, 'missing autopilot-suitability marker');
   }
@@ -301,27 +479,303 @@ function checkSuitabilityMarker(count, suitability) {
   }
   return pass(id, name, `suitability score is ${suitability.value}`);
 }
+/**
+ * Suitability=1 implies `blockedByHumanLabelName` -- unless an
+ * `authoring-bucket` marker is present, in which case that marker's value
+ * decides applicability instead (#2639): `blocked-by-human` requires the
+ * label regardless of the suitability score; any other coherent value
+ * (currently only `needs-decision`) means this check does not apply, even
+ * at suitability 1. A malformed or absent marker (`value: null`) falls
+ * back to the pre-existing suitability-1-only rule, preserving behavior
+ * for every issue published before this marker existed.
+ */
 function checkSuitabilityBlockedByHuman(
   suitability,
+  authoringBucket,
   labels,
   blockedByHumanLabelName,
 ) {
   const id = 'suitability-blocked-by-human';
-  const name = `Suitability score of 1 carries the ${blockedByHumanLabelName} label`;
-  if (suitability.value !== 1) {
-    return pass(id, name, 'not applicable: suitability score is not 1');
+  const name = `Suitability 1 (or an authoring-bucket: blocked-by-human marker) carries the ${blockedByHumanLabelName} label`;
+  const applies =
+    authoringBucket.value === 'blocked-by-human' ||
+    (authoringBucket.value === null && suitability.value === 1);
+  if (!applies) {
+    return pass(
+      id,
+      name,
+      'not applicable: neither the authoring-bucket marker nor a suitability score of 1 apply',
+    );
   }
   const target = blockedByHumanLabelName.trim().toLowerCase();
   if (labels.includes(target)) {
     return pass(id, name, `${blockedByHumanLabelName} label is present`);
   }
+  const reason =
+    authoringBucket.value === 'blocked-by-human'
+      ? `authoring-bucket marker reads blocked-by-human but the ${blockedByHumanLabelName} label was not provided`
+      : `suitability score is 1 but the ${blockedByHumanLabelName} label was not provided`;
+  return fail(id, name, reason);
+}
+/**
+ * `authoring-bucket: needs-decision` implies `needsDecisionLabelName`
+ * (#2639), mirroring {@link checkSuitabilityBlockedByHuman}'s
+ * `blocked-by-human` handling. Not applicable when the marker is absent,
+ * malformed, or reads `blocked-by-human` instead.
+ */
+function checkAuthoringBucketNeedsDecision(
+  authoringBucket,
+  labels,
+  needsDecisionLabelName,
+) {
+  const id = 'authoring-bucket-needs-decision';
+  const name = `authoring-bucket: needs-decision carries the ${needsDecisionLabelName} label`;
+  if (authoringBucket.value !== 'needs-decision') {
+    return pass(
+      id,
+      name,
+      'not applicable: authoring-bucket marker does not read needs-decision',
+    );
+  }
+  const target = needsDecisionLabelName.trim().toLowerCase();
+  if (labels.includes(target)) {
+    return pass(id, name, `${needsDecisionLabelName} label is present`);
+  }
   return fail(
     id,
     name,
-    `suitability score is 1 but the ${blockedByHumanLabelName} label was not provided`,
+    `authoring-bucket marker reads needs-decision but the ${needsDecisionLabelName} label was not provided`,
   );
 }
-function checkMarkerPrefixConsistency(text, markerPrefix) {
+/**
+ * Requires the `authoring-bucket` marker to actually be present and match
+ * `expectedBucket`, when the caller declares one (#2639 follow-up). The two
+ * checks above only validate the marker/label pair *when a marker already
+ * exists*; without this check, a body that omits the marker entirely -- the
+ * exact gap #2636/#2637 hit -- silently reads as "not applicable" from both,
+ * since a `ready`-shape publish is the only case the Mechanical pre-publish
+ * gate otherwise audits. `expectedBucket` must be supplied by the caller
+ * when (and only when) auditing a body about to be newly published into the
+ * `needs-decision` or `blocked-by-human` bucket; a `ready` publish, or an
+ * already-published legacy body, passes `undefined` and this check no-ops.
+ */
+function checkAuthoringBucketMarkerRequired(authoringBucket, expectedBucket) {
+  const id = 'authoring-bucket-marker-required';
+  const name =
+    'A newly published needs-decision/blocked-by-human body carries the matching authoring-bucket marker';
+  if (expectedBucket === undefined) {
+    return pass(
+      id,
+      name,
+      'not applicable: no expected bucket declared for this audit (ready publish, or a legacy body)',
+    );
+  }
+  if (authoringBucket.value === expectedBucket) {
+    return pass(
+      id,
+      name,
+      `authoring-bucket marker matches the declared ${expectedBucket} bucket`,
+    );
+  }
+  if (!authoringBucket.present) {
+    return fail(
+      id,
+      name,
+      `expected an authoring-bucket: ${expectedBucket} marker for a newly published ${expectedBucket} body, but none was found`,
+    );
+  }
+  if (authoringBucket.malformed) {
+    return fail(
+      id,
+      name,
+      `expected an authoring-bucket: ${expectedBucket} marker, but the marker present is malformed (an unrecognized value, or repeated with disagreeing values)`,
+    );
+  }
+  return fail(
+    id,
+    name,
+    `expected an authoring-bucket: ${expectedBucket} marker, but found authoring-bucket: ${authoringBucket.value} instead`,
+  );
+}
+/**
+ * Mirrors {@link checkSuitabilityBlockedByHuman}'s marker/label
+ * cross-field pattern, but bidirectionally (#2700/#2703): the
+ * `status:upstream-candidate` label and the
+ * `<!-- {prefix}-upstream-candidate: true -->` marker must always agree,
+ * in either direction -- one present without the other is a fail, both
+ * or neither is a pass. This is stricter than the one-directional
+ * suitability-1 check above, which only fails a label omission and never
+ * flags a label applied without the matching condition; this pair has no
+ * pre-existing issues predating it, so there is no backward-compatibility
+ * reason to keep it one-directional.
+ *
+ * Gated on `upstreamEscalationEnabled`: reports "not applicable" when
+ * false (the resolved default), per roadmap #2700's own success
+ * criterion that a repository which has not opted in "sees no behavior
+ * change at all" -- this file's `audit-authored-issue` gate runs
+ * unconditionally on every published body in every adopter repository
+ * (`skills/issue-authoring/references/workflow-boundary.md`), so without
+ * this gate a repository that never enabled the feature could still see
+ * a new publish-blocking failure from an incidental `status:
+ * upstream-candidate` label applied for an unrelated reason (#2721
+ * review, Codex).
+ *
+ * Value-coherent, not presence-only (#2721 review, Copilot and Codex): a
+ * marker occurrence whose value is not exactly `true`, or that appears
+ * more than once (even with agreeing values -- see
+ * {@link parseUpstreamCandidateMarker}), is `malformed` and is treated as
+ * fail-safe *absent* rather than as "present". A malformed marker paired
+ * with the label still fails (with a distinct detail), since the label
+ * asserts upstream candidacy while the marker itself does not carry a
+ * single coherent confirming value.
+ */
+function checkUpstreamCandidateMarkerLabel(
+  text,
+  markerPrefix,
+  labels,
+  upstreamEscalationEnabled,
+) {
+  const id = 'upstream-candidate-marker-label';
+  const name = `${UPSTREAM_CANDIDATE_LABEL_NAME} label and the upstream-candidate marker agree`;
+  if (!upstreamEscalationEnabled) {
+    return pass(
+      id,
+      name,
+      'not applicable: upstreamEscalation.enabled is not set for this repository',
+    );
+  }
+  const marker = parseUpstreamCandidateMarker(text, markerPrefix);
+  const hasLabel = labels.includes(UPSTREAM_CANDIDATE_LABEL_NAME.toLowerCase());
+  if (marker.malformed) {
+    if (hasLabel) {
+      return fail(
+        id,
+        name,
+        `${UPSTREAM_CANDIDATE_LABEL_NAME} label is present but the upstream-candidate marker is malformed (expected exactly one coherent "...: true" occurrence)`,
+      );
+    }
+    return pass(
+      id,
+      name,
+      'neither the label nor a coherent upstream-candidate marker is present (a malformed marker occurrence is fail-safe to absent)',
+    );
+  }
+  const hasMarker = marker.present;
+  if (hasMarker === hasLabel) {
+    return pass(
+      id,
+      name,
+      hasLabel
+        ? `both the ${UPSTREAM_CANDIDATE_LABEL_NAME} label and the upstream-candidate marker are present`
+        : `neither the ${UPSTREAM_CANDIDATE_LABEL_NAME} label nor the upstream-candidate marker is present`,
+    );
+  }
+  return fail(
+    id,
+    name,
+    hasLabel
+      ? `${UPSTREAM_CANDIDATE_LABEL_NAME} label is present but the upstream-candidate marker was not found`
+      : `upstream-candidate marker is present but the ${UPSTREAM_CANDIDATE_LABEL_NAME} label was not provided`,
+  );
+}
+/**
+ * Canonical parser for the authored
+ * `<!-- {prefix}-upstream-candidate: true -->` marker (roadmap #2700).
+ * Unlike {@link parseAuthoringBucketMarker}, which tolerates repeated
+ * occurrences as long as they agree on the same valid value, this marker
+ * requires exactly one occurrence -- a second, even agreeing, `...: true`
+ * comment is itself malformed, mirroring {@link checkSuitabilityMarker}'s
+ * `count > 1` rule rather than the bucket marker's disagreement-only one
+ * (#2721 review, Copilot and Codex both independently flagged the
+ * duplicate-tolerant first draft, whose own `malformed` finding detail
+ * already promised "exactly one coherent ... occurrence"). Any other
+ * token, a value-less occurrence, or a case mismatch (`True`/`TRUE`) is
+ * malformed the same way a non-`true` value always was.
+ */
+function parseUpstreamCandidateMarker(text, markerPrefix) {
+  const rawCount = countMarkerOccurrences(
+    text,
+    markerPrefix,
+    'upstream-candidate',
+  );
+  if (rawCount === 0) {
+    return { present: false, malformed: false };
+  }
+  if (rawCount > 1) {
+    return { present: true, malformed: true };
+  }
+  const regex = new RegExp(
+    `<!--\\s*${escapeRegex(markerPrefix)}-upstream-candidate:\\s*([^\\s>]+)\\s*-->`,
+    'i',
+  );
+  const match = regex.exec(text);
+  return { present: true, malformed: match?.[1] !== 'true' };
+}
+/**
+ * Canonical parser for the authored
+ * `<!-- {prefix}-authoring-bucket: needs-decision|blocked-by-human -->`
+ * marker, mirroring {@link parseAutopilotSuitabilityMarker}'s fail-safe
+ * shape and repeated/disagreeing-value handling. `text` must already be
+ * {@link stripMarkdownCodeRegions}-masked (every caller in this file
+ * passes the shared `text`, not `rawText`), so a marker merely quoted in
+ * prose cannot be mistaken for a real one.
+ *
+ * Uses the same rawCount-vs-coherent-count gap {@link
+ * checkEffortVisibleLineAgreement} closes for the `effort` marker: the
+ * value-capturing regex below requires a non-empty token
+ * (`[^\s>]+`), so a value-less marker like
+ * `<!-- {prefix}-authoring-bucket: -->` would otherwise never match it
+ * at all and read as `present: false` — indistinguishable from no
+ * marker, which would also make {@link checkAuthoringBucketMarkerRequired}
+ * misreport a present-but-invalid marker as "none was found" (#2648
+ * review, Copilot). `countMarkerOccurrences`'s detection-only regex
+ * matches regardless of value, so comparing the two counts recovers the
+ * distinction.
+ */
+export function parseAuthoringBucketMarker(text, markerPrefix) {
+  const rawCount = countMarkerOccurrences(
+    text,
+    markerPrefix,
+    'authoring-bucket',
+  );
+  if (rawCount === 0) {
+    return { present: false, value: null, malformed: false };
+  }
+  const regex = new RegExp(
+    `<!--\\s*${escapeRegex(markerPrefix)}-authoring-bucket:\\s*([^\\s>]+)\\s*-->`,
+    'gi',
+  );
+  let coherentCount = 0;
+  let value = null;
+  let match = regex.exec(text);
+  while (match) {
+    coherentCount += 1;
+    const raw = match[1];
+    const parsed = isAuthoringBucketValue(raw) ? raw : null;
+    // Fail-safe: any invalid token, or a value disagreeing with an
+    // earlier coherent one, yields no bucket.
+    if (parsed === null || (value !== null && parsed !== value)) {
+      return { present: true, value: null, malformed: true };
+    }
+    value = parsed;
+    match = regex.exec(text);
+  }
+  if (coherentCount !== rawCount) {
+    // At least one occurrence matched the raw (any-value) scan but not
+    // the value-capturing one -- a value-less or otherwise malformed-shape
+    // marker.
+    return { present: true, value: null, malformed: true };
+  }
+  return { present: true, value, malformed: false };
+}
+function isAuthoringBucketValue(value) {
+  return value === 'needs-decision' || value === 'blocked-by-human';
+}
+function checkMarkerPrefixConsistency(
+  text,
+  markerPrefix,
+  upstreamEscalationEnabled,
+) {
   const id = 'marker-prefix-consistency';
   const name = 'Every authoring marker uses the resolved target markerPrefix';
   // The captured prefix is compared by string equality below (never
@@ -336,8 +790,22 @@ function checkMarkerPrefixConsistency(text, markerPrefix) {
   // malformed, valueless, wrong-prefix marker (e.g. `<!-- other-roadmap-id
   // -->`) is still evidence of a prefix leak and must not evade this scan
   // just because it is also missing its value.
+  //
+  // `upstream-candidate` is excluded from the scan unless the caller's
+  // resolved `upstreamEscalationEnabled` is true (#2721 review, Codex):
+  // {@link checkUpstreamCandidateMarkerLabel} is itself gated the same
+  // way, so a repository that never opted in treats this marker as dead
+  // content -- scanning a dead marker's prefix would fire a new,
+  // publish-blocking finding for a repository roadmap #2700 promises
+  // "sees no behavior change at all", the same risk the pairing check's
+  // own gate exists to close.
+  const suffixes = upstreamEscalationEnabled
+    ? AUTHORING_MARKER_SUFFIXES
+    : AUTHORING_MARKER_SUFFIXES.filter(
+        (suffix) => suffix !== 'upstream-candidate',
+      );
   const pattern = new RegExp(
-    `<!--\\s*([^\\s>:]+)-(${AUTHORING_MARKER_SUFFIXES.join('|')})\\b[\\s\\S]*?-->`,
+    `<!--\\s*([^\\s>:]+)-(${suffixes.join('|')})\\b[\\s\\S]*?-->`,
     'gi',
   );
   const mismatches = [];
@@ -356,9 +824,12 @@ function checkMarkerPrefixConsistency(text, markerPrefix) {
   }
   return pass(id, name, 'all authoring markers use the resolved markerPrefix');
 }
-function checkRequiredHeadings(text, shape) {
+function checkRequiredHeadings(text, shape, isBucketAudit) {
   const id = 'required-headings';
   const name = `Required section headings present for the ${shape} shape`;
+  if (isBucketAudit) {
+    return pass(id, name, NOT_APPLICABLE_BUCKET_AUDIT_DETAIL);
+  }
   const headings = extractHeadings(text);
   const missing = SHAPE_HEADING_REQUIREMENTS[shape].filter(
     (requirement) =>
@@ -374,6 +845,144 @@ function checkRequiredHeadings(text, shape) {
     );
   }
   return pass(id, name, 'all required headings are present');
+}
+/**
+ * Slices the `## Tracks` section's own lines out of `text` (already
+ * code-masked by the caller): from the line after the `## Tracks` heading
+ * up to (but excluding) the next `##` heading, or the end of the text
+ * when none follows. Empty when no `## Tracks` heading is present.
+ */
+function extractTracksSectionLines(text) {
+  const lines = text.split(/\r?\n/u);
+  const headingRe = /^ {0,3}##\s+(.+?)\s*$/u;
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(headingRe);
+    if (match && match[1].trim() === 'Tracks') {
+      start = index + 1;
+      break;
+    }
+  }
+  if (start === -1) {
+    return [];
+  }
+  let end = lines.length;
+  for (let index = start; index < lines.length; index += 1) {
+    if (headingRe.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end);
+}
+/**
+ * Roadmap-shape only (idd-skill#2765): fails when the `## Tracks` section
+ * has at least one checkbox line but NONE of them resolve to a child
+ * issue reference via `extractTaskListReferences` -- the same parser
+ * `discover-roadmap-graph.mts`'s traversal and
+ * `idd-roadmap-audit-execute.mts`'s childless gate rely on, reused here
+ * rather than a second reference-matching regex. When at least one line
+ * resolves but at least one other does not, this is a `severity:
+ * 'warning'` pass (not a hard fail) naming the unresolved line(s), so a
+ * roadmap with a genuinely mixed Tracks section still publishes with a
+ * visible signal instead of being blocked outright.
+ *
+ * Each checkbox line is evaluated with its own continuation span (the
+ * same stop rule `extractTaskListReferences` uses internally) rather
+ * than diffing the parser's returned `evidence` strings against the raw
+ * checkbox lines, so two textually-identical checkbox lines are scored
+ * independently instead of colliding on a shared evidence string.
+ */
+function checkRoadmapTracksParse(text, shape, isBucketAudit, currentRepo) {
+  const id = 'roadmap-tracks-parse';
+  const name = 'Roadmap Tracks checkbox lines resolve to a child reference';
+  if (isBucketAudit) {
+    return pass(id, name, NOT_APPLICABLE_BUCKET_AUDIT_DETAIL);
+  }
+  if (shape !== 'roadmap') {
+    return pass(
+      id,
+      name,
+      'not applicable: only the roadmap shape has a ## Tracks section',
+    );
+  }
+  const sectionLines = extractTracksSectionLines(text);
+  const checkboxLineIndexes = sectionLines
+    .map((line, index) => (isTaskListCheckboxLine(line) ? index : -1))
+    .filter((index) => index >= 0);
+  if (checkboxLineIndexes.length === 0) {
+    return pass(id, name, 'no ## Tracks checkbox lines to validate');
+  }
+  // Detects a trailing qualified `owner/repo#N` reference -- `(#N)`
+  // optionally wrapped in parens, with an `owner/repo` prefix -- at the
+  // end of a task-list item's text, mirroring
+  // `extractTaskListReferences`'s own trailing-reference shape
+  // (`discover-roadmap-graph.mts`) but without requiring a
+  // `currentRepoRef` match. Used only to distinguish "no reference at
+  // all" from "a qualified reference exists but this run has no repo
+  // context to verify it names the current repository" (idd-skill#2765
+  // review, Codex) -- detection only, never itself trusted as a resolved
+  // child reference. Declared inside the function (not module-level, per
+  // this file's own CLI-entry-order convention -- see
+  // `extractTaskListReferences`'s matching per-call regex construction in
+  // `discover-roadmap-graph.mts`) so it carries no TDZ risk relative to
+  // this file's `if (import.meta.main)` CLI entry block.
+  const qualifiedTrailingReferenceRe =
+    /(?:^|\s)\(?[\w.-]+\/[\w.-]+#\d+\)?[.,;:]*\s*$/u;
+  const unparsedLines = [];
+  let parsedCount = 0;
+  for (const startIndex of checkboxLineIndexes) {
+    let end = startIndex;
+    while (
+      end + 1 < sectionLines.length &&
+      !isTaskListBlockBoundary(sectionLines[end + 1])
+    ) {
+      end += 1;
+    }
+    const itemText = sectionLines.slice(startIndex, end + 1).join('\n');
+    const itemReferences = extractTaskListReferences(itemText, {
+      currentRepoRef: currentRepo,
+    });
+    if (
+      itemReferences.length > 0 ||
+      // No repo context to verify a qualified `owner/repo#N` reference
+      // against (idd-skill#2765 review, Codex): the documented local
+      // invocation of this linter never passes `--current-repo`, and
+      // `$GITHUB_REPOSITORY` is only set by GitHub Actions, so this is
+      // the common case outside CI. `extractTaskListReferences` then
+      // rejects every qualified reference because it can never equal an
+      // empty current-repository value -- treat a trailing qualified
+      // reference as unverifiable rather than malformed here, so a
+      // well-formed roadmap using that form doesn't hard-fail merely
+      // because this run lacks repo context.
+      (currentRepo === undefined && qualifiedTrailingReferenceRe.test(itemText))
+    ) {
+      parsedCount += 1;
+    } else {
+      unparsedLines.push(sectionLines[startIndex].trim());
+    }
+  }
+  if (parsedCount === 0) {
+    return fail(
+      id,
+      name,
+      `## Tracks has ${checkboxLineIndexes.length} checkbox line(s) but none resolve to a child issue reference (checked: ${unparsedLines.join(' | ')})`,
+    );
+  }
+  if (unparsedLines.length > 0) {
+    return {
+      id,
+      name,
+      result: 'pass',
+      severity: 'warning',
+      detail: `## Tracks checkbox line(s) did not resolve to a child issue reference: ${unparsedLines.join(' | ')}`,
+    };
+  }
+  return pass(
+    id,
+    name,
+    'every ## Tracks checkbox line resolves to a child issue reference',
+  );
 }
 function checkDependencyMarkerRule(text, markerPrefix, shape) {
   const id = 'dependency-marker-rule';
@@ -556,6 +1165,402 @@ function checkEffortVisibleLineAgreement(text, markerPrefix) {
     `visible line agrees with marker value ${effort.value}`,
   );
 }
+/**
+ * Verify that an authoring-labeled issue carries the owner-marker/
+ * publication-token trail the "Authoring label lifecycle" contract
+ * (docs/issue-authoring-skill.md) requires. Not applicable (`pass`) when the
+ * issue never carries the configured authoring label at all — this is a
+ * forward-looking gate on newly authoring-labeled issues, never a
+ * retroactive backfill requirement — or when the caller did not supply
+ * `comments` (this module stays network-free; a caller not opting into
+ * comment-aware checking must not see a false failure).
+ */
+// #2681 (sub-gap 2): a self-anchored owner marker's `anchor` is the
+// issue's own real ref, but its publication marker's `anchor` was
+// minted before creation, when no real anchor number existed yet -- an
+// opaque placeholder that can never be made to literally equal the
+// owner marker's real anchor by construction. Detect that bootstrap
+// case by the publication marker's anchor *shape* instead of requiring
+// textual equality to the owner marker's anchor: when the owner marker
+// is self-anchored and the publication marker's anchor is not itself a
+// real issue reference, accept the anchor half unconditionally. A
+// publication marker that named a real (but different) anchor while its
+// owner marker is self-anchored is a genuine mismatch, and a
+// non-self-anchored owner marker (child issue under a real,
+// already-numbered anchor) always keeps the strict literal-equality
+// requirement below.
+function ownerMarkerAnchorMatchesPublication(
+  ownerMarker,
+  publicationMarker,
+  shape,
+) {
+  // A `child` issue is anchored to an already-numbered real parent by
+  // definition -- it can never legitimately bootstrap a standalone
+  // anchor, so the exemption below must never apply to it, regardless of
+  // what an owner marker (forged, malformed, or otherwise) claims about
+  // its own target/anchor equality (#2681 review, Codex: restricting the
+  // bootstrap exemption to non-child shapes so a child audit can't use a
+  // falsely self-anchored owner marker to bypass the real-anchor binding
+  // the check exists to enforce). `orphan` and `roadmap` are the only
+  // shapes that can be the first, self-anchored issue of a standalone
+  // set.
+  const ownerIsSelfAnchored =
+    shape !== 'child' &&
+    ownerMarker.target.toLowerCase() === ownerMarker.anchor.toLowerCase();
+  if (
+    ownerIsSelfAnchored &&
+    !REAL_ISSUE_REFERENCE_PATTERN.test(publicationMarker.anchor)
+  ) {
+    return true;
+  }
+  return ownerMarker.anchor === publicationMarker.anchor;
+}
+function checkAuthoringOwnerMarkerTrail(text, markerPrefix, labels, options) {
+  const id = 'authoring-owner-marker-trail';
+  const name =
+    'Authoring-labeled issue carries the owner-marker/publication-token trail';
+  const authoringLabelName = (
+    options.authoringLabelName ??
+    POLICY_DEFAULTS.issueAuthoring.authoringLabelName
+  )
+    .trim()
+    .toLowerCase();
+  if (!labels.includes(authoringLabelName)) {
+    return pass(
+      id,
+      name,
+      'not applicable: issue does not carry the authoring label',
+    );
+  }
+  const currentRepo = normalizeCurrentRepo(options.currentRepo);
+  // Lowercased: GitHub owner/repo names are case-insensitive, matching the
+  // normalization checkProseOnlyDependency already applies to its own
+  // owner/repo comparisons (#2628 review, CodeRabbit). Every comparison
+  // against currentIssueRef below lowercases its own operand to match.
+  const currentIssueRef =
+    currentRepo && options.issueNumber !== undefined
+      ? `${currentRepo}#${options.issueNumber}`.toLowerCase()
+      : undefined;
+  // Validate the new-issue publication line FIRST, independent of whether
+  // comment data was supplied: this half only needs the body text and the
+  // `newIssue` flag, so it must not be silently skipped just because the
+  // caller omitted `comments` -- a genuinely broken new-issue body (no
+  // publication line at all) must not get a free pass from a missing
+  // --comments-file alone (#2628 review, Codex). parseAuthoringPublicationComment
+  // itself requires the marker's literal first bytes (marker-helpers.mts),
+  // so no separate first-line regex is needed here.
+  let publicationMarker = null;
+  if (options.newIssue === true) {
+    publicationMarker = parseAuthoringPublicationComment(text, markerPrefix);
+    if (publicationMarker === null) {
+      return fail(
+        id,
+        name,
+        'new issue is missing a well-formed authoring-publication marker as the first line of the body',
+      );
+    }
+  }
+  if (options.comments === undefined) {
+    return pass(
+      id,
+      name,
+      publicationMarker === null
+        ? 'not applicable: no comment data supplied to this check'
+        : 'publication-token line present; not applicable for the owner-marker/journal checks (no comment data supplied to this check)',
+    );
+  }
+  // Strip fenced/inline code regions before parsing, matching the same
+  // stripMarkdownCodeRegions(rawText) pass auditAuthoredIssue() already
+  // applies to the issue body: a pasted illustrative example wrapped in a
+  // comment's own code block must not count as a real marker (#2628
+  // review, CodeRabbit).
+  const ownerMarkers = options.comments
+    .map((comment) =>
+      parseAuthoringOwnerComment(
+        stripMarkdownCodeRegions(comment.body),
+        markerPrefix,
+      ),
+    )
+    .filter((marker) => marker !== null);
+  const hasQualifyingOwnerMarker = ownerMarkers.some(
+    (marker) =>
+      AUTHORING_OWNER_QUALIFYING_MODES.has(marker.mode) &&
+      // A qualifying acquire/bootstrap/resume marker targets a real issue,
+      // so its body-sha256 must hash an actual body read, never `none`
+      // (`none` is only ever legitimate on an anchor-only release-guard
+      // marker per docs/issue-authoring-skill.md -- #2628 review, Codex).
+      marker.bodySha256 !== 'none' &&
+      (currentIssueRef === undefined ||
+        marker.target.toLowerCase() === currentIssueRef) &&
+      (publicationMarker === null ||
+        (ownerMarkerAnchorMatchesPublication(
+          marker,
+          publicationMarker,
+          options.shape,
+        ) &&
+          marker.set === publicationMarker.set &&
+          marker.session === publicationMarker.session)),
+  );
+  if (!hasQualifyingOwnerMarker) {
+    const targetNote =
+      currentIssueRef === undefined ? '' : ', target matching this issue';
+    const generationNote =
+      publicationMarker === null
+        ? ''
+        : ", anchor/set/session matching the publication marker's generation";
+    return fail(
+      id,
+      name,
+      `no valid authoring-owner comment (mode acquire/bootstrap/resume${targetNote}${generationNote}) was found`,
+    );
+  }
+  if (options.newIssue !== true) {
+    return pass(
+      id,
+      name,
+      'owner-marker present; not applicable for the publication-token line (not a new issue)',
+    );
+  }
+  // publicationMarker is non-null here: newIssue === true already returned
+  // above on a missing/malformed marker.
+  const resolvedPublicationMarker = publicationMarker;
+  if (options.journalComments === undefined) {
+    return pass(
+      id,
+      name,
+      'owner-marker and publication-token line present; not applicable for the journal cross-check (no journal comment data supplied)',
+    );
+  }
+  // Match the FULL token tuple (target/anchor/set/session/token), not just
+  // target -- an unrelated or out-of-generation journal record sharing only
+  // `target` must not be accepted as evidence (#2628 review, Codex). When
+  // the current issue's identity is known, also require the record's own
+  // `issue` field to name it exactly: per the protocol, `issue` is resolved
+  // to the real identity no later than the `member` transition, so `none`
+  // at state=member-or-later is itself a protocol violation, not a
+  // tolerable gap.
+  const hasMatchingIntentRecord = options.journalComments.some((comment) => {
+    const intent = parseAuthoringPublicationIntentComment(
+      stripMarkdownCodeRegions(comment.body),
+      markerPrefix,
+    );
+    if (
+      intent === null ||
+      intent.target !== resolvedPublicationMarker.target ||
+      intent.anchor !== resolvedPublicationMarker.anchor ||
+      intent.set !== resolvedPublicationMarker.set ||
+      intent.session !== resolvedPublicationMarker.session ||
+      intent.token !== resolvedPublicationMarker.token
+    ) {
+      return false;
+    }
+    if (!AUTHORING_PUBLICATION_INTENT_MEMBER_OR_LATER.has(intent.state)) {
+      return false;
+    }
+    // issue=none is only ever valid at state=pending (docs/issue-authoring-skill.md):
+    // "Append the returned identity while it remains pending, append
+    // member only after the owner marker is verified" -- a member-or-later
+    // record with issue=none is itself a protocol violation, regardless of
+    // whether the caller happens to know the current issue's identity
+    // (#2628 review, Copilot and Codex).
+    if (intent.issue.toLowerCase() === 'none') {
+      return false;
+    }
+    if (
+      currentIssueRef !== undefined &&
+      intent.issue.toLowerCase() !== currentIssueRef
+    ) {
+      return false;
+    }
+    return true;
+  });
+  if (!hasMatchingIntentRecord) {
+    return fail(
+      id,
+      name,
+      'no matching authoring-publication-intent record reaching state=member or later was found on the journal issue',
+    );
+  }
+  return pass(
+    id,
+    name,
+    'owner-marker, publication-token line, and journal publication-intent record are all present and well-formed',
+  );
+}
+/**
+ * Counts how many entries in `comments` are byte-exact canonical
+ * renderings of `family` (#2896) and are not the single newest such match
+ * -- mirroring the "skip the just-posted comment itself" rule the
+ * hide-on-supersede sweep (`skills/issue-authoring/references/
+ * contract.md`'s "Authoring hold and release" section) already applies.
+ * "Newest" is the last matching entry in array order: callers are
+ * expected to supply comments in GitHub's deterministic
+ * `created_at`-then-id order. This is the first **order-dependent**
+ * comment-aware check in this file -- unlike
+ * {@link checkAuthoringOwnerMarkerTrail}, which uses order-independent
+ * `.some()`/`.every()` scans, this function's result changes if the input
+ * order changes. `AuthoringCommentInput.createdAt` is accepted but never
+ * consulted here to verify or sort by ascending order; a caller that
+ * supplies comments out of order gets a silently wrong count, not a
+ * detected error.
+ *
+ * `family` is matched against the RAW `comment.body` (never
+ * `stripMarkdownCodeRegions`-masked): unlike the structural checks above,
+ * this count exists to mirror exactly what the live hide-on-supersede
+ * sweep would find on the real, unmodified comment body -- a body this
+ * function would treat as canonical only by first stripping content out
+ * of it is not actually byte-exact against what
+ * `matchCanonicalAuthoringMarkerFamily` would see live.
+ *
+ * When `trustedActors` is provided (#2896 review, Codex), a match whose
+ * `comment.author` is missing or not a case-insensitive member of that
+ * set is excluded from the candidate set **before** "newest" is
+ * selected, not only from the eligible count: the contract states
+ * "syntax alone never grants ownership" (see [Per-target
+ * ownership](../../skills/issue-authoring/references/contract.md)), so
+ * an untrusted-author body -- even a byte-exact canonical one -- is
+ * never treated as a real marker for either purpose. An earlier
+ * revision filtered trust only for eligibility, which let a trailing
+ * untrusted-author match steal "newest" status from the legitimate
+ * trusted marker just before it, wrongly reporting that trusted marker
+ * as superseded backlog (round 2 of review, Codex: the fix for the
+ * `minimize-superseded-markers.mts`/documented-sweep trust
+ * requirement -- round 1 -- did not go far enough). `trustedActors` left
+ * `undefined` disables this filter entirely (backward-compatible: every
+ * byte-exact match counts as a candidate regardless of author, matching
+ * pre-#2896-review behavior).
+ *
+ * A candidate match whose `isMinimized` is already `true` is excluded
+ * from the eligible count -- it is not backlog, it is already handled
+ * (this exclusion is unaffected by trust filtering: it applies to
+ * whichever candidate set survives the trust filter above). Returns `0`
+ * when `comments` is `undefined` (the caller, {@link
+ * checkAuthoringMarkerMinimizationBacklog}, reports that family as "not
+ * checked" rather than treating this `0` as a confirmed zero) or when
+ * fewer than two (trust-filtered, when applicable) candidates exist
+ * (nothing can be "superseded" without a later candidate to supersede
+ * it).
+ *
+ * Delegates the actual classification to {@link classifyAuthoringMarkerFamily}
+ * (`marker-helpers.mts`, extracted in #2935 alongside `sweep-authoring-
+ * markers.mts`'s fetch-driven sweep, which needs the same newest-per-
+ * family/trust/already-minimized rule but returns the eligible comments
+ * themselves, not just a count) -- kept as a thin count-only wrapper here
+ * so this module's public surface and every existing caller are
+ * unaffected.
+ */
+function countEligibleSupersededMarkers(
+  comments,
+  markerPrefix,
+  family,
+  trustedActors,
+) {
+  if (comments === undefined) {
+    return 0;
+  }
+  return classifyAuthoringMarkerFamily(
+    comments,
+    markerPrefix,
+    family,
+    trustedActors,
+  ).eligibleIndexes.length;
+}
+/**
+ * Reports how many `authoring-owner` (from {@link AuditOptions.comments})
+ * and `authoring-publication-intent` (from
+ * {@link AuditOptions.journalComments}) comments are eligible for the
+ * hide-on-supersede sweep but not yet minimized (#2896). This is the
+ * mechanical observability signal the issue-authoring contract's release-
+ * time sweep depends on to make a compliance gap visible instead of
+ * silent, the way #2750/#2821's original per-post-only instruction's gap
+ * went unnoticed for weeks (measured 2026-09-11: 3 of 95 expected-
+ * hideable comments across 22 sampled issues, about 3%).
+ *
+ * Always reports `result: 'pass'` -- a nonzero backlog is surfaced as a
+ * `severity: 'warning'` finding, never a hard failure: the same body can
+ * be re-audited at any point in an issue's lifecycle (not only
+ * immediately after the Stage 2 sweep runs), and the journal issue's own
+ * backlog accumulates across every authoring set that shares it, so a
+ * strict fail here would block an unrelated publish on backlog this
+ * session did not create. Not applicable (as a whole) when the caller
+ * supplies neither `comments` nor `journalComments` -- unlike
+ * `authoring-owner-marker-trail`, this check is never gated on the
+ * authoring label: the backlog it counts exists (or does not) regardless
+ * of whether the audited body currently carries that label.
+ *
+ * **Per-family "not checked" vs "checked, zero found" (#2896 review).**
+ * `comments` and `journalComments` are independently optional: a caller
+ * may supply only one. The `detail` text always names both families and
+ * distinguishes an omitted family ("not checked") from one that was
+ * supplied and found to have zero backlog ("0") -- collapsing the two
+ * into a bare `0` would misreport "never actually counted" as "counted,
+ * found none", which is exactly the kind of silent gap this check exists
+ * to surface. `total` (and therefore whether this finding carries
+ * `severity: 'warning'`) sums only the families actually checked; an
+ * omitted family never contributes a phantom `0` to that sum.
+ */
+function checkAuthoringMarkerMinimizationBacklog(markerPrefix, options) {
+  const id = 'authoring-marker-minimization-backlog';
+  const name =
+    'Eligible, not-yet-minimized superseded authoring-owner / authoring-publication-intent marker count';
+  const ownerChecked = options.comments !== undefined;
+  const intentChecked = options.journalComments !== undefined;
+  if (!ownerChecked && !intentChecked) {
+    return pass(
+      id,
+      name,
+      'not applicable: neither comments nor journalComments were supplied to this check',
+    );
+  }
+  const trustedActors =
+    options.trustedMarkerActors === undefined
+      ? undefined
+      : new Set(
+          options.trustedMarkerActors.map((actor) => actor.toLowerCase()),
+        );
+  const ownerBacklog = ownerChecked
+    ? countEligibleSupersededMarkers(
+        options.comments,
+        markerPrefix,
+        'authoring-owner',
+        trustedActors,
+      )
+    : null;
+  const publicationIntentBacklog = intentChecked
+    ? countEligibleSupersededMarkers(
+        options.journalComments,
+        markerPrefix,
+        'authoring-publication-intent',
+        trustedActors,
+      )
+    : null;
+  const total = (ownerBacklog ?? 0) + (publicationIntentBacklog ?? 0);
+  const ownerPart = ownerChecked
+    ? `authoring-owner: ${ownerBacklog}`
+    : 'authoring-owner: not checked (comments not supplied)';
+  const intentPart = intentChecked
+    ? `authoring-publication-intent: ${publicationIntentBacklog}`
+    : 'authoring-publication-intent: not checked (journalComments not supplied)';
+  const trustNote =
+    trustedActors === undefined
+      ? ' [not author-trust-filtered: pass trustedMarkerActors for an accurate count]'
+      : '';
+  const breakdown = `${ownerPart}, ${intentPart}${trustNote}`;
+  if (total === 0) {
+    return pass(
+      id,
+      name,
+      `no eligible, not-yet-minimized superseded marker comments found among the checked families (${breakdown})`,
+    );
+  }
+  return {
+    id,
+    name,
+    result: 'pass',
+    severity: 'warning',
+    detail: `${total} eligible, not-yet-minimized superseded marker comment(s) found among the checked families (${breakdown}) -- run the Stage 2 release-time hide-on-supersede sweep to clear the backlog`,
+  };
+}
 // An empty or whitespace-only currentRepo (reachable via an explicit
 // `--current-repo ''`, or an environment where `$GITHUB_REPOSITORY`
 // resolves to an empty string) must be treated the same as it being
@@ -580,12 +1585,13 @@ function checkProseOnlyDependency(text, currentRepo) {
   const name =
     'Advisory: issue/PR references near coordination language should use a dependency marker';
   // Numbers already covered by a real machine-readable dependency encoding
-  // (Blocked by / Depends on / task-list) are never flagged, regardless of
-  // nearby prose — the whole point of this check is to catch references
-  // that carry *no* such encoding.
+  // (Blocked by / Depends on / task-list / the non-blocking Refs form,
+  // #2236) are never flagged, regardless of nearby prose — the whole point
+  // of this check is to catch references that carry *no* such encoding.
   const encoded = new Set([
     ...extractBlockedByIssueNumbers(text),
     ...extractDependencyIssueNumbers(text),
+    ...extractNonBlockingReferenceIssueNumbers(text),
   ]);
   const keywordPattern = new RegExp(
     `\\b(?:${PROSE_DEPENDENCY_KEYWORDS.map(escapeRegex).join('|')})\\b`,
@@ -1075,7 +2081,7 @@ function extractHeadings(text) {
   }
   return headings;
 }
-function normalizeMarkerPrefix(prefix) {
+export function normalizeMarkerPrefix(prefix) {
   // Trim first: a config value or CLI input with accidental leading/
   // trailing whitespace (e.g. "idd-skill ") would otherwise become a
   // distinct prefix that never matches any real marker, producing
@@ -1088,6 +2094,36 @@ function pass(id, name, detail) {
 }
 function fail(id, name, detail) {
   return { id, name, result: 'fail', detail };
+}
+/**
+ * Read and JSON-parse a comments file (an array of
+ * `{body, author?, createdAt?, isMinimized?}` objects) the same
+ * uncaught-throw-on-malformed-input way `--body-file` already behaves: a
+ * missing file or invalid JSON propagates as an unhandled exception
+ * rather than a new soft-degrade path this file does not otherwise have.
+ */
+function readCommentsFile(path) {
+  const raw = readFileSync(resolve(process.cwd(), path), 'utf8');
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${path} must contain a JSON array of comments`);
+  }
+  return parsed.map((entry, index) => {
+    const record = entry;
+    if (typeof record?.body !== 'string') {
+      throw new Error(`${path}[${index}] is missing a string "body" field`);
+    }
+    return {
+      body: record.body,
+      ...(typeof record.author === 'string' ? { author: record.author } : {}),
+      ...(typeof record.createdAt === 'string'
+        ? { createdAt: record.createdAt }
+        : {}),
+      ...(typeof record.isMinimized === 'boolean'
+        ? { isMinimized: record.isMinimized }
+        : {}),
+    };
+  });
 }
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -1107,19 +2143,106 @@ function main() {
   const bodyText = args.stdin
     ? readFileSync(0, 'utf8')
     : readFileSync(resolve(process.cwd(), args.bodyFile), 'utf8');
+  if (args.issue !== undefined && !/^[1-9]\d*$/.test(args.issue)) {
+    fail_('--issue must be a positive integer');
+  }
+  if (
+    args.expectBucket !== undefined &&
+    !isAuthoringBucketValue(args.expectBucket)
+  ) {
+    fail_('--expect-bucket must be needs-decision or blocked-by-human');
+  }
+  // #2896 review: --journal-comments-file no longer requires --new-issue.
+  // It used to (the only consumer was the new-issue publication-intent
+  // cross-check), but authoring-marker-minimization-backlog also reads
+  // journalComments unconditionally, and that check's whole point is to
+  // run at Stage 2 release on an already-published (never new) issue --
+  // requiring --new-issue here made the CLI unable to reach the exact
+  // invocation shape the issue-authoring contract's release-time sweep
+  // documents. Dropping this gate does not change
+  // authoring-owner-marker-trail's own behavior: it already no-ops the
+  // journal cross-check whenever --new-issue is absent (`options.newIssue
+  // !== true` returns early before journalComments is ever read), so
+  // journalComments passed without --new-issue is simply unused by that
+  // check, exactly as before.
+  //
+  // #2896 review (round 3, Codex): --journal-comments-file also no longer
+  // requires --comments-file. It used to (#2628 review, Copilot): without
+  // --comments-file, authoring-owner-marker-trail's journal cross-check
+  // was unreachable, so journal data alone would go unconsulted by that
+  // ONE check -- but that check already reports "not applicable" (never a
+  // false compliant pass) whenever --comments-file is absent, with or
+  // without this gate, and authoring-marker-minimization-backlog's own
+  // publication-intent half now consults journalComments completely on
+  // its own. Requiring --comments-file here made the CLI advertise
+  // "--comments-file and/or --journal-comments-file" in its own --help
+  // text while actually rejecting the journal-only half of that "or".
+  // Without this, a new-issue check with real owner-marker evidence but no
+  // journal data would report "not applicable" for the journal half and
+  // still exit 0 -- a misleading success for the AC's combined
+  // publication-line + journal-record requirement (#2628 review,
+  // CodeRabbit). The pure auditAuthoredIssue() function itself keeps the
+  // graceful not-applicable degradation for a direct (non-CLI) caller that
+  // deliberately wants a partial check.
+  if (args.newIssue && args.commentsFile && !args.journalCommentsFile) {
+    fail_('--new-issue with --comments-file requires --journal-comments-file');
+  }
+  // Without a known current-issue identity, the journal cross-check cannot
+  // verify a publication-intent record actually names THIS issue -- an
+  // intent record naming a different (non-none) issue would otherwise pass
+  // silently whenever the caller omitted --issue (#2628 review, Codex).
+  if (args.newIssue && args.journalCommentsFile && args.issue === undefined) {
+    fail_('--new-issue with --journal-comments-file requires --issue');
+  }
+  // Explicit --current-repo wins; otherwise fall back to the
+  // GITHUB_REPOSITORY env var GitHub Actions sets automatically, so CI
+  // usage narrows cross-repo URL false positives with no extra flag.
+  // undefined (neither present) keeps the pre-#1399-fix default of
+  // flagging every full-URL reference for the prose-dependency check --
+  // but --issue's target match needs a resolvable repo to mean anything,
+  // so require one explicitly rather than silently widening the match
+  // (#2628 review, Codex and Copilot both flagged the silent-widening gap).
+  const currentRepo = args.currentRepo ?? process.env.GITHUB_REPOSITORY;
+  if (args.issue !== undefined && !currentRepo) {
+    fail_('--issue requires --current-repo (or $GITHUB_REPOSITORY) to be set');
+  }
   const policy = loadPolicy(args.configPath);
   const markerPrefix = args.markerPrefix ?? policy.markerPrefix;
+  // Same flag/env/config precedence every other resolveTrustedMarkerActors
+  // caller in this codebase uses (#2896 review, Codex): an empty
+  // resolution (no flag/env/config trusted actors configured) leaves
+  // authoring-marker-minimization-backlog's trust filter disabled, the
+  // same as omitting --trusted-marker-logins entirely.
+  const { actors: trustedMarkerActors } = resolveTrustedMarkerActors({
+    flagValue: args.trustedMarkerLogins ?? '',
+    envValue: process.env.IDD_TRUSTED_MARKER_ACTORS ?? '',
+    config: policy.rawConfig,
+  });
   const report = auditAuthoredIssue(bodyText, {
     shape: args.shape,
     markerPrefix,
     labels: args.labels,
     blockedByHumanLabelName: policy.blockedByHumanLabelName,
-    // Explicit --current-repo wins; otherwise fall back to the
-    // GITHUB_REPOSITORY env var GitHub Actions sets automatically, so CI
-    // usage narrows cross-repo URL false positives with no extra flag.
-    // undefined (neither present) keeps the pre-#1399-fix default of
-    // flagging every full-URL reference.
-    currentRepo: args.currentRepo ?? process.env.GITHUB_REPOSITORY,
+    needsDecisionLabelName: policy.needsDecisionLabelName,
+    expectedAuthoringBucket: args.expectBucket,
+    authoringLabelName: policy.authoringLabelName,
+    currentRepo,
+    issueNumber:
+      args.issue !== undefined ? Number.parseInt(args.issue, 10) : undefined,
+    comments: args.commentsFile
+      ? readCommentsFile(args.commentsFile)
+      : undefined,
+    journalComments: args.journalCommentsFile
+      ? readCommentsFile(args.journalCommentsFile)
+      : undefined,
+    newIssue: args.newIssue,
+    upstreamEscalationEnabled: policy.upstreamEscalationEnabled,
+    // An empty resolution (no flag/env/config trusted actors found) is
+    // "trust unknown," not "no one is trusted" -- pass `undefined` so
+    // authoring-marker-minimization-backlog's trust filter stays
+    // disabled (permissive) rather than zeroing out every count.
+    trustedMarkerActors:
+      trustedMarkerActors.length > 0 ? trustedMarkerActors : undefined,
   });
   writeReport(report, args.format);
   process.exit(report.passed ? 0 : 1);
@@ -1176,12 +2299,22 @@ function loadPolicy(configPath) {
     return {
       markerPrefix: DEFAULT_MARKER_PREFIX,
       blockedByHumanLabelName: POLICY_DEFAULTS.labels.blockedByHumanLabelName,
+      needsDecisionLabelName: POLICY_DEFAULTS.labels.needsDecisionLabelName,
+      authoringLabelName: POLICY_DEFAULTS.issueAuthoring.authoringLabelName,
+      upstreamEscalationEnabled: false,
+      rawConfig: null,
     };
   }
   return {
     markerPrefix: normalizeMarkerPrefix(config.markerPrefix),
     blockedByHumanLabelName:
       normalizePolicyConfig(config).labels.blockedByHumanLabelName,
+    needsDecisionLabelName:
+      normalizePolicyConfig(config).labels.needsDecisionLabelName,
+    authoringLabelName:
+      normalizePolicyConfig(config).issueAuthoring.authoringLabelName,
+    upstreamEscalationEnabled: isUpstreamEscalationEnabled(config),
+    rawConfig: config,
   };
 }
 function writeReport(report, format) {
@@ -1230,7 +2363,13 @@ function parseArgs(argv) {
     markerPrefix: values['marker-prefix'],
     configPath: values.config,
     currentRepo: values['current-repo'],
+    issue: values.issue,
     labels: values.label ?? [],
+    expectBucket: values['expect-bucket'],
+    commentsFile: values['comments-file'],
+    journalCommentsFile: values['journal-comments-file'],
+    newIssue: values['new-issue'],
+    trustedMarkerLogins: values['trusted-marker-logins'],
     format,
   };
 }
@@ -1245,24 +2384,83 @@ section headings for the declared shape, the roadmap-id/blocked-by
 dependency-marker rules, visible/hidden suitability+effort line
 agreement, and an advisory (warning-severity only) check that flags an
 issue/PR reference used near coordination language with no corresponding
-dependency marker. Exits 0 when every check passes, 1 when any check
-fails, 2 on a usage error; the advisory check never affects the exit
-code.
+dependency marker, (when --comments-file is supplied) the
+authoring-owner-marker-trail check that verifies an authoring-labeled
+issue carries the owner-marker/publication-token trail, and (when
+--comments-file and/or --journal-comments-file is supplied) the
+authoring-marker-minimization-backlog check that counts eligible,
+not-yet-minimized superseded authoring-owner / authoring-publication-intent
+marker comments. Exits 0 when every check passes, 1 when any check fails,
+2 on a usage error; the advisory check and
+authoring-marker-minimization-backlog never affect the exit code.
 
 Options:
   --shape <orphan|roadmap|child>   declared issue shape (required)
   --body-file <path>               read the drafted issue body from a file
   --stdin                          read the drafted issue body from stdin
   --marker-prefix <prefix>         override the resolved markerPrefix
-  --config <path>                  policy config path (default: .github/idd/config.json)
+  --config <path>                  policy config path (default: .github/idd/config.json);
+                                    also resolves upstreamEscalation.enabled, which
+                                    gates both upstream-candidate checks (the
+                                    marker/label pairing check and the
+                                    upstream-candidate branch of the prefix scan)
   --label <name>                   a label currently applied/proposed on the issue
-                                    (repeatable; used for the suitability=1
-                                    cross-field check)
+                                    (repeatable; used for the suitability=1 /
+                                    authoring-bucket cross-field checks, the
+                                    upstream-candidate marker/label pairing
+                                    check, and the authoring-label check for
+                                    authoring-owner-marker-trail)
+  --expect-bucket <bucket>         needs-decision or blocked-by-human; set only when
+                                    auditing a body about to be newly published into
+                                    that bucket -- requires the matching
+                                    authoring-bucket marker to be present (omit for a
+                                    ready publish or a legacy body)
   --current-repo <owner/repo>      this repository, for the prose-dependency check
                                     to recognize a full-URL issue/PR reference as
-                                    cross-repo (default: $GITHUB_REPOSITORY)
+                                    cross-repo (default: $GITHUB_REPOSITORY), and
+                                    for authoring-owner-marker-trail's target match
+  --issue <number>                 this issue's number, for authoring-owner-marker-trail's
+                                    target match (requires --current-repo or
+                                    $GITHUB_REPOSITORY to be resolvable)
+  --comments-file <path>           JSON array of this issue's pre-fetched comments
+                                    ({body, author?, createdAt?, isMinimized?});
+                                    enables authoring-owner-marker-trail and the
+                                    authoring-owner half of
+                                    authoring-marker-minimization-backlog
+                                    (network-free: this module never fetches
+                                    comments itself; isMinimized defaults to
+                                    "not minimized" when omitted)
+  --journal-comments-file <path>   JSON array of the journal issue's pre-fetched
+                                    comments (same shape as --comments-file).
+                                    Feeds the authoring-publication-intent half
+                                    of authoring-marker-minimization-backlog on
+                                    its own -- usable standalone, without
+                                    --comments-file or --new-issue (for example,
+                                    to audit only the shared journal's backlog at
+                                    Stage 2 release on an already-published
+                                    issue) -- and additionally feeds the
+                                    new-issue publication-intent cross-check
+                                    when --comments-file, --new-issue, and
+                                    --issue are also given
+  --new-issue                      this issue was just created in this invocation
+                                    (not an edit); requires the leading
+                                    authoring-publication body line, and (when
+                                    --comments-file is also given) requires
+                                    --journal-comments-file and --issue too
+  --trusted-marker-logins <csv>    comma-separated trusted GitHub actor logins
+                                    (flag > $IDD_TRUSTED_MARKER_ACTORS >
+                                    .github/idd/config.json's trustedMarkerActors);
+                                    filters authoring-marker-minimization-backlog's
+                                    count to comments from a trusted actor, matching
+                                    minimize-superseded-markers.mjs's own trust gate.
+                                    Omitted or empty leaves that count unfiltered
+                                    (every check above this one is unaffected)
   --format <json|table>            output format (default: json)
   --help                           show this help
+
+Environment:
+  IDD_TRUSTED_MARKER_ACTORS        comma-separated trusted actor logins, used when
+                                    --trusted-marker-logins is not given (see above)
 `);
 }
 function fail_(message) {

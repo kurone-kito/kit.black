@@ -5,32 +5,93 @@
 // above by `pnpm run build`. Edit the .mts source, never the generated
 // .mjs. See docs/typescript-sources.md.
 import {
+  advisoryWaitSectionIsValid,
+  DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
   DEFAULT_ADVISORY_RECOVERY_CYCLE_CAP,
   DEFAULT_ADVISORY_TERMINAL_WINDOW_MINUTES,
   readAdvisoryPrimaryBotLogin,
   readAdvisoryRecoveryCycleCap,
   readAdvisorySecondaryBotLogin,
-  readAdvisoryTerminalWindowMinutes,
   readAdvisoryWaitPolicy,
+  resolveEffectiveAdvisoryTerminalWindowMinutes,
+  resolveProviderOutageTerminalWindowMinutes,
 } from './advisory-wait-policy.mjs';
 import { parseCliArgs } from './cli-args.mjs';
 import {
-  DEFAULT_GH_PAGINATED_TIMEOUT_MS,
-  ghText,
-  safeGhText,
-} from './gh-exec.mjs';
+  normalizeAuthorityEvidence,
+  resolveCollaboratorAuthority,
+} from './external-check-waiver.mjs';
 import { loadIddConfig } from './idd-config.mjs';
+import { normalizePolicyConfig } from './policy-helpers.mjs';
 import {
   buildAdvisoryWaitSummary,
   compareIsoTimestamps,
   computeCopilotPendingCoversHead,
+  findLastCopilotReviewCommit,
+  isCopilotPending,
   isValidIsoTimestamp,
   normalizeTrustedMarkerLogins,
   parseAdvisoryRecoveryComment,
-  parsePaginatedGhNdjson,
   resolveTrustedMarkerActors,
 } from './protocol-helpers.mjs';
+import {
+  createGithubProviderAdapter,
+  resolveCurrentGithubRepository,
+} from './provider-adapter-github.mjs';
+import { resolveProviderOutageDeclaration } from './provider-outage-declaration.mjs';
 
+function toIssueCommentPayload(comment) {
+  return {
+    body: comment.body,
+    created_at: comment.createdAt,
+    user: { login: comment.authorLogin },
+  };
+}
+// #2554 (Copilot review, PR #2564 round 4): resolve whether a
+// repository-scoped `providerOutage.declarationTarget` declaration is
+// active for the `idd-advisory-convergence` selector, so this CLI's own
+// terminal-unavailability verdict agrees with the SAME evidence
+// `pre-merge-readiness.mts` and `advisory-convergence.mts` independently
+// resolve for their own terminal-window gating -- without this, an active
+// declaration could shorten the window in those two gates while this AW
+// loop still measured against the full base window, disagreeing on
+// terminal state and confusing the loop's next-action decision. Fails
+// closed to `false` on ANY error (unset target, unreadable/unparseable
+// comments, authority-lookup failure): a transient fetch failure must
+// never shorten the terminal-unavailability window this gates.
+function resolveOutageDeclarationActiveForConvergenceSelector({
+  port,
+  owner,
+  repo,
+  iddConfig,
+  now,
+}) {
+  try {
+    const policy = normalizePolicyConfig(iddConfig);
+    const targetIssue = policy.providerOutage.declarationTarget;
+    if (!targetIssue) return false;
+    const declarationComments = port
+      .listWorkItemComments(targetIssue)
+      .map(toIssueCommentPayload);
+    const authorityOf = (actorLogin) =>
+      normalizeAuthorityEvidence(
+        resolveCollaboratorAuthority({ owner, repo, actor: actorLogin }),
+        actorLogin,
+        owner,
+        policy.ciGate.externalCheckWaivers.authorityPolicy,
+      );
+    return resolveProviderOutageDeclaration({
+      declarationTargetConfigured: true,
+      comments: declarationComments,
+      service: DEFAULT_ADVISORY_CONVERGENCE_CHECK_SELECTOR,
+      policy,
+      authorityOf,
+      now: new Date(now),
+    }).active;
+  } catch {
+    return false;
+  }
+}
 const COPILOT_RECOVERY_REASONS = {
   activeClaimNotProvided: 'active-claim-not-provided',
   noTrustedRecoveryMarkers: 'no-trusted-recovery-markers',
@@ -197,6 +258,9 @@ const STALE_REQUEST_RECOVERY_REASONS = {
   provenCoversHead: 'proven-covers-head',
   capExhausted: 'recovery-cap-exhausted',
   attemptEligible: 'recovery-attempt-eligible',
+  recheckBudgetUnspent: 'recheck-budget-unspent',
+  nonPendingAttemptEligible: 'non-pending-recovery-attempt-eligible',
+  recoveryMarkerOnly: 'recovery-marker-only-no-request-marker',
 };
 export function evaluateStaleRequestRecoveryAction(input) {
   if (!input.activeClaimProvided) {
@@ -205,27 +269,76 @@ export function evaluateStaleRequestRecoveryAction(input) {
       reason: STALE_REQUEST_RECOVERY_REASONS.activeClaimNotProvided,
     };
   }
-  if (!input.copilotPending) {
+  if (input.copilotPending) {
+    // A same-head marker (ordinary `advisory-wait:` OR a prior recovery
+    // cycle's `advisory-wait-recovery:`) already anchors this HEAD's clock --
+    // mirrors evaluateAdvisoryWaitOutcome's own `!sameHeadMarkerPresent` gate
+    // for both its RECOVERY_NEEDED and REQUEST_NEEDED/CAP_EXHAUSTED branches,
+    // so this classifier never contradicts the shared outcome machine's
+    // routing.
+    if (input.sameHeadMarkerPresent) {
+      return {
+        action: 'not-applicable',
+        reason: STALE_REQUEST_RECOVERY_REASONS.sameHeadMarkerPresent,
+      };
+    }
+    if (input.copilotPendingCoversHead) {
+      return {
+        action: 'not-applicable',
+        reason: STALE_REQUEST_RECOVERY_REASONS.provenCoversHead,
+      };
+    }
+    if (input.remainingBudget <= 0) {
+      return {
+        action: 'cap-exhausted',
+        reason: STALE_REQUEST_RECOVERY_REASONS.capExhausted,
+      };
+    }
+    return {
+      action: 'attempt',
+      reason: STALE_REQUEST_RECOVERY_REASONS.attemptEligible,
+    };
+  }
+  // Non-pending (`#2327`): nothing was ever requested for this HEAD yet --
+  // preserves the pre-#2327 behavior exactly, routing to E14's ordinary
+  // REQUEST_NEEDED path rather than a recovery cycle.
+  if (!input.sameHeadMarkerPresent) {
     return {
       action: 'not-applicable',
       reason: STALE_REQUEST_RECOVERY_REASONS.notPending,
     };
   }
-  // A same-head marker (ordinary `advisory-wait:` OR a prior recovery cycle's
-  // `advisory-wait-recovery:`) already anchors this HEAD's clock -- mirrors
-  // evaluateAdvisoryWaitOutcome's own `!sameHeadMarkerPresent` gate for both
-  // its RECOVERY_NEEDED and REQUEST_NEEDED/CAP_EXHAUSTED branches, so this
-  // classifier never contradicts the shared outcome machine's routing.
-  if (input.sameHeadMarkerPresent) {
+  // A same-head marker exists, but not specifically a plain request marker --
+  // only a prior recovery cycle's own `advisory-wait-recovery:` marker
+  // anchors this HEAD. That marker is not proof an ordinary request was
+  // requested for this HEAD, so it must never itself unlock a further cycle;
+  // the recovery-cycle counter (not this predicate) is what already bounds
+  // repeated recovery attempts.
+  if (!input.sameHeadRequestMarkerPresent) {
     return {
       action: 'not-applicable',
-      reason: STALE_REQUEST_RECOVERY_REASONS.sameHeadMarkerPresent,
+      reason: STALE_REQUEST_RECOVERY_REASONS.recoveryMarkerOnly,
     };
   }
+  // A `review_requested` event for the bot DID eventually follow this HEAD's
+  // commit -- Copilot genuinely received the request and is simply no longer
+  // pending (completed or silently declined), not a failed-to-register case.
   if (input.copilotPendingCoversHead) {
     return {
       action: 'not-applicable',
       reason: STALE_REQUEST_RECOVERY_REASONS.provenCoversHead,
+    };
+  }
+  const elapsedMinutes = Number(input.elapsedMinutes);
+  const settledWindowMinutes = Number(input.settledWindowMinutes);
+  if (
+    !Number.isFinite(elapsedMinutes) ||
+    !Number.isFinite(settledWindowMinutes) ||
+    elapsedMinutes < settledWindowMinutes
+  ) {
+    return {
+      action: 'not-applicable',
+      reason: STALE_REQUEST_RECOVERY_REASONS.recheckBudgetUnspent,
     };
   }
   if (input.remainingBudget <= 0) {
@@ -236,7 +349,7 @@ export function evaluateStaleRequestRecoveryAction(input) {
   }
   return {
     action: 'attempt',
-    reason: STALE_REQUEST_RECOVERY_REASONS.attemptEligible,
+    reason: STALE_REQUEST_RECOVERY_REASONS.nonPendingAttemptEligible,
   };
 }
 /**
@@ -346,52 +459,25 @@ function main() {
   if (!args.prNumber) {
     throw new Error('missing required --pr <number> argument');
   }
-  const owner =
-    args.owner ||
-    ghText(['repo', 'view', '--json', 'owner', '--jq', '.owner.login']);
-  const repo =
-    args.repo || ghText(['repo', 'view', '--json', 'name', '--jq', '.name']);
-  const repoRef = `${owner}/${repo}`;
-  const viewerLogin = safeGhText([
-    'api',
-    'user',
-    '--jq',
-    '.login',
-  ]).toLowerCase();
+  const currentRepo =
+    args.owner && args.repo ? null : resolveCurrentGithubRepository();
+  const owner = args.owner || currentRepo?.owner || '';
+  const repo = args.repo || currentRepo?.repo || '';
+  const port = createGithubProviderAdapter(owner, repo);
+  const viewerLogin = port.resolveViewerLoginSafe().viewerLogin;
   const { actors: configuredTrustedActors, source: trustedMarkerActorsSource } =
     resolveTrustedMarkerActors({
       flagValue: args.trustedMarkerLogins,
       envValue: process.env.IDD_TRUSTED_MARKER_ACTORS,
       config: loadIddConfig(),
     });
-  const prHeadSha = ghText([
-    'pr',
-    'view',
-    String(args.prNumber),
-    '-R',
-    repoRef,
-    '--json',
-    'headRefOid',
-    '--jq',
-    '.headRefOid',
-  ]);
-  const reviews = ghApiJson(
-    `repos/${owner}/${repo}/pulls/${args.prNumber}/reviews`,
-    true,
-  );
-  const requestedReviewers = ghApiJson(
-    `repos/${owner}/${repo}/pulls/${args.prNumber}/requested_reviewers`,
-    false,
-  );
-  const timelineEvents = ghApiJson(
-    `repos/${owner}/${repo}/issues/${args.prNumber}/timeline`,
-    true,
-    ['-H', 'Accept: application/vnd.github+json'],
-  );
-  const comments = ghApiJson(
-    `repos/${owner}/${repo}/issues/${args.prNumber}/comments`,
-    true,
-  );
+  const prHeadSha = port.getChangeRequestHeadSha(args.prNumber);
+  const reviews = port.listReviews(args.prNumber);
+  const restRequestedReviewers = port
+    .getChangeRequestRequestedReviewerLogins(args.prNumber)
+    .map((login) => ({ login }));
+  const timelineEvents = port.getWorkItemTimeline(args.prNumber);
+  const comments = port.listWorkItemComments(args.prNumber);
   const collaboratorTrustEnabled = isTruthy(
     process.env.IDD_TRUST_COLLABORATOR_MARKERS,
   );
@@ -399,19 +485,43 @@ function main() {
     viewerLogin,
     ...configuredTrustedActors,
     ...(collaboratorTrustEnabled
-      ? resolveTrustedCollaboratorMarkerLogins(owner, repo, comments)
+      ? resolveTrustedCollaboratorMarkerLogins(port, comments)
       : []),
   ]);
   const advisoryWaitPolicy = readAdvisoryWaitPolicy();
   const primaryBotLogin = readAdvisoryPrimaryBotLogin();
   const secondaryBotLogin = readAdvisorySecondaryBotLogin();
+  // #2167: only pay for the optional GraphQL reviewRequests call when the
+  // cheaper REST + timeline signals are both inconclusive -- mirrors
+  // resolveCopilotPending's own precedence (protocol-helpers.mts) so this
+  // pre-check and the pure function it feeds never disagree on when a
+  // GraphQL fallback is actually needed.
+  const restCopilotPending = isCopilotPending(
+    restRequestedReviewers,
+    primaryBotLogin,
+  );
+  const lastCopilotCommitForGraphqlGate = findLastCopilotReviewCommit(
+    reviews,
+    primaryBotLogin,
+  );
+  const copilotPendingCoversHeadForGraphqlGate =
+    computeCopilotPendingCoversHead(timelineEvents, prHeadSha, primaryBotLogin);
+  const graphqlRequestedReviewerLogins =
+    !restCopilotPending &&
+    !(
+      copilotPendingCoversHeadForGraphqlGate &&
+      lastCopilotCommitForGraphqlGate !== prHeadSha
+    )
+      ? port.getChangeRequestRequestedReviewerLoginsGraphql(args.prNumber)
+      : null;
   const summary = buildAdvisoryWaitSummary(
     {
       prHeadSha,
       reviews,
-      requestedReviewers: requestedReviewers.users ?? [],
+      requestedReviewers: restRequestedReviewers,
       timelineEvents,
       comments: comments.map(normalizeComment),
+      graphqlRequestedReviewerLogins,
     },
     {
       now: args.now || new Date().toISOString().replace('.000Z', 'Z'),
@@ -428,6 +538,35 @@ function main() {
       trustedMarkerLogins,
     },
   );
+  // #2554: skipped entirely when no `advisoryWait.providerOutage.
+  // terminalWindow` override is configured. With no override, the
+  // effective-window resolver below returns the base window regardless of
+  // declarationActive, so the live outage-declaration fetch would be pure
+  // overhead for a repository that never configured this feature
+  // (matching pre-merge-readiness.mts's own skip-when-unconfigured guard).
+  // Schema-validated first, matching pre-merge-readiness.mts's and
+  // advisory-convergence.mts's own validate-or-default gate: an
+  // `advisoryWait` section invalid for an unrelated reason must fall back
+  // to every distributed default, not just this one key.
+  const iddConfigForTerminalWindow = loadIddConfig();
+  const validatedAdvisoryWaitConfigForTerminalWindow =
+    advisoryWaitSectionIsValid(iddConfigForTerminalWindow)
+      ? iddConfigForTerminalWindow
+      : {};
+  const providerOutageTerminalWindowOverrideMinutes =
+    resolveProviderOutageTerminalWindowMinutes(
+      validatedAdvisoryWaitConfigForTerminalWindow,
+    );
+  const outageDeclarationActiveForTerminalWindow =
+    providerOutageTerminalWindowOverrideMinutes !== null
+      ? resolveOutageDeclarationActiveForConvergenceSelector({
+          port,
+          owner,
+          repo,
+          iddConfig: iddConfigForTerminalWindow,
+          now: summary.now,
+        })
+      : false;
   // Reuse summary.now (not a fresh new Date() call) so both computations
   // agree on the exact same instant.
   const copilotRecovery = buildCopilotRecoverySummary(
@@ -442,7 +581,10 @@ function main() {
       claimId: args.claimId,
       agentId: args.agentId,
       recoveryCycleCap: readAdvisoryRecoveryCycleCap(),
-      terminalWindowMinutes: readAdvisoryTerminalWindowMinutes(),
+      terminalWindowMinutes: resolveEffectiveAdvisoryTerminalWindowMinutes({
+        config: validatedAdvisoryWaitConfigForTerminalWindow,
+        declarationActive: outageDeclarationActiveForTerminalWindow,
+      }),
     },
   );
   // #1571: bounded stale-request recovery eligibility, derived from the
@@ -453,8 +595,11 @@ function main() {
     copilotPending: summary.copilotPending,
     copilotPendingCoversHead: summary.copilotPendingCoversHead,
     sameHeadMarkerPresent: summary.sameHeadMarkerPresent,
+    sameHeadRequestMarkerPresent: summary.sameHeadRequestMarkerPresent,
     remainingBudget: copilotRecovery.remainingBudget,
     activeClaimProvided: copilotRecovery.activeClaimProvided,
+    elapsedMinutes: summary.elapsedMinutes,
+    settledWindowMinutes: summary.settledWindowMinutes,
   });
   process.stdout.write(
     `${JSON.stringify(
@@ -513,27 +658,24 @@ fails closed to NOT_TERMINAL with reason: active-claim-not-provided.
 }
 function normalizeComment(comment) {
   return {
-    author: { login: comment.user?.login ?? '' },
-    body: comment.body ?? '',
-    createdAt: comment.created_at ?? '',
+    author: { login: comment.authorLogin },
+    body: comment.body,
+    createdAt: comment.createdAt,
   };
 }
-function resolveTrustedCollaboratorMarkerLogins(owner, repo, comments) {
+function resolveTrustedCollaboratorMarkerLogins(port, comments) {
   const advisoryAuthors = [
     ...new Set(
       comments
-        .filter((comment) => advisoryMarkerComment(comment.body ?? ''))
-        .map((comment) => comment.user?.login ?? '')
+        .filter((comment) => advisoryMarkerComment(comment.body))
+        .map((comment) => comment.authorLogin)
         .filter(Boolean),
     ),
   ];
   return advisoryAuthors.filter((login) => {
-    const permission = safeGhText([
-      'api',
-      `repos/${owner}/${repo}/collaborators/${encodeURIComponent(login)}/permission`,
-      '--jq',
-      '.permission',
-    ]).toLowerCase();
+    const outcome = port.getCollaboratorPermission(login);
+    const permission =
+      outcome.outcome === 'found' ? outcome.permission.toLowerCase() : '';
     return (
       permission === 'admin' ||
       permission === 'maintain' ||
@@ -552,17 +694,4 @@ export function advisoryMarkerComment(body) {
 }
 function isTruthy(value) {
   return /^(1|true|yes)$/i.test(String(value ?? '').trim());
-}
-function ghApiJson(path, paginate = false, extraArgs = []) {
-  const args = ['api', path, ...extraArgs];
-  if (paginate) {
-    // gh api with --paginate and --jq '.[]' emits one JSON object per line.
-    // --slurp landed in gh v2.48.0, but Ubuntu 24.04 LTS ships gh v2.45.0
-    // via apt, so keep the NDJSON-compatible form here.
-    args.splice(1, 0, '--paginate', '--jq', '.[]');
-    return parsePaginatedGhNdjson(
-      ghText(args, { timeout: DEFAULT_GH_PAGINATED_TIMEOUT_MS }),
-    );
-  }
-  return JSON.parse(ghText(args));
 }

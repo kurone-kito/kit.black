@@ -50,6 +50,21 @@
 // #1450/#1451 first needs them.
 import { parseArgs as nodeParseArgs } from 'node:util';
 
+// #1922: the three message-shape prefixes toRepoShapedError() below
+// produces. Named here (rather than inlined at each call site) so
+// extractShapedCliParseErrorMessage() can recognize the exact same shapes
+// from raw text -- across the bin/run-helper.mts subprocess boundary,
+// where only the child's captured stderr text is visible, never the
+// original Error object -- without either copy silently drifting out of
+// sync with the other.
+const UNKNOWN_ARGUMENT_PREFIX = 'unknown argument: ';
+const MISSING_VALUE_FOR_ARGUMENT_PREFIX = 'missing value for argument: ';
+const UNEXPECTED_VALUE_FOR_ARGUMENT_PREFIX = 'unexpected value for argument: ';
+const REPO_SHAPED_CLI_PARSE_ERROR_PREFIXES = [
+  UNKNOWN_ARGUMENT_PREFIX,
+  MISSING_VALUE_FOR_ARGUMENT_PREFIX,
+  UNEXPECTED_VALUE_FOR_ARGUMENT_PREFIX,
+];
 const NODE_OPTION_KEY_PATTERN = /^--[A-Za-z0-9][A-Za-z0-9-]*$/;
 /**
  * Node's native `util.parseArgs` (`strict: true`) throws
@@ -95,6 +110,24 @@ const NODE_OPTION_KEY_PATTERN = /^--[A-Za-z0-9][A-Za-z0-9-]*$/;
  * `string`-type flag is rewritten onto that flag's long `=` form before
  * `util.parseArgs` ever sees it: `-p=5` becomes `--pr=5`, `-p=-3` becomes
  * `--pr=-3`. A short letter with no matching flag entry is left untouched.
+ *
+ * **Declared-alias reservation (#1961).** The two-token rewrite above is
+ * only safe when the following token is a genuinely arbitrary value (a
+ * negative number, an unrelated string starting with a dash, and so on).
+ * When that token instead exactly matches a short alias the spec itself
+ * declares -- for any flag, not only a string-typed one, e.g. a boolean
+ * help flag's own short letter -- rewriting it would silently swallow a
+ * real flag as another flag's literal value instead of ever reaching
+ * `util.parseArgs` as itself. A declared long option form never hits this
+ * problem in the first place: it already falls outside the two-token
+ * rewrite entirely, since a value starting with `--` is excluded from
+ * `isAmbiguousValue` above. So every declared short form is carved out of
+ * the rewrite, left exactly as typed; `util.parseArgs` then reports its
+ * own ambiguous-value error for it (re-shaped by {@link toRepoShapedError}
+ * into this module's usual missing-value idiom), the same clear failure
+ * this module already produces when a flag's value is missing outright,
+ * rather than resolving to a wrong literal value one flag can never
+ * actually mean for another.
  */
 // Matches a short option's `=value` form as ONE argv token, e.g. `-p=5`
 // or `-p=-3` -- captures the short letter and everything after `=`
@@ -111,6 +144,16 @@ function disambiguateSingleDashValues(argv, spec) {
     Object.entries(spec)
       .filter(([, flagSpec]) => flagSpec.type === 'string' && flagSpec.short)
       .map(([dashedKey, flagSpec]) => [`-${flagSpec.short}`, dashedKey]),
+  );
+  // #1961: every declared short alias, regardless of the owning flag's
+  // `type` -- unlike `shortToLong` above (string-typed flags only, since
+  // that map feeds the `-x=value` single-token rewrite, which only makes
+  // sense for a value-taking flag), a boolean flag's short alias (e.g. a
+  // help flag) is just as reservable as a string flag's.
+  const declaredShortForms = new Set(
+    Object.values(spec)
+      .filter((flagSpec) => flagSpec.short)
+      .map((flagSpec) => `-${flagSpec.short}`),
   );
   const rewritten = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -130,12 +173,16 @@ function disambiguateSingleDashValues(argv, spec) {
       }
     }
     // Two-token case: `--flag VALUE` / `-p VALUE` where VALUE starts with
-    // a single dash and could plausibly be another option.
+    // a single dash and could plausibly be another option. Excludes a
+    // VALUE that is itself a declared short alias (#1961 above) -- that
+    // token is reserved, never rewritten into another flag's literal
+    // value, regardless of which flag precedes it.
     const next = argv[index + 1];
     const isAmbiguousValue =
       typeof next === 'string' &&
       next.startsWith('-') &&
-      !next.startsWith('--');
+      !next.startsWith('--') &&
+      !declaredShortForms.has(next);
     if (stringFlags.has(token) && isAmbiguousValue) {
       rewritten.push(`${token}=${next}`);
       index += 1;
@@ -211,16 +258,129 @@ function toRepoShapedError(error) {
   switch (err.code) {
     case 'ERR_PARSE_ARGS_UNKNOWN_OPTION':
     case 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL':
-      return new Error(`unknown argument: ${token}`);
+      return new Error(`${UNKNOWN_ARGUMENT_PREFIX}${token}`);
     case 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE':
       return new Error(
         err.message.includes('does not take an argument')
-          ? `unexpected value for argument: ${token}`
-          : `missing value for argument: ${token}`,
+          ? `${UNEXPECTED_VALUE_FOR_ARGUMENT_PREFIX}${token}`
+          : `${MISSING_VALUE_FOR_ARGUMENT_PREFIX}${token}`,
       );
     default:
       return err;
   }
+}
+/**
+ * Recognize Node's default uncaught-exception stderr text for a shaped CLI
+ * parse error (#1922) and extract just the one-line message, discarding
+ * the source-line preview, stack frames, and trailing `Node.js vX.Y.Z`
+ * footer Node prints around it. Scans **every** `Error: ` -prefixed line in
+ * the text -- not just the first -- and returns the first whose message
+ * starts with one of the three shapes {@link toRepoShapedError} produces,
+ * so a script that logs its own unrelated `Error: ...` diagnostic before a
+ * later real crash can't mask the shaped line. Returns `null` when no line
+ * matches, the safe default: a caller should forward the original text
+ * unchanged in that case, exactly as it would for any other error class.
+ */
+// Node's own stack-frame rendering, always "    at ..." (4+ spaces). Used
+// to find where a captured message ends -- see extractShapedCliParseErrorMessage's
+// line-scan below.
+const STACK_FRAME_LINE_PATTERN = /^\s+at /;
+// A line starting a new "Error: " block. Reused both to *find* candidate
+// blocks and to know where the *previous* block's message ends (a second
+// "Error: " line immediately terminates the one before it, same as a
+// stack frame would).
+const ERROR_LINE_PATTERN = /^Error: (.*)$/;
+// `NODE_OPTIONS=--stack-trace-limit=0` (a supported Node runtime option, not
+// an adversarial input) changes Node's uncaught-exception rendering to a
+// single bracketed `[Error: message]` line with no stack frames at all
+// (chatgpt-codex-connector review finding) -- verified empirically:
+// `NODE_OPTIONS='--stack-trace-limit=0' node bin/idd-branch-name.mjs
+// --bogus` prints `[Error: unknown argument: --bogus]` with none of the
+// usual "Error: "-prefixed / "    at " structure this module otherwise
+// relies on. Handled as its own single-line case, not folded into the
+// line-scan loop above: a message that itself happens to span multiple
+// lines under this zero-stack bracketed form has no unambiguous
+// terminator to scan for (no stack frame ever follows to mark the end),
+// so that narrower intersection is a disclosed, accepted gap rather than
+// something this pattern attempts to solve.
+const BRACKETED_ZERO_STACK_ERROR_LINE_PATTERN = /^\[Error: (.*)\]$/;
+export function extractShapedCliParseErrorMessage(stderrText) {
+  // Line-based, not a single regex: a shaped message can itself contain an
+  // embedded newline (e.g. a stray positional argument whose literal value
+  // spans multiple lines -- the underlying parseCliArgs() error already
+  // preserves that verbatim; this scan must too, rather than truncating at
+  // the first line via a `.`-based pattern, which silently drops
+  // everything after the first embedded newline). A message block runs
+  // from its own "Error: " line up to (but not including) whichever comes
+  // first: a stack-frame line, the next "Error: " line, or the end of the
+  // text.
+  //
+  // Split on `/\r?\n/`, not a plain `'\n'` (Copilot review finding): on
+  // CRLF stderr (e.g. Windows), a plain `'\n'` split leaves a trailing
+  // `\r` on every line, which does more than cosmetically taint the
+  // captured message with a stray `\r` -- ERROR_LINE_PATTERN's un-anchored
+  // (non-multiline) `$` cannot match before that leftover `\r` at all, so
+  // the "Error: " line fails to match this pattern altogether and the
+  // whole shaped error goes undetected, silently falling back to the raw
+  // stack trace on the one platform (Windows) this repository explicitly
+  // supports.
+  const lines = stderrText.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const bracketed = BRACKETED_ZERO_STACK_ERROR_LINE_PATTERN.exec(
+      lines[index],
+    );
+    if (bracketed !== null && isShapedMessage(bracketed[1])) {
+      return bracketed[1];
+    }
+    const match = ERROR_LINE_PATTERN.exec(lines[index]);
+    if (match === null) {
+      continue;
+    }
+    const messageLines = [match[1]];
+    let cursor = index + 1;
+    while (
+      cursor < lines.length &&
+      !STACK_FRAME_LINE_PATTERN.test(lines[cursor]) &&
+      !ERROR_LINE_PATTERN.test(lines[cursor])
+    ) {
+      messageLines.push(lines[cursor]);
+      cursor += 1;
+    }
+    const message = messageLines.join('\n');
+    if (isShapedMessage(message)) {
+      return message;
+    }
+  }
+  return null;
+}
+function isShapedMessage(message) {
+  return REPO_SHAPED_CLI_PARSE_ERROR_PREFIXES.some((prefix) =>
+    message.startsWith(prefix),
+  );
+}
+/**
+ * Strip a single leading `--` end-of-options marker pnpm forwards through a
+ * `pnpm run <script> -- <flags>` alias without consuming it first (#1921),
+ * so a pnpm-forwarded invocation parses the same as the equivalent bare
+ * form. `parseCliArgs` applies this internally; a hand-rolled parser
+ * excluded from that wrapper (#2465) must call this directly on its own
+ * `argv` before parsing, since it never goes through `parseCliArgs` at all.
+ * Scope is deliberately one token at position 0 only; a `--` anywhere else
+ * in argv keeps its current behavior unchanged.
+ *
+ * A second literal `--` immediately after the stripped one (i.e. argv
+ * started `--`, `--`, ...) must still be a hard error, not silently
+ * swallowed -- without this guard, stripping once would leave a lone
+ * trailing `--` for a caller's own parser to consume as an end-of-options
+ * marker with zero positionals, a new silent-success hole. The strip above
+ * never repeats -- this is a single explicit check, not a loop.
+ */
+export function stripLeadingArgumentSeparator(argv) {
+  const args = argv[0] === '--' ? argv.slice(1) : argv;
+  if (args[0] === '--') {
+    throw new Error(`${UNKNOWN_ARGUMENT_PREFIX}--`);
+  }
+  return args;
 }
 /**
  * Parse `argv` against a declarative flag spec, using `util.parseArgs`
@@ -239,10 +399,15 @@ export function parseCliArgs(argv, spec) {
     }
     nodeOptions[dashedKey.slice(2)] = flagSpec;
   }
+  // #1921: Node's `util.parseArgs` treats a pnpm-forwarded leading `--` as
+  // the conventional end-of-options marker, rejecting every flag after it
+  // as an unexpected positional under `allowPositionals: false` -- see
+  // stripLeadingArgumentSeparator's own doc comment for the full rationale.
+  const args = stripLeadingArgumentSeparator(argv);
   let parsed;
   try {
     parsed = nodeParseArgs({
-      args: disambiguateSingleDashValues(argv, spec),
+      args: disambiguateSingleDashValues(args, spec),
       options: nodeOptions,
       strict: true,
       allowPositionals: false,
