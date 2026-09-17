@@ -7,7 +7,10 @@ export interface ActivityProps
       Readonly<JSX.HTMLAttributes<HTMLDivElement>>,
       'class' | 'children' | 'innerHTML'
     >,
-    Pick<Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>, 'alt' | 'src'> {
+    Pick<
+      Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
+      'alt' | 'src' | 'srcset' | 'sizes'
+    > {
   /** The activity heading title. */
   readonly heading?: JSX.Element;
 }
@@ -18,7 +21,13 @@ export interface ActivityProps
  * @returns The component.
  */
 export const Activity: Component<ActivityProps> = (props) => {
-  const [local, others] = splitProps(props, ['alt', 'heading', 'src']);
+  const [local, others] = splitProps(props, [
+    'alt',
+    'heading',
+    'sizes',
+    'src',
+    'srcset',
+  ]);
   return (
     <li class="card bg-base-300 shadow-xl">
       <Show when={local.src}>
@@ -29,7 +38,9 @@ export const Activity: Component<ActivityProps> = (props) => {
             fetchpriority="low"
             height={720}
             loading="lazy"
+            sizes={local.sizes}
             src={local.src}
+            srcset={local.srcset}
             width={1280}
           />
         </figure>

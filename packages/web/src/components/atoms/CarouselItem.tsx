@@ -6,7 +6,7 @@ import { twMerge } from 'tailwind-merge';
 export interface CarouselItemProps
   extends Pick<
     Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
-    'alt' | 'class' | 'height' | 'src' | 'width'
+    'alt' | 'class' | 'height' | 'sizes' | 'src' | 'srcset' | 'width'
   > {}
 
 /**

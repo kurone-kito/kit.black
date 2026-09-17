@@ -7,7 +7,10 @@ export interface EventProps
       Readonly<JSX.HTMLAttributes<HTMLDivElement>>,
       'class' | 'children' | 'innerHTML'
     >,
-    Pick<Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>, 'alt' | 'src'> {
+    Pick<
+      Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
+      'alt' | 'src' | 'srcset' | 'sizes'
+    > {
   /** The event heading title. */
   readonly heading?: JSX.Element;
 }
@@ -18,7 +21,13 @@ export interface EventProps
  * @returns The component.
  */
 export const Event: Component<EventProps> = (props) => {
-  const [local, others] = splitProps(props, ['alt', 'heading', 'src']);
+  const [local, others] = splitProps(props, [
+    'alt',
+    'heading',
+    'sizes',
+    'src',
+    'srcset',
+  ]);
   return (
     <li class="card bg-base-300 lg:card-side shadow-xl">
       <Show when={local.src}>
@@ -29,7 +38,9 @@ export const Event: Component<EventProps> = (props) => {
             fetchpriority="low"
             height={1810}
             loading="lazy"
+            sizes={local.sizes}
             src={local.src}
+            srcset={local.srcset}
             width={1280}
           />
         </figure>

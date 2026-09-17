@@ -1,6 +1,7 @@
 import md from 'markdown-it';
 import linkAttributes from 'markdown-it-link-attributes';
 import { defineConfig } from 'vite';
+import { imagetools } from 'vite-imagetools';
 import { plugin as mdPlugin, Mode } from 'vite-plugin-markdown';
 
 /**
@@ -17,5 +18,5 @@ const markdownIt = md({ html: true }).use(linkAttributes, {
 });
 
 export default defineConfig({
-  plugins: [mdPlugin({ markdownIt, mode: [Mode.HTML] })],
+  plugins: [imagetools(), mdPlugin({ markdownIt, mode: [Mode.HTML] })],
 });
