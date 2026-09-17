@@ -128,8 +128,8 @@ template value, `"0.11.0"`.
   signals, `.github/idd/config.json` schema validation, and all three
   agent entry files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) pass. The
   corrupted `<placeholder>`-as-shell-redirection regression check
-  (`grep -rn '< [a-z-]* >' .github/instructions docs profiles
-.claude/skills`) still returns no matches.
+  (`grep -rn '< [a-z-]* >' .github/instructions docs profiles .claude/skills`)
+  still returns no matches.
   - The `worktreeGuard`/`core.hooksPath` warning remains the same husky-
     chains-`.githooks` false alarm recorded at v0.6.0.
   - The "branch protection is enabled but no required status checks are
@@ -153,8 +153,8 @@ template value, `"0.11.0"`.
     `packages/web/src/i18n/{en,ja}.ts`'s `{{ year }}` runtime template
     token no longer triggers it. The fix landed upstream and flowed back
     through this re-sync with no local patch needed.
-- `node scripts/validate-schemas.mjs`: all 20 managed fixture pairs (10
-  schemas × valid/invalid) validate successfully, plus the
+- `node scripts/validate-schemas.mjs`: all 20 managed fixture files (10
+  valid/invalid fixture pairs) validate successfully, plus the
   `schemas/phase-graph.json` live-data case — no unexplained missing
   managed schema/fixture pair. The CLI itself does not reach a clean
   exit, though: upstream added a new live-data check at v0.11.0
@@ -164,8 +164,8 @@ template value, `"0.11.0"`.
   `idd-template/` tree. This adopter repository's real hearing catalog
   lives at `docs/onboarding/hearing-catalog.json` (no `idd-template/`
   prefix, since kit.black is not the idd-skill template repository
-  itself), so the CLI throws an uncaught `ENOENT` after printing the
-  fixture-pair results. This is a script/adopter-layout mismatch, not a
+  itself), so the CLI throws an uncaught `ENOENT` after printing all 20
+  fixture-file results. This is a script/adopter-layout mismatch, not a
   missing managed pair; it is recorded as a known local gap rather than
   patched by this verification track, since `scripts/` is
   #245/#246/#247's candidate-file territory, not this document's.
@@ -423,10 +423,11 @@ artifact upstream ships at `v0.11.0` — upstream's own copy still pins
 `actions/checkout@v4` at this tag (confirmed against the upstream
 source); this repository's copy keeps its local `actions/checkout@v7`
 divergence, matching the sibling `push.yml`/`push-main.yml` workflows).
-It triggers on `pull_request`, `pull_request_review`,
-`pull_request_target`, and manual `workflow_dispatch` (for re-checking
-after a maintainer waiver); `pull_request_review_comment` was dropped
-from this workflow at v0.11.0 and moved to the new companion below.
+It triggers on `pull_request`, `pull_request_target`, and manual
+`workflow_dispatch` (for re-checking after a maintainer waiver);
+`pull_request_review` and `pull_request_review_comment` were both
+dropped from this workflow at v0.11.0 and moved to the new companion
+below.
 
 - **v0.11.0 re-adaptation** (#251): adds `helperRuntime.profile`
   resolution with a fail-closed path for an `instructions-only` or
@@ -727,7 +728,7 @@ the v0.11.0 re-import (#252):
   `idd-template/` tree. This repository's real hearing catalog lives at
   `docs/onboarding/hearing-catalog.json` (no `idd-template/` prefix), so
   running `node scripts/validate-schemas.mjs` here throws an uncaught
-  `ENOENT` after printing all 20 fixture-pair results — the managed
+  `ENOENT` after printing all 20 fixture-file results — the managed
   schema/fixture pairs themselves are all complete; only this one
   hardcoded live-data path is unreachable in a `vendored-node` adopter
   checkout. Not fixed by #252 (out of its `docs/idd-policy.md`-only
