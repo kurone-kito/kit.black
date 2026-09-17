@@ -1,8 +1,8 @@
 import type { Component } from 'solid-js';
 import eventMeow from '../../assets/events/meow-meetup.webp';
-import eventMeowSrcset from '../../assets/events/meow-meetup.webp?w=220;320;420;840;1280&as=srcset';
+import eventMeowSrcset from '../../assets/events/meow-meetup.webp?w=224;320;420;840;1280&as=srcset';
 import eventUiUx from '../../assets/events/ui-ux-meetup.webp';
-import eventUiUxSrcset from '../../assets/events/ui-ux-meetup.webp?w=220;320;420;840;1280&as=srcset';
+import eventUiUxSrcset from '../../assets/events/ui-ux-meetup.webp?w=224;320;420;840;1280&as=srcset';
 import {
   attributes as detailEnA,
   html as detailEn,
