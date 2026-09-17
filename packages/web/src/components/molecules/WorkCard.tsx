@@ -9,7 +9,10 @@ export interface WorkCardProps
       Readonly<JSX.HTMLAttributes<HTMLDivElement>>,
       'children' | 'class' | 'innerHTML'
     >,
-    Pick<Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>, 'alt' | 'src'> {
+    Pick<
+      Readonly<JSX.ImgHTMLAttributes<HTMLImageElement>>,
+      'alt' | 'src' | 'srcset' | 'sizes'
+    > {
   /** The work heading title. */
   readonly heading?: JSX.Element;
 
@@ -42,7 +45,9 @@ export const WorkCard: Component<WorkCardProps> = (props) => {
             fetchpriority="low"
             height={1656}
             loading="lazy"
+            sizes={others.sizes}
             src={others.src}
+            srcset={others.srcset}
             width={1024}
           />
         </figure>

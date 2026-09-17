@@ -10,8 +10,13 @@ import {
 import { twMerge } from 'tailwind-merge';
 import { CarouselItem } from '../atoms/CarouselItem.js';
 
-/** Type definition that represents a carousel item. */
-export type Item = readonly [image: string, alt: string];
+/**
+ * Type definition that represents a carousel item. `srcset` is
+ * optional so a plain `[image, alt]` tuple (as used by existing tests
+ * and stories with placeholder images) stays valid; real content
+ * callers supply it to serve responsive width variants.
+ */
+export type Item = readonly [image: string, alt: string, srcset?: string];
 
 /** Type definition for the properties. */
 export interface SceneCarouselProps {
@@ -28,6 +33,15 @@ export interface SceneCarouselProps {
    * regression.
    */
   readonly label: string;
+
+  /**
+   * The `sizes` attribute applied to every item's `<img>`, describing
+   * how wide a single item renders across this carousel's own
+   * breakpoints. One value for the whole carousel, since every item
+   * shares the same layout -- not part of {@link Item} to avoid
+   * repeating an identical string once per item.
+   */
+  readonly sizes?: string | undefined;
 }
 
 /** How often autoplay advances to the next item, in milliseconds. */
@@ -236,7 +250,9 @@ export const Carousel: Component<SceneCarouselProps> = (props) => {
               alt={index()[1]}
               class="carousel-item h-full w-auto cursor-ew-resize"
               height={720}
+              sizes={props.sizes}
               src={index()[0]}
+              srcset={index()[2]}
               width={1280}
             />
           )}
