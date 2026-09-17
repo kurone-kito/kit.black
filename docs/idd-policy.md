@@ -270,6 +270,39 @@ Dependabot), a maintainer can bind a waiver to the sentinel claim-id
 `none` via `scripts/external-check-waiver.mjs --claimless` — the vendored
 helper bundle (#225) ships this script now.
 
+## Vendored-Content Security-Scanner Alerts
+
+**Policy** (decided 2026-09-17, tracked in #271): **Option B** —
+documented manual-dismissal-with-justification convention. No new
+`ciGate` configuration surface for this class of finding.
+
+Option A (registering specific CodeQL rule/path combinations as
+`ciGate.externalChecks.waivable` entries, mirroring the existing
+`idd-advisory-convergence` waiver) was considered and rejected as
+infeasible against the current schema: `schemas/policy.schema.json`
+defines `externalChecks.waivable[].selector` as matching a
+repo-external **check name** only ("Name or glob selector for a
+repo-external check eligible for a maintainer-authorized waiver"), with
+no rule- or path-level granularity. Registering a selector for this
+class of finding would waive the entire CodeQL check repository-wide,
+not the one vendored-content alert — a materially larger and riskier
+change than the issue described, not a reuse of the existing mechanism.
+Building genuine rule/path granularity would require a new gate
+feature, which this decision does not adopt.
+
+When a security-scanner alert (CodeQL or otherwise) is confirmed to sit
+inside content this repository re-syncs byte-identical from
+`kurone-kito/idd-skill` (`scripts/`, `schemas/`, `fixtures/schemas/` —
+see [Formatting Divergence](#formatting-divergence)), a maintainer
+dismisses the alert directly in GitHub's code-scanning UI with a
+justification comment citing the byte-identical-vendoring constraint
+and, when one exists, the upstream relay issue tracking the finding
+(e.g. #261, #264). No `ciGate` configuration change accompanies the
+dismissal, and no autonomous agent dismisses a code-scanning alert on
+its own authority. This does not prevent a future re-sync from
+re-reporting the same finding as new; each recurrence is dismissed the
+same way until the fix lands upstream and flows back through a re-sync.
+
 ## Required-Check-Read Trust
 
 **Policy** (`ciGate.trustEmptyProtectionReads`, set in #241): `true`.
