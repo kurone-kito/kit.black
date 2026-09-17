@@ -106,9 +106,92 @@ repository moved from the 2026-07-03 `iddVersion: 0.3.0` baseline onto
   created IDD worktree); this is a data-availability gap, not a defect
   introduced by the re-import.
 
+### v0.11.0 re-import verification
+
+**Re-imported and verified on 2026-09-17** (roadmap #244, completion
+track #252 — see the roadmap for the full seven-track prerequisite
+list, #245 through #251). The repository moved from the v0.6.0 baseline
+onto **upstream tag `v0.11.0` (commit
+`1f90787ebf4021673ce6e5eb69741df331fd2037`, released 2026-09-12)**.
+`.github/idd/config.json`'s `iddVersion` carries the tag's declared
+template value, `"0.11.0"`.
+
+- The onboarding hearing for this re-import was resolved up front in
+  roadmap #244's own "Wizard and clarification decisions" table, before
+  the child tracks were created — see the resolved-values summary in
+  the relevant sections below rather than repeating the whole table
+  here.
+- The Step 6 checklist passed again against the re-imported set:
+  `node scripts/idd-doctor.mjs` reports `passed (4 warning(s))` with
+  **zero errors** — required instruction/reference files, profile
+  artifacts, marker prefix, project-commands table, merge/review policy
+  signals, `.github/idd/config.json` schema validation, and all three
+  agent entry files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) pass. The
+  corrupted `<placeholder>`-as-shell-redirection regression check
+  (`grep -rn '< [a-z-]* >' .github/instructions docs profiles
+.claude/skills`) still returns no matches.
+  - The `worktreeGuard`/`core.hooksPath` warning remains the same husky-
+    chains-`.githooks` false alarm recorded at v0.6.0.
+  - The "branch protection is enabled but no required status checks are
+    configured on main" warning is genuine and independently confirmed:
+    `gh ruleset view` on both of this repository's active rulesets
+    (`main`, `features`) shows neither contains a
+    `required_status_checks` rule. This matches issue #129 ("Register
+    idd-advisory-convergence as a required check") still being **open**
+    — see Advisory-Convergence Gate below, unchanged from the v0.6.0
+    record.
+  - The autopilot-suitability score/label disagreement now covers
+    **two** issues, both accurate by design: #136 (recorded at v0.6.0)
+    and #122 — the v0.6.0 re-import's own roadmap issue, still open and
+    carrying `status:blocked-by-human` alongside a stale score of 3.
+  - The v0.6.0-era placeholder-scanner false positive
+    ([kurone-kito/idd-skill#2079](https://github.com/kurone-kito/idd-skill/issues/2079))
+    is **resolved**: `idd-doctor.mjs` now scans an explicit allowlist of
+    IDD-managed path classes (`docs/*.md`, `profiles/`, `.claude/skills/`,
+    the vendored helper bundle, `.github/idd/`) that never reaches an
+    adopter's own application source, so
+    `packages/web/src/i18n/{en,ja}.ts`'s `{{ year }}` runtime template
+    token no longer triggers it. The fix landed upstream and flowed back
+    through this re-sync with no local patch needed.
+- `node scripts/validate-schemas.mjs`: all 20 managed fixture pairs (10
+  schemas × valid/invalid) validate successfully, plus the
+  `schemas/phase-graph.json` live-data case — no unexplained missing
+  managed schema/fixture pair. The CLI itself does not reach a clean
+  exit, though: upstream added a new live-data check at v0.11.0
+  (`idd-skill#2279`) that reads
+  `idd-template/docs/onboarding/hearing-catalog.json`, a path that
+  assumes the script runs inside the `idd-skill` source repository's own
+  `idd-template/` tree. This adopter repository's real hearing catalog
+  lives at `docs/onboarding/hearing-catalog.json` (no `idd-template/`
+  prefix, since kit.black is not the idd-skill template repository
+  itself), so the CLI throws an uncaught `ENOENT` after printing the
+  fixture-pair results. This is a script/adopter-layout mismatch, not a
+  missing managed pair; it is recorded as a known local gap rather than
+  patched by this verification track, since `scripts/` is
+  #245/#246/#247's candidate-file territory, not this document's.
+- `node scripts/helper-runtime-manifest.mjs --profile vendored-node`
+  reports exactly **115 managed files: 73 scripts, 22 schemas, 20
+  fixtures** — confirmed by direct inspection of the manifest's
+  `managedFiles` list, matching this repository's actual `scripts/`,
+  `schemas/`, and `fixtures/schemas/` contents exactly (one additional
+  file, `scripts/advisory-comment-debounce.mjs`, exists in `scripts/`
+  but is deliberately outside the 73 managed files — see Advisory-
+  Convergence Gate below). This is the delta roadmap #244 recorded: up
+  from the prior 89-file set (57 scripts, 16 schemas, 16 fixtures).
+- `pnpm run lint` and `pnpm run test` pass with the same known exception
+  recorded at v0.6.0 and reconfirmed unchanged here: only
+  `packages/web`'s `Calendar.test.tsx` fails (the same missing
+  credential-bound `src/data.json`); `packages/lib` and
+  `packages/fetcher` are fully green, and the rest of `packages/web`
+  passes (149 passed, 2 skipped alongside the one failing suite).
+
 ## Merge Policy
 
-**Policy**: `fully_autonomous_merge`
+**Policy**: `fully_autonomous_merge`, with an explicit
+`mergePolicyAck: "fully_autonomous_merge"` acknowledgement recorded in
+`.github/idd/config.json` (v0.11.0 re-import, roadmap #244) confirming
+the operator's continued acceptance of this policy — the policy value
+itself is unchanged from the original onboarding decision.
 
 One trusted agent session may execute the F3 merge after the normal
 claim, freshness, CI, advisory, and review gates pass.
@@ -335,26 +418,55 @@ genuinely empty read.
 ## Advisory-Convergence Gate
 
 **Status**: hosted as a **non-required** check (`.github/workflows/idd-advisory-convergence.yml`,
-added in #127, adapted from the `idd-template/` artifact upstream ships
-at `v0.6.0` — this repository's copy pins `actions/checkout@v7` instead
-of upstream's `@v4`, matching the sibling `push.yml`/`push-main.yml`
-workflows). It triggers on `pull_request`, `pull_request_review`,
-`pull_request_review_comment`, and manual `workflow_dispatch` (for
-re-checking after a maintainer waiver), and produces a convergence verdict
-on every PR today.
+added in #127, re-adapted for v0.11.0 in #251 from the `idd-template/`
+artifact upstream ships at `v0.11.0` — upstream's own copy still pins
+`actions/checkout@v4` at this tag (confirmed against the upstream
+source); this repository's copy keeps its local `actions/checkout@v7`
+divergence, matching the sibling `push.yml`/`push-main.yml` workflows).
+It triggers on `pull_request`, `pull_request_review`,
+`pull_request_target`, and manual `workflow_dispatch` (for re-checking
+after a maintainer waiver); `pull_request_review_comment` was dropped
+from this workflow at v0.11.0 and moved to the new companion below.
 
+- **v0.11.0 re-adaptation** (#251): adds `helperRuntime.profile`
+  resolution with a fail-closed path for an `instructions-only` or
+  ambiguous profile (a missing/invalid profile no longer silently runs
+  the vendored-node command anyway); adds the `pull_request_target`
+  trigger plus its own `idd-advisory-convergence-self-waiver` job (posts
+  a narrowly-scoped external-check waiver for a PR that fixes this
+  gate's own checking logic, so it can benefit from its own fix while
+  still unmerged); this repository's own deployment conventions
+  (`actions/checkout@v7`, `ref: main`, `persist-credentials: false`, the
+  `CI_RUNNER_LABEL` fallback to `ubuntu-latest`, explicit `setup-node`
+  from `.node-version`) are unchanged.
+- **Non-required comment companion** (`.github/workflows/idd-advisory-convergence-comment.yml`,
+  #251): a separate, also non-required workflow that now owns the
+  `pull_request_review_comment` trigger dropped from the main workflow
+  above, invoking the newly vendored
+  `scripts/advisory-comment-debounce.mjs` to protect the
+  `ciWait.rerunPolicy: rerun-once` budget from idd-originated
+  comment-reply bursts. `advisory-comment-debounce.mjs` is deliberately
+  **outside** the 115-file managed helper bundle (see Helper Runtime
+  Profile below) — it is a workflow-specific helper this repository
+  vendored directly, byte-identical and sha256-verified against
+  `kurone-kito/idd-skill@v0.11.0:scripts/advisory-comment-debounce.mjs`,
+  and marked `linguist-vendored` the same as every other vendored file.
 - **Scope** (`advisoryWait.convergenceScope`, set in #126):
   `idd-claimed` — see PR Review Policy above for why (Dependabot PRs stay
   out of the gate).
 - **Waiver surface**: configured and live — see External-Check Waivers
   above.
-- **Required-check enforcement**: not yet active. Registering
-  `idd-advisory-convergence` as a required status check is a GitHub
-  Ruleset edit tracked in #129, an operator-only action (repository
-  Settings access this automation does not hold). Until #129 lands, the
-  workflow's verdict is advisory-only, matching this repository's
-  `copilot-advisory` review policy; #129 does not block #128, since the
-  gate already runs and produces real signal as a non-required check.
+- **Required-check enforcement**: still not yet active as of the v0.11.0
+  re-import verification (#252, 2026-09-17) — reconfirmed directly:
+  `gh ruleset view` on both of this repository's active rulesets
+  (`main`, `features`) shows neither contains a `required_status_checks`
+  rule. Registering `idd-advisory-convergence` as a required status
+  check is a GitHub Ruleset edit tracked in #129 (still open), an
+  operator-only action (repository Settings access this automation does
+  not hold). Until #129 lands, the workflow's verdict is advisory-only,
+  matching this repository's `copilot-advisory` review policy; #129
+  does not block #128 or #244/#252, since the gate already runs and
+  produces real signal as a non-required check.
 
 ## Issue-Author Approval Gate
 
@@ -373,23 +485,33 @@ IDD helper package `@kurone-kito/idd-skill` remains unpublished to the npm
 registry. Rather than pin an unreviewed mutable source (a branch tarball
 or git URL) via the newly-available `helperRuntime.packageSpec` field,
 the repository vendors the reviewed, committed helper bundle directly:
-`scripts/` (#225) and `schemas/` + `fixtures/schemas/` (#226) are synced
-verbatim from `idd-skill` `v0.6.0` and excluded from prettier/eslint/
-oxlint/cspell reformatting and marked `linguist-vendored` (#222, #223), so
-they stay byte-identical across re-imports and diff cleanly against
-upstream. `helperRuntime.profile: vendored-node` was verified against the
-committed bundle in #228.
+`scripts/` (#225) and `schemas/` + `fixtures/schemas/` (#226) were synced
+verbatim from `idd-skill` `v0.6.0` and re-synced verbatim to `v0.11.0`
+in #246/#247, excluded from prettier/eslint/oxlint/cspell reformatting
+and marked `linguist-vendored` (#222, #223, extended for the v0.11.0
+delta in #248), so they stay byte-identical across re-imports and diff
+cleanly against upstream. `helperRuntime.profile: vendored-node` was
+verified against the committed bundle in #228, and reconfirmed against
+the v0.11.0 bundle in #252
+(`node scripts/helper-runtime-manifest.mjs --profile vendored-node`
+reports exactly 115 managed files: 73 scripts, 22 schemas, 20
+fixtures — see the v0.11.0 re-import verification note above).
 
-**Node 24 LTS floor (load-bearing, #141).** Upstream helpers declare
-`engines.node: "^22.22.2 || >=24.2.0"`, and 39 of the 57 vendored
-`scripts/*.mjs` files gate their CLI body on `import.meta.main`, which
-does not exist before Node 24.2.0. On this repository's previous Node
-23.6.1 pin, every gated helper — including `node scripts/idd-doctor.mjs`
-— printed nothing and exited `0`: a silent fail-open no-op that let every
-gate the vendored bundle feeds pass vacuously. `.nvmrc` / `.node-version`
-/ `.tool-versions` and `package.json`'s `engines.node` now require
-`>=24.2.0`; every helper invocation in this repository's instructions
-runs under that floor.
+**Node 24 LTS floor (load-bearing, #141).** Upstream helpers declared
+`engines.node: "^22.22.2 || >=24.2.0"` at `v0.6.0`, with 39 of the then
+57 vendored `scripts/*.mjs` files gating their CLI body on
+`import.meta.main`, which does not exist before Node 24.2.0. On this
+repository's previous Node 23.6.1 pin, every gated helper — including
+`node scripts/idd-doctor.mjs` — printed nothing and exited `0`: a silent
+fail-open no-op that let every gate the vendored bundle feeds pass
+vacuously. `.nvmrc` / `.node-version` / `.tool-versions` and
+`package.json`'s `engines.node` now require `>=24.2.0`; every helper
+invocation in this repository's instructions runs under that floor. At
+`v0.11.0` the vendored `helper-runtime-manifest.mjs` itself declares a
+wider `nodeEngines: "^22.23.2 || ^24.2.0 || >=26.0.0"` (confirmed by
+direct inspection of its output), which the repository's `>=24.2.0` pin
+(currently Node 24.19.0 in this worktree) still satisfies; no floor
+change was needed for the v0.11.0 re-import.
 
 Upgrading to `package-manager` remains a tracked follow-up once a
 reviewed helper spec (a published package, or a pinned tarball evaluated
@@ -397,7 +519,22 @@ under the same review bar) becomes available — see Deferred below.
 
 ## Issue-Authoring Companion
 
-**Status**: installed at `.claude/skills/issue-authoring/`.
+**Status**: installed at `.claude/skills/issue-authoring/`, refreshed to
+the v0.11.0 ownership/publication contract in #249 — atomic labeled
+publication and release guards, exact publication-intent body identity,
+set/anchor ownership tracking, and hardened marker cleanup and stale
+self-waiver handling (verified present in
+`.claude/skills/issue-authoring/references/contract.md`'s ownership,
+publication-intent, and candidate-file sections during the #252
+verification pass).
+
+**Authoring language and clarification bound**: `authoringLanguage` is
+set to `"en"` and `issueAuthoring.maxClarificationRounds` to `3`
+(roadmap #244's resolved hearing values, applied in #250) — matches the
+existing English issue/PR prose convention. The companion's Stage 1
+hold uses the `issueAuthoring.authoringLabelName` value
+(`status:authoring`) until explicit release, as recorded in the same
+hearing.
 
 **Authoring journal**: `issueAuthoring.journalIssue` is set to
 `kurone-kito/kit.black#267` (#268). Issue #267 is the durable,
@@ -411,6 +548,15 @@ onboarding-hearing durable record for this area. This configuration
 supersedes that hearing-time outcome: #252's eventual record must
 reflect the #267 journal configured here rather than the earlier
 "none" state.
+
+**Reconciled against roadmap #244's own hearing table** (v0.11.0
+re-import, verified in #252): the resolved value there reads "No new
+journalIssue; this re-import is anchored by existing roadmap #244" — a
+decision not to create an _additional_ journal target, not a reversal
+of the pre-existing #267 configuration above (which predates this
+re-import and was set independently via #268). The two records do not
+conflict: #267 remains the repository's one and only configured
+authoring journal, unchanged by the v0.11.0 re-import.
 
 **Residual risk**: no mechanical Discover exclusion protects #267 from
 ordinary issue selection yet — `idd-discover.instructions.md`'s A0-O
@@ -501,35 +647,51 @@ is excluded.
 
 ## Deferred
 
-Tracked, but intentionally not changed by #128 or the v0.6.0
-re-import:
+Tracked, but intentionally not changed by #128, the v0.6.0 re-import, or
+the v0.11.0 re-import (#252):
 
 - **`helperRuntime.profile: package-manager`** — once
   `@kurone-kito/idd-skill` is published to the npm registry with a
   reviewed, non-mutable spec. The newly-available `helperRuntime.packageSpec`
   pin (an unreviewed mutable tarball/git-URL source) was considered during
   the v0.6.0 re-import and declined in favor of vendoring (see Helper
-  Runtime Profile above).
+  Runtime Profile above); roadmap #244's v0.11.0 hearing reconfirmed the
+  same choice ("Keep vendored-node; the upstream package is
+  private/unpublished") — still unpublished as of this verification.
 - **`instructionProfile: "lite"`** — the `lite/` condensed phase files are
   imported (#123) and available, but the opt-in switch stays unset:
   upstream's `schemas/policy.schema.json` root object rejects unknown
   properties, so setting this key today fails `idd-doctor`'s schema
   validation outright rather than merely doing nothing. Revisit once
-  upstream's schema accepts the field.
+  upstream's schema accepts the field; roadmap #244's v0.11.0 hearing
+  reconfirmed keeping this unset for the same reason.
 - **`advisoryWait.exemptBotAuthoredPrs`** — left unset (default `false`).
   It only matters under `advisoryWait.convergenceScope: "all-prs"`; this
   repository uses `"idd-claimed"`, which already keeps claimless PRs out
   of the gate, so the flag is redundant here.
-- **Upstream deltas landing after `v0.6.0`** — including polish/fix
-  commits already on upstream `main` past the tag, and GitHub Enterprise
-  Server support (not applicable to this GitHub.com-hosted repository) —
-  picked up by the next release re-sync.
-- **`scripts/idd-doctor.mjs` placeholder-scanner false positive** — filed
-  upstream as
-  [kurone-kito/idd-skill#2079](https://github.com/kurone-kito/idd-skill/issues/2079);
-  see the v0.6.0 re-import verification note above. Non-blocking and
-  profile-independent; the fix must land upstream and arrive via the next
-  re-sync, since `scripts/` stays vendored byte-identical.
+- **Mutable upstream `main` delta past the tagged release** — as of the
+  v0.11.0 re-import, upstream `main` sits at an untagged, 12-file delta
+  (commit `adad8ae43c5a1b6fc3a100ce384c8a84a8d5139d` per roadmap #244),
+  including polish/fix commits and GitHub Enterprise Server support (not
+  applicable to this GitHub.com-hosted repository) — picked up by the
+  next tagged release re-sync, not adopted early.
+- **`critiqueLoop.delegate`** — not enabled. Roadmap #244's v0.11.0
+  hearing table recorded "Do not enable critiqueLoop.delegate; no
+  external reviewer CLI is configured" as the resolved answer; the C1
+  critique pass continues to use the per-agent same-response mechanism.
+- **Token-cost development tooling** — deferred as upstream development
+  tooling, not part of the managed vendored bundle: roadmap #244's
+  "canonical source comparison is the upstream helper-runtime-manifest.mjs
+  for vendored-node; root-level upstream development tools such as
+  token-cost scripts are not adopter helpers and remain out of scope."
+- **`developmentBranch` / `provider` / `upstreamEscalation.enabled`** —
+  all left unset. Roadmap #244's v0.11.0 hearing recorded "Leave
+  developmentBranch and provider unset; the repository uses main and
+  GitHub" as the resolved answer (no non-default development branch or
+  non-GitHub provider in use); `upstreamEscalation.enabled` stays unset
+  as noted in the `validate-schemas.mjs` entry below, since autonomous
+  upstream filing is out of this workflow's scope regardless of the
+  field's value.
 - **`scripts/validate-schemas.mjs` manifest-aware fixture discovery
   (#258)** — a deliberate, repository-owner-authored local divergence
   from byte-identical vendoring, not a re-import artifact: the shipped
@@ -539,14 +701,35 @@ re-import:
   fixtures (the `vendored-node` profile intentionally curates a
   smaller managed-fixture set than managed-schema set). Fixed locally to
   read the managed-fixture set from `helper-runtime-manifest.mjs`'s own
-  `collectVendoredFiles()` instead. Unlike the `idd-doctor.mjs` entry
-  above, this was **not** filed upstream by this workflow — autonomous
-  upstream filing is out of scope
+  `collectVendoredFiles()` instead. This was **not** filed upstream by
+  this workflow — autonomous upstream filing is out of scope
   ([Upstream-candidate escalation](../.github/instructions/idd-overview-appendix.instructions.md#upstream-candidate-escalation)'s
   "what never to do" prohibits writing to `kurone-kito/idd-skill`, and
-  `upstreamEscalation.enabled` is unset here regardless). Whether to
-  report this upstream, and how to reconcile it with byte-identical
-  vendoring on the next re-sync, is an operator decision outside this
-  workflow; until then, expect `scripts/validate-schemas.mjs` to diff
-  against upstream at the next re-sync and re-apply (or re-evaluate) this
+  `upstreamEscalation.enabled` is unset here regardless). The v0.11.0
+  re-sync (#246) overwrote this local patch with the byte-identical
+  upstream copy as expected, and the divergence was re-applied
+  afterward with two additional review-driven fixes on PR #266 (commit
+  `dfe45c6`, Refs #258): `collectManagedFixtureSchemaNames` now tracks
+  which specific half (valid/invalid) of a fixture pair each schema
+  declares rather than treating any-half-declared as fully managed, and
+  `discoverSchemaCases()` takes an optional `declaredPaths` parameter so
+  it stays unit-testable against a synthetic root. Whether to report
+  this upstream, and how to reconcile it with byte-identical vendoring
+  on the next re-sync, remains an operator decision outside this
+  workflow; expect `scripts/validate-schemas.mjs` to diff against
+  upstream at the next re-sync and re-apply (or re-evaluate) this
   divergence rather than silently overwriting it.
+- **`scripts/validate-schemas.mjs` onboarding-hearing-catalog live-data
+  path assumption (found during #252, unresolved)** — upstream added a
+  live-data validation case at v0.11.0 (`idd-skill#2279`) that reads
+  `idd-template/docs/onboarding/hearing-catalog.json`, assuming the
+  script runs inside the `idd-skill` source repository's own
+  `idd-template/` tree. This repository's real hearing catalog lives at
+  `docs/onboarding/hearing-catalog.json` (no `idd-template/` prefix), so
+  running `node scripts/validate-schemas.mjs` here throws an uncaught
+  `ENOENT` after printing all 20 fixture-pair results — the managed
+  schema/fixture pairs themselves are all complete; only this one
+  hardcoded live-data path is unreachable in a `vendored-node` adopter
+  checkout. Not fixed by #252 (out of its `docs/idd-policy.md`-only
+  scope; `scripts/` is #245/#246/#247's candidate-file territory) — see
+  the #252 PR body for the candidate follow-up.
