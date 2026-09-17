@@ -34,9 +34,13 @@ import {
 import { html as asideEn } from '../../assets/texts/works/works.en.md';
 import { html as asideJa } from '../../assets/texts/works/works.ja.md';
 import worksVrcUi from '../../assets/works/black.kit.vrcui.webp';
+import worksVrcUiSrcset from '../../assets/works/black.kit.vrcui.webp?w=290;400;710;1024&as=srcset';
 import worksDantalion from '../../assets/works/dantalion.webp';
+import worksDantalionSrcset from '../../assets/works/dantalion.webp?w=290;400;710;1024&as=srcset';
 import worksGraphig from '../../assets/works/graphig.webp';
+import worksGraphigSrcset from '../../assets/works/graphig.webp?w=290;400;710;1024&as=srcset';
 import worksLaunchpadIcons from '../../assets/works/launchpad-icons.webp';
+import worksLaunchpadIconsSrcset from '../../assets/works/launchpad-icons.webp?w=290;400;710;1024&as=srcset';
 import {
   createI18NDict,
   createI18NText,
@@ -45,6 +49,28 @@ import {
 } from '../../modules/createI18N.js';
 import { Article } from '../atoms/Article.js';
 import { WorkCard } from '../molecules/WorkCard.js';
+
+/**
+ * The `sizes` attribute for every {@link WorkCard} image, derived from
+ * `organisms/Works.tsx`'s own always-1-column list (`flex flex-col`)
+ * together with `molecules/WorkCard.tsx`'s figure. Below `lg`, the
+ * figure stacks full-width above the card body (100% of the column),
+ * so its slot follows the default `Article` container's own step
+ * function: 100% below `sm`, a fixed 640px cap through the `sm`-`md`
+ * band, then 704px (768 - 64px padding) through the `md`-`lg` band. At
+ * `lg` and up, `lg:card-side` switches the card to a horizontal layout
+ * and the figure is capped by its own `max-w-*` instead (`lg:max-w-72
+ * xl:max-w-96`, unchanged from `xl` through `2xl`), which is narrower
+ * than a full column at either breakpoint.
+ *
+ * The `w=` list's top step (the source assets' native 1024 width)
+ * exists purely for device-pixel-ratio headroom on the full-slot bands
+ * above -- a narrow phone at a common DPR of 2-3 needs 780-1290 device
+ * pixels for a 100vw/640px slot, which this component's own 710px
+ * mid-tier step cannot cover without upscaling.
+ */
+const WORK_CARD_SIZES =
+  '(min-width: 1280px) 384px, (min-width: 1024px) 288px, (min-width: 768px) 704px, (min-width: 640px) 640px, 100vw';
 
 /** The accessor for the aside translated markdown. */
 const asideTranslator = createI18NText({ en: asideEn, ja: asideJa });
@@ -110,7 +136,9 @@ export const Works: Component = () => {
           innerHTML={dantalionBody('text')}
           labelMore={t('learnMore')}
           released={t('released', { year: 2021 })}
+          sizes={WORK_CARD_SIZES}
           src={worksDantalion}
+          srcset={worksDantalionSrcset}
         />
         <WorkCard
           alt={vrcuiAttr('alt')}
@@ -120,7 +148,9 @@ export const Works: Component = () => {
           innerHTML={vrcuiBody('text')}
           labelMore={t('learnMore')}
           released={t('released', { year: 2024 })}
+          sizes={WORK_CARD_SIZES}
           src={worksVrcUi}
+          srcset={worksVrcUiSrcset}
         />
         <WorkCard
           alt={launchpadIconsAttr('alt')}
@@ -130,7 +160,9 @@ export const Works: Component = () => {
           innerHTML={launchpadIconsBody('text')}
           labelMore={t('learnMore')}
           released={t('released', { year: 2024 })}
+          sizes={WORK_CARD_SIZES}
           src={worksLaunchpadIcons}
+          srcset={worksLaunchpadIconsSrcset}
         />
         <WorkCard
           alt={graphigAttr('alt')}
@@ -140,7 +172,9 @@ export const Works: Component = () => {
           innerHTML={graphigBody('text')}
           labelMore={t('learnMore')}
           released={t('released', { year: 2019 })}
+          sizes={WORK_CARD_SIZES}
           src={worksGraphig}
+          srcset={worksGraphigSrcset}
         />
       </ul>
       <aside

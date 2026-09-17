@@ -1,8 +1,12 @@
 import type { Component } from 'solid-js';
 import sceneApexLegends from '../../assets/activities/apex-legends.webp';
+import sceneApexLegendsSrcset from '../../assets/activities/apex-legends.webp?w=400;500;600;730;1280&as=srcset';
 import sceneAmebient from '../../assets/activities/amebient.webp';
+import sceneAmebientSrcset from '../../assets/activities/amebient.webp?w=400;500;600;730;1280&as=srcset';
 import sceneLaunchpadIcons from '../../assets/activities/launchpad-icons.webp';
+import sceneLaunchpadIconsSrcset from '../../assets/activities/launchpad-icons.webp?w=400;500;600;730;1280&as=srcset';
 import sceneUiUxLightningTalk from '../../assets/activities/ui-ux-lightning-talk.webp';
+import sceneUiUxLightningTalkSrcset from '../../assets/activities/ui-ux-lightning-talk.webp?w=400;500;600;730;1280&as=srcset';
 import {
   attributes as devEnA,
   html as devEn,
@@ -43,6 +47,31 @@ import {
 } from '../../modules/createI18N.js';
 import { Activity } from '../atoms/cards/Activity.js';
 import { Article } from '../atoms/Article.js';
+
+/**
+ * The `sizes` attribute for every {@link Activity} card image, derived
+ * from `organisms/Activities.tsx`'s own grid (`grid-cols-1
+ * lg:grid-cols-2`) inside the `Article` container it renders with
+ * (Tailwind's default `container` is a step function, not a
+ * viewport-proportional value: 100% below `sm`, then a fixed
+ * 640px/768px/1024px/1280px/1536px cap per breakpoint): a full slot
+ * below `sm`, the container's own fixed cap for the two 1-column
+ * bands (`sm`-`md`, `md`-`lg`), then roughly half of the container's
+ * capped width (minus the grid's `gap-4` and this page's safe-area
+ * padding) once `lg:grid-cols-2` splits it into 2 columns at `lg`,
+ * `xl`, and `2xl`.
+ *
+ * The `w=` list's own top step (1280, the source assets' native
+ * width) exists only for device-pixel-ratio headroom, not for this
+ * `sizes` value: a narrow phone viewport (this list's smallest real
+ * slot) at a common DPR of 2-3 needs 780-1290 device pixels, well
+ * above the largest CSS slot this component ever renders (728px) --
+ * capping at native keeps a high-DPR/mobile visitor at least as sharp
+ * as before this change, at the cost of not shrinking that one
+ * combination.
+ */
+const ACTIVITY_SIZES =
+  '(min-width: 1536px) 728px, (min-width: 1280px) 600px, (min-width: 1024px) 496px, (min-width: 768px) 704px, (min-width: 640px) 640px, 100vw';
 
 /** The translated attributes for the development activity. */
 const devAttrTranslator = createI18NDict({ en: devEnA, ja: devJaA });
@@ -91,28 +120,36 @@ export const Activities: Component = () => {
           class="prose [&_a]:link"
           heading={devAttr('heading')}
           innerHTML={devBody('text')}
+          sizes={ACTIVITY_SIZES}
           src={sceneLaunchpadIcons}
+          srcset={sceneLaunchpadIconsSrcset}
         />
         <Activity
           alt={meetupAttr('alt')}
           class="prose [&_a]:link"
           heading={meetupAttr('heading')}
           innerHTML={meetupBody('text')}
+          sizes={ACTIVITY_SIZES}
           src={sceneUiUxLightningTalk}
+          srcset={sceneUiUxLightningTalkSrcset}
         />
         <Activity
           alt={gamesAttr('alt')}
           class="prose [&_a]:link"
           heading={gamesAttr('heading')}
           innerHTML={gamesBody('text')}
+          sizes={ACTIVITY_SIZES}
           src={sceneApexLegends}
+          srcset={sceneApexLegendsSrcset}
         />
         <Activity
           alt={othersAttr('alt')}
           class="prose [&_a]:link"
           heading={othersAttr('heading')}
           innerHTML={othersBody('text')}
+          sizes={ACTIVITY_SIZES}
           src={sceneAmebient}
+          srcset={sceneAmebientSrcset}
         />
       </ul>
     </Article>
