@@ -51,6 +51,7 @@ schemas/provider-outage-declaration.schema.json linguist-vendored
 schemas/provider-outage-park.schema.json linguist-vendored
 schemas/resolve-review-thread.schema.json linguist-vendored
 schemas/stalled-session-quiet-check.schema.json linguist-vendored
+scripts/advisory-comment-debounce.mjs linguist-vendored
 scripts/advisory-convergence.mjs linguist-vendored
 scripts/advisory-wait-policy.mjs linguist-vendored
 scripts/advisory-wait-state.mjs linguist-vendored
